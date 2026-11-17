@@ -1,0 +1,10 @@
+.local/
+bin/
+data/
+*.db
+*.db-*
+*.env
+*.log
+coverage.out
+__pycache__/
+*.pyc

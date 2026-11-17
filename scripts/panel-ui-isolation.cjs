@@ -1,0 +1,53 @@
+'use strict';
+const assert=require('assert/strict');
+module.exports=async(context,origin)=>{
+ const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ const waits=[];let heavyReads=0,posts=0,conflict=false,postRevisions=[];
+ await page.route('**/api/state?*',r=>r.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'synthetic summary outage'})}));
+ await page.route('**/api/conversions*',r=>{heavyReads++;return r.continue()});
+ await page.route('**/api/conversion/settings',async r=>{await new Promise(resolve=>waits.push(resolve));await r.continue()});
+ try{
+  await page.goto(origin+'/setting');
+  await page.waitForFunction(()=>!document.querySelector('#request-timeout').disabled);
+  assert.equal(await page.locator('#probe-enabled').isDisabled(),true);
+  assert.equal(heavyReads,0,'settings scanned entire conversion list');
+  waits.splice(0).forEach(resolve=>resolve());await page.unroute('**/api/conversion/settings');
+  await page.waitForFunction(()=>!document.querySelector('#probe-enabled').disabled);
+  assert.equal(await page.locator('#probe-enabled').isChecked(),true);
+  assert.equal(heavyReads,0);
+  // Output listings load even while summary fails; links stay
+  // disabled until their owning API has supplied an actual URL.
+  for(const [path,api,copy,link,view,list] of [
+   ['/output','**/api/conversions?*','#copy-single','#single-url','[data-view]','#output-list'],
+  ]){
+   let release,entered;const started=new Promise(r=>entered=r),held=new Promise(r=>release=r);
+   await page.route(api,async route=>{entered();await held;await route.continue()});
+   await page.goto(origin+path);await started;
+   assert.equal(await page.locator(copy).isDisabled(),true);assert.equal(await page.locator(link).getAttribute('href'),null);
+   release();await page.unroute(api);await page.waitForFunction(selector=>!document.querySelector(selector).disabled,copy);
+   assert((await page.locator(link).getAttribute('href')).startsWith(origin));
+   await page.waitForSelector(view);
+   await page.route('**'+path+'/json/*',async route=>{await page.evaluate(selector=>{const list=document.querySelector(selector);list.innerHTML=list.innerHTML},list);await route.continue()});
+   await page.locator(view).first().click();await page.waitForFunction(selector=>[...document.querySelectorAll(selector+' pre')].some(p=>!p.hidden&&p.textContent.startsWith('{')),list);
+   await page.unroute('**'+path+'/json/*');
+  }
+  await page.unroute('**/api/state?*');
+  await page.route('**/api/state?*',async route=>{
+   const response=await route.fetch(),state=await response.json();
+   const sample=state.sources[0];assert(sample,'fixture source required');
+   state.sources=[{...sample,id:'receipt-example',name:'Receipt fixture',enabled:true,state:'updated',config_count:2,received_count:6,stored_count:2,receipt_unique:2,receipt_new:0,receipt_at:Date.now(),duplicates:6,suppressed_count:0,disabled_count:0,content_state:'config',refresh_reason:''},
+    {...sample,id:'expired-example',name:'Recovery fixture',enabled:true,state:'queued',config_count:0,received_count:6,stored_count:6,receipt_unique:6,receipt_new:0,receipt_at:Date.now()-60000,refresh_reason:'retention'}];
+   state.conversions={};await route.fulfill({response,json:state});
+  });
+  await page.goto(origin+'/input');
+  const receipt=page.locator('[data-id="receipt-example"].source-row');
+  await receipt.locator('summary').click();
+  assert.match(await receipt.locator('.source-count').innerText(),/۲.*ورودی یکتای موجود/s);
+  for(const [label,value] of [['ورودی یکتا در همان پاسخ','۲'],['تکرار داخل همان پاسخ','۴'],['از قبل موجود یا مشترک با منبع دیگر','۲']]){
+   assert.equal(await receipt.locator('.source-data>div').filter({has:page.locator('span',{hasText:label})}).locator('strong').innerText(),value);
+  }
+  assert.match(await page.locator('[data-id="expired-example"] .badge').innerText(),/دریافت تازه/);
+  assert(!await page.locator('[data-id="expired-example"] .badge').innerText().then(v=>v.includes('فعالی')));
+  assert.deepEqual(errors,[]);
+ }finally{waits.forEach(r=>r());await page.close()}
+};

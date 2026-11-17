@@ -1,0 +1,11 @@
+[Unit]
+Description=Config manager bounded test-artifact maintenance
+
+[Timer]
+OnBootSec=15min
+OnUnitInactiveSec=1h
+RandomizedDelaySec=5min
+Unit=config-repair-artifacts.service
+
+[Install]
+WantedBy=timers.target

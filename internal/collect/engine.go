@@ -1,0 +1,456 @@
+package collect
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/resources"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/transient"
+	"io"
+	"log"
+	"net"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/blob"
+)
+
+type Engine struct {
+	repo            Repository
+	vault           *blob.Vault
+	fetch           FetchDriver
+	formats         *Registry
+	inspectors      *InspectionRegistry
+	repairs         *repair.Registry
+	mu              sync.Mutex
+	active          map[string]context.CancelFunc
+	wake            chan struct{}
+	wg              sync.WaitGroup
+	lastTick        atomic.Int64
+	running         atomic.Bool
+	cleaning        atomic.Bool
+	diskBlocked     atomic.Bool
+	capacity        atomic.Int64
+	governor        *resources.Controller
+	budget          resources.Budget
+	resourceBlocked atomic.Bool
+}
+
+func NewEngine(repo Repository, vault *blob.Vault, driver FetchDriver) *Engine {
+	return &Engine{repo: repo, vault: vault, fetch: driver, formats: NewRegistry(), inspectors: NewInspectionRegistry(), repairs: repair.NewRegistry(), active: map[string]context.CancelFunc{}, wake: make(chan struct{}, 1)}
+}
+func (e *Engine) RegisterFormat(driver FormatDriver) { e.formats.Register(driver) }
+func (e *Engine) Wake(id string, cancel bool) {
+	if cancel {
+		e.mu.Lock()
+		if stop := e.active[id]; stop != nil {
+			stop()
+		}
+		e.mu.Unlock()
+	}
+	select {
+	case e.wake <- struct{}{}:
+	default:
+	}
+}
+func (e *Engine) Status() (bool, int, int64) {
+	e.mu.Lock()
+	n := len(e.active)
+	e.mu.Unlock()
+	return e.running.Load(), n, e.lastTick.Load()
+}
+func (e *Engine) Run(ctx context.Context) error {
+	if err := e.repo.Recover(ctx); err != nil {
+		return err
+	}
+	e.running.Store(true)
+	defer e.running.Store(false)
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	cleanup := time.NewTicker(5 * time.Second)
+	defer cleanup.Stop()
+	defer func() {
+		e.mu.Lock()
+		for _, cancel := range e.active {
+			cancel()
+		}
+		e.mu.Unlock()
+		e.wg.Wait()
+	}()
+	for {
+		e.dispatch(ctx)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+		case <-e.wake:
+		case <-cleanup.C:
+			if e.cleaning.CompareAndSwap(false, true) {
+				e.wg.Add(1)
+				go func() {
+					defer e.wg.Done()
+					defer e.cleaning.Store(false)
+					cleanctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+					defer cancel()
+					if err := e.repo.Expire(cleanctx, time.Now()); err != nil {
+						log.Print("collector expiry will retry")
+					}
+					if err := e.vault.Sweep(cleanctx, e.repo.Referenced); err != nil && ctx.Err() == nil {
+						log.Print("collector file cleanup will retry")
+					}
+				}()
+			}
+		}
+	}
+}
+func (e *Engine) dispatch(ctx context.Context) {
+	e.lastTick.Store(time.Now().UnixMilli())
+	settings, err := e.repo.Settings(ctx)
+	if err != nil {
+		log.Print("collector scheduling will retry")
+		return
+	}
+	// Fair bounded admission, independent per-source client/deadline/cancellation.
+	// Capacity is adaptive; it does not limit the number of stored sources/configs.
+	capacity := settings.Concurrency
+	physical := runtime.NumCPU() * 8
+	if physical < 4 {
+		physical = 4
+	}
+	if capacity > physical {
+		capacity = physical
+	}
+	if e.governor != nil {
+		capacity = e.governor.Capacity(capacity, time.Now())
+	}
+	e.resourceBlocked.Store(capacity == 0)
+	e.capacity.Store(int64(capacity))
+	e.mu.Lock()
+	available := capacity - len(e.active)
+	e.mu.Unlock()
+	if available <= 0 {
+		return
+	}
+	var disk syscall.Statfs_t
+	if syscall.Statfs(e.vault.Directory(), &disk) == nil && disk.Bavail*uint64(disk.Bsize) < 256*1024*1024 {
+		e.diskBlocked.Store(true)
+		return
+	}
+	e.diskBlocked.Store(false)
+	permits := []func(){}
+	for i := 0; i < available; i++ {
+		release, ok := e.budget.TryCollection(64 * 1024 * 1024)
+		if !ok {
+			break
+		}
+		permits = append(permits, release)
+	}
+	if len(permits) == 0 {
+		e.resourceBlocked.Store(true)
+		return
+	}
+	available = len(permits)
+	defer func() {
+		for _, release := range permits {
+			if release != nil {
+				release()
+			}
+		}
+	}()
+	jobs, err := e.repo.Claim(ctx, time.Now(), available, LeaseDuration(time.Duration(settings.TimeoutSeconds)*time.Second))
+	if err != nil {
+		log.Print("collector claim will retry")
+		return
+	}
+	for index, job := range jobs {
+		job := job
+		release := permits[index]
+		permits[index] = nil
+		e.mu.Lock()
+		if _, exists := e.active[job.ID]; exists {
+			e.mu.Unlock()
+			release()
+			releaseCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := e.repo.Abandon(releaseCtx, job); err != nil {
+				log.Print("collector discarded claim cleanup will recover by lease")
+			}
+			stop()
+			continue
+		}
+		timeout := settings.TimeoutSeconds
+		if job.TimeoutSeconds > 0 {
+			timeout = job.TimeoutSeconds
+		}
+		jobctx, cancel := context.WithCancel(ctx)
+		e.active[job.ID] = cancel
+		e.mu.Unlock()
+		e.wg.Add(1)
+		go func() {
+			defer release()
+			defer e.wg.Done()
+			defer cancel()
+			defer func() { e.mu.Lock(); delete(e.active, job.ID); e.mu.Unlock(); e.Wake("", false) }()
+			e.runJobWithTimeout(jobctx, job, time.Duration(timeout)*time.Second)
+		}()
+	}
+}
+func (e *Engine) runJob(ctx context.Context, job Job) {
+	timeout := 30 * time.Second
+	if job.TimeoutSeconds > 0 {
+		timeout = time.Duration(job.TimeoutSeconds) * time.Second
+	}
+	e.runJobWithTimeout(ctx, job, timeout)
+}
+func (e *Engine) runJobWithTimeout(parent context.Context, job Job, fetchTimeout time.Duration) {
+	e.runJobWithBudgets(parent, job, fetchTimeout, ProcessingTimeout)
+}
+func (e *Engine) runJobWithBudgets(parent context.Context, job Job, fetchTimeout, processTimeout time.Duration) {
+	ctx, fetchCancel := context.WithTimeout(parent, fetchTimeout)
+	defer fetchCancel()
+	started := time.Now()
+	result := Result{State: "error"}
+	pins := []string{}
+	defer func() {
+		if recover() != nil {
+			result = Result{State: "error", ErrorCode: "worker_recovered"}
+		}
+		result.DurationMS = time.Since(started).Milliseconds()
+		commitctx, cancel := context.WithTimeout(context.Background(), CompletionTimeout)
+		defer cancel()
+		if err := e.repo.Complete(commitctx, job, result, time.Now()); err != nil {
+			log.Print("collector result rejected or pending lease recovery")
+		}
+		for _, hash := range pins {
+			e.vault.Release(hash)
+		}
+	}()
+	phase := "fetch"
+	fetchMS := int64(0)
+	response, err := e.fetch.Fetch(ctx, job)
+	if err != nil {
+		result.ErrorCode = phaseError(phase, err)
+		return
+	}
+	defer response.Body.Close()
+	result.HTTPStatus = response.Status
+	result.ETag = response.ETag
+	result.Modified = response.Modified
+	if response.Status == 304 {
+		result.State = "unchanged"
+		return
+	}
+
+	spool, spoolPath, err := transient.NewFile()
+	if err != nil {
+		result.ErrorCode = "storage_error"
+		return
+	}
+	defer spool.Close()
+	_, err = io.Copy(spool, &contextReader{ctx, response.Body})
+	if err != nil && errors.Is(err, io.ErrUnexpectedEOF) && response.Chunked && response.Status >= 200 && response.Status < 300 && ctx.Err() == nil {
+		if recovery, ok := e.fetch.(BodyRecoveryDriver); ok {
+			_ = response.Body.Close()
+			// No bytes from the failed attempt can enter storage or parsing.
+			if resetErr := spool.Truncate(0); resetErr != nil {
+				result.ErrorCode = "storage_error"
+				return
+			}
+			if _, resetErr := spool.Seek(0, io.SeekStart); resetErr != nil {
+				result.ErrorCode = "storage_error"
+				return
+			}
+			response, err = recovery.RecoverBody(ctx, job, response, err)
+			if err == nil {
+				defer response.Body.Close()
+				result.HTTPStatus, result.ETag, result.Modified = response.Status, response.ETag, response.Modified
+				if response.Status == 304 {
+					result.ErrorCode = "incomplete_body"
+					return
+				}
+				_, err = io.Copy(spool, &contextReader{ctx, response.Body})
+				if err == nil {
+					log.Printf("collector body recovery driver=%s rule=%s", e.fetch.Name(), response.RecoveryRule)
+				}
+			}
+		}
+	}
+	if err != nil {
+		result.ErrorCode = phaseError(phase, err)
+		return
+	}
+	_ = response.Body.Close()
+	fetchCancel()
+	fetchMS = time.Since(started).Milliseconds()
+	ctx, processCancel := context.WithTimeout(parent, processTimeout)
+	defer processCancel()
+	phase = "processing"
+	defer func() {
+		log.Printf("collector phases fetch_ms=%d processing_ms=%d extracted=%d code=%s", fetchMS, time.Since(started).Milliseconds()-fetchMS, result.Extracted, result.ErrorCode)
+	}()
+	if _, err = spool.Seek(0, io.SeekStart); err != nil {
+		result.ErrorCode = "storage_error"
+		return
+	}
+	raw, err := e.vault.Put(ctx, &contextReader{ctx, spool})
+	if err != nil {
+		result.ErrorCode = phaseError(phase, err)
+		return
+	}
+	pins = append(pins, raw.Hash)
+	result.Raw = raw
+	if response.Status < 200 || response.Status >= 300 {
+		result.ErrorCode = "http_error"
+		result.ContentState = "http_error"
+		return
+	}
+	unique := 0
+	batch := newStageBuffer(e.repo, e.vault, job)
+	defer batch.release()
+	result.Staged = true
+	err = e.formats.Extract(ctx, spoolPath, func(ctx context.Context, r io.Reader, kind string) error {
+		sample := &sampleWriter{}
+		ref, err := e.vault.Put(ctx, io.TeeReader(r, sample))
+		if err != nil {
+			return err
+		}
+		batch.pin(ref.Hash)
+		identity := Fingerprint(sample.data, ref.Size <= int64(len(sample.data)), kind, ref.Hash)
+		quality := e.inspectors.Inspect(sample.data, ref.Size <= int64(len(sample.data)), kind)
+		switch quality {
+		case "valid":
+			result.ValidCount++
+		case "invalid":
+			result.InvalidCount++
+		default:
+			result.UnknownCount++
+		}
+		result.Extracted++
+		diagnostic := e.repairs.Propose(sample.data, ref.Size <= int64(len(sample.data)), kind, quality)
+		var candidate blob.Ref
+		if len(diagnostic.Candidate) > 0 {
+			if e.inspectors.Inspect(diagnostic.Candidate, true, kind) != "valid" {
+				diagnostic.Status = "blocked"
+				diagnostic.Candidate = nil
+				diagnostic.CandidateSHA256 = ""
+			} else {
+				candidate, err = e.vault.Put(ctx, bytes.NewReader(diagnostic.Candidate))
+				if err != nil {
+					diagnostic.Status = "blocked"
+					diagnostic.Candidate = nil
+					diagnostic.CandidateSHA256 = ""
+				} else {
+					batch.pin(candidate.Hash)
+				}
+			}
+		}
+		diagnostic.OriginalSHA256 = ref.Hash
+		diagnostic.Candidate = nil // Persisted separately; never retain payloads in the metadata batch.
+		return batch.add(ctx, Item{Ref: ref, Identity: identity, Kind: kind, Quality: quality, Repair: diagnostic, Candidate: candidate})
+	})
+	if err == nil || IsContentError(err) {
+		if flushErr := batch.flush(ctx); flushErr != nil {
+			err = flushErr
+		}
+	}
+	unique = batch.unique
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	if err != nil && !IsContentError(err) {
+		result.ErrorCode = phaseError(phase, err)
+		return
+	}
+	if err != nil {
+		result.InvalidCount++
+		result.ErrorCode = "invalid_content"
+		if err != nil && err.Error() == "orphan_wireguard_section" {
+			result.ErrorCode = "orphan_wireguard_section"
+		}
+	}
+	result.ContentState = ContentState(spoolPath, result.ValidCount, result.InvalidCount, result.UnknownCount)
+	result.State = "updated"
+	if unique == 0 {
+		result.State = "empty"
+		if result.ContentState != "empty" {
+			result.State = "invalid"
+		}
+	}
+	if result.ContentState == "partial" || result.ContentState == "invalid" {
+		result.ErrorCode = "invalid_content"
+		if err != nil && err.Error() == "orphan_wireguard_section" {
+			result.ErrorCode = "orphan_wireguard_section"
+		}
+	}
+
+}
+
+type sampleWriter struct{ data []byte }
+
+func (w *sampleWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := 1024*1024 - len(w.data)
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		w.data = append(w.data, p...)
+	}
+	return n, nil
+}
+func errorCode(err error) string {
+	if errors.Is(err, ErrBlocked) {
+		return "blocked_destination"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return "dns_error"
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timeout"
+	}
+	return "fetch_or_parse_error"
+}
+
+func (e *Engine) BlockedReason() string {
+	if e.resourceBlocked.Load() {
+		return "resource_pressure"
+	}
+	if e.diskBlocked.Load() {
+		return "storage_low"
+	}
+	return ""
+}
+
+func (e *Engine) Capacity() int { return int(e.capacity.Load()) }
+
+func (e *Engine) RegisterInspector(driver InspectionDriver) { e.inspectors.Register(driver) }
+
+func (e *Engine) RegisterRepair(d repair.CandidateDriver) { e.repairs.Register(d) }
+
+func phaseError(phase string, err error) string {
+	code := errorCode(err)
+	if code == "timeout" {
+		return phase + "_timeout"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "incomplete_body"
+	}
+	return code
+}
+
+// SetResourceController installs the host-admission driver before Run.
+func (e *Engine) SetResourceController(g *resources.Controller) { e.governor = g }
+
+// SetResourceBudget installs shared peak-memory reservations before Run.
+func (e *Engine) SetResourceBudget(b resources.Budget) { e.budget = b }
