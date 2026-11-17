@@ -32,3 +32,5 @@
 body[data-page="egress"] #stat-retention{font-size:17px;white-space:normal;line-height:1.5}body[data-page="egress"] .page-heading>div{min-width:0}body[data-page="egress"] #page-title{overflow-wrap:anywhere}
 
 .country-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;max-height:340px;overflow:auto;padding:12px 2px}.country-option{display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:8px}.country-option input{width:auto!important;flex:none}#country-search{width:100%;margin:10px 0}#country-summary{display:block;overflow-wrap:anywhere}
+
+.network-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:20px 0 32px}.network-card{background:var(--surface,#fff);border:1px solid #e7e5f1;border-radius:16px;padding:20px;min-width:0}.network-card h4{margin:0 0 12px;font-size:18px}.network-card p{font-size:13px;color:#77758a}.network-link{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:14px}.network-link a{font-size:13px;overflow-wrap:anywhere}.network-link button{white-space:nowrap;font-size:12px;padding:8px 10px}

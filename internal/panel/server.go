@@ -98,7 +98,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(assets, "web")
 	files := http.StripPrefix("/assets/", http.FileServer(http.FS(static)))
-	for _, asset := range []string{"style.css", "egress.js", "egress-countries.js", "egress-health.js", "egress-evidence.js", "egress-accounting.js", "egress-profiles.js", "egress-rescan.js", "auto-policy.js", "app.js", "core.js", "poll.js", "settings-form.js", "input.js", "source-status.js", "output.js", "setting.js", "actions.js", "diagnostics.js", "repairs.js", "Vazirmatn.woff2"} {
+	for _, asset := range []string{"style.css", "datacenter.js", "egress.js", "egress-countries.js", "egress-health.js", "egress-evidence.js", "egress-accounting.js", "egress-profiles.js", "egress-rescan.js", "auto-policy.js", "app.js", "core.js", "poll.js", "settings-form.js", "input.js", "source-status.js", "output.js", "setting.js", "actions.js", "diagnostics.js", "repairs.js", "Vazirmatn.woff2"} {
 		mux.Handle("GET /assets/"+asset, files)
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +122,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/input", 303) })
 	}
-	for _, page := range []string{"input", "output", "setting", "egress"} {
+	for _, page := range []string{"input", "output", "setting", "egress", "datacenter"} {
 		page := page
 		mux.HandleFunc("GET /"+page, func(w http.ResponseWriter, r *http.Request) {
 			token := s.token(r)
@@ -135,7 +135,7 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 	mux.HandleFunc("GET /api/state", s.state)
-	modules := []PanelModule{egressModule{s}, inputModule{s}, outputModule{s}, settingModule{s}, conversionModule{s}, rotationModule{s}, sourceExportModule{s}}
+	modules := []PanelModule{networkModule{s}, egressModule{s}, inputModule{s}, outputModule{s}, settingModule{s}, conversionModule{s}, rotationModule{s}, sourceExportModule{s}}
 	s.modulesMu.RLock()
 	modules = append(modules, s.modules...)
 	s.modulesMu.RUnlock()

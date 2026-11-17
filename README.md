@@ -57,3 +57,7 @@ cat /etc/config-repair/access.txt
 Go 1.27.1، Python 3.11+ و Node.js برای تست‌های JavaScript لازم‌اند. `go test ./...` تست‌های Go را اجرا می‌کند. `scripts/check.sh` مجموعهٔ گسترده‌تر و race detector را اجرا می‌کند. تست‌های شبکه/اندروید نیازمند محیط و مجوزهای واقعی‌اند و به‌صورت ضمنی در نصب عادی اجرا نمی‌شوند.
 
 [گزارش اعتبارسنجی](docs/VALIDATION.md) | [راهنمای عملیات](docs/OPERATIONS.md)
+
+## Datacenter and CDN
+
+The **Datacenter** page adds 10 named hosting providers plus Unknown, five CDN providers, Non-CDN and CDN Unknown. Every group has raw and independently rotating single-template URLs. Classification runs automatically in the background. See [the evidence model and operating limits](docs/DATACENTER.md).

@@ -78,6 +78,16 @@ const dir=process.env.PANEL_TEST_DIR,origin=process.env.PANEL_TEST_ORIGIN||'http
   await wait(async()=>(await(await context.request.get(origin+'/api/conversions')).json()).entries.length===2);
   assert.equal((await state()).stats.configs,2);await noOverflow();await page.screenshot({path:dir+'/restored-source.png',fullPage:true});
  }
+ await page.goto(origin+'/datacenter');
+ await page.waitForFunction(()=>document.querySelectorAll('.network-card').length===18);
+ assert.equal(await page.locator('#datacenter-groups .network-card').count(),11);
+ assert.equal(await page.locator('#cdn-groups .network-card').count(),7);
+ assert.equal(await page.locator('[data-network-copy]').count(),36);
+ const network=(await(await context.request.get(origin+'/api/datacenter')).json());
+ assert.equal(network.total,2);assert.equal(network.datacenters.reduce((n,g)=>n+g.raw_count,0),2);assert.equal(network.cdns.reduce((n,g)=>n+g.raw_count,0),2);
+ for(const width of [390,1440]){await page.setViewportSize({width,height:900});await noOverflow();await page.screenshot({path:dir+'/datacenter-'+width+'.png',fullPage:true})}
+ const unknown=network.datacenters.find(g=>g.id==='unknown');assert.equal((await context.request.get(unknown.raw_url)).status(),200);assert.equal((await context.request.get(unknown.single_url)).status(),200);
+ await page.setViewportSize({width:390,height:844});await page.locator('#menu-button').click();assert.equal(await page.locator('#nav-drawer a[href="/datacenter"]').count(),1);await page.locator('#nav-drawer [data-close]').click();
  console.error('browser checkpoint: ordinary outputs passed');
  await page.goto(origin+'/setting');await page.waitForFunction(()=>document.querySelector('#probe-concurrency').value!=='');await page.setViewportSize({width:390,height:844});await noOverflow();
  if(phase==='1'){await page.locator('#retention-hours').fill('۱۰');await page.locator('#request-timeout').fill('۱۹');await page.getByRole('button',{name:'ذخیرهٔ تنظیمات',exact:true}).click();await wait(async()=>(await state()).settings.timeout_seconds===19);assert.equal((await state()).settings.retention_seconds,36000);await page.locator('#probe-health_ttl_seconds').fill('۱۰');await page.locator('#probe-concurrency').fill('3');await page.locator('#probe-settings button').click();await wait(async()=>(await(await context.request.get(origin+'/api/conversions')).json()).settings.concurrency===3)}

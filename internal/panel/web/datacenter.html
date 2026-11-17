@@ -1,0 +1,8 @@
+{{define "datacenter"}}
+<section class="panel"><div class="panel-heading"><div><h2>دیتاسنتر و CDN</h2><p>هر گروه لینک خام و لینک تک‌کانفیگ چرخشی مستقل دارد. خروجی چرخشی از همان قالب و تأیید سلامت بخش Output استفاده می‌کند.</p></div></div>
+<p class="hint">تشخیص مربوط به IP ورودیِ اتصال است، نه IP خروجی VPN یا مکان فیزیکی سرور. پشت CDN، دیتاسنتر اصلی پنهان است و «ناشناس» می‌ماند. نام کانفیگ، SNI و Host مدرک دیتاسنتر نیستند.</p>
+<p class="hint">Non-CDN یعنی در فهرست‌های معتبر این پنج CDN شناسایی نشده است؛ نبودِ تمام CDNهای جهان را اثبات نمی‌کند. DNS ناموفق، شواهد متناقض و اطلاعات منقضی در گروه نامشخص قرار می‌گیرند.</p>
+<p id="network-status" class="hint" role="status">در حال دریافت وضعیت…</p><p id="network-feeds" class="hint"></p>
+<h3>دیتاسنترها</h3><div id="datacenter-groups" class="network-grid"></div>
+<h3>شبکه‌های CDN</h3><div id="cdn-groups" class="network-grid"></div></section>
+{{end}}

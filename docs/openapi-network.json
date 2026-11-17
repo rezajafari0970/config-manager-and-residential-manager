@@ -1,0 +1,94 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Config Manager network grouping API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/datacenter": {
+      "get": {
+        "summary": "Group counts, scoped export URLs, pending work and feed validity",
+        "responses": {
+          "200": {
+            "description": "datacenters (11), cdns (7), total, pending, feeds, now; each group includes id, name, raw_count, ready_count, raw_url, single_url"
+          },
+          "503": {
+            "description": "Store temporarily unavailable"
+          }
+        }
+      }
+    },
+    "/subscription/network/{axis}/{group}/{token}/{file}": {
+      "parameters": [
+        {
+          "name": "axis",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "datacenter",
+              "cdn"
+            ]
+          }
+        },
+        {
+          "name": "group",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "token",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "file",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "raw.txt",
+              "next.json"
+            ]
+          }
+        }
+      ],
+      "get": {
+        "summary": "Immutable raw bodies or one existing healthy template; independent group rotation",
+        "responses": {
+          "200": {
+            "description": "Exact group member(s); X-Config-Count, X-Content-SHA256, X-Network-Axis, X-Network-Group; next.json also X-Export-Cycle"
+          },
+          "204": {
+            "description": "No eligible current members; no fallback"
+          },
+          "404": {
+            "description": "Invalid scope, format or token"
+          },
+          "503": {
+            "description": "Temporary failure; no cross-group output"
+          }
+        }
+      },
+      "head": {
+        "summary": "Validate token and scope without consuming a rotation turn",
+        "responses": {
+          "200": {
+            "description": "Valid link (does not imply group is populated)"
+          },
+          "404": {
+            "description": "Invalid scoped token"
+          }
+        }
+      }
+    }
+  }
+}
