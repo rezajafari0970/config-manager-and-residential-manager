@@ -33,6 +33,7 @@ type Store struct {
 	key           []byte
 	vault         *blob.Vault
 	probeTurn     atomic.Uint64
+	renewalTurn   atomic.Uint64
 	rotationMu    sync.Mutex
 	rotationLocks map[string]*rotationLock
 }

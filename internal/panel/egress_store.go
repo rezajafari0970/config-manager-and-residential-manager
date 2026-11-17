@@ -95,9 +95,21 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 		filters = []string{safety, ` AND (ever_accepted=1 OR tested>0)`, ` AND tested=0`, ""}
 		order = ` ORDER BY ` + priority + ` ELSE 3 END,next_run,first_seen,egress_jobs.hash LIMIT 1`
 	}
-	for _, filter := range filters {
+	// Every third follow-up admits the oldest expired accepted proof before
+	// repeatedly urgent healthy/retirement work. It remains unpublished until a
+	// new full proof passes; no TTL extension or safety bypass is involved.
+	expiredTurn := lane == "followup" && s.renewalTurn.Add(1)%3 == 0
+	if expiredTurn {
+		filters = append([]string{` AND ever_accepted=1 AND valid_until<=CAST(unixepoch('subsec')*1000 AS INTEGER)`}, filters...)
+	}
+	for turn, filter := range filters {
 		args := []any{now, now}
-		e = tx.QueryRowContext(ctx, base+filter+order, args...).Scan(&j.Hash, &j.Kind, &size, &j.Revision, &j.Deep, &j.Attempt, &state, &previousToken)
+		e = tx.QueryRowContext(ctx, base+filter+func() string {
+			if expiredTurn && turn == 0 {
+				return " ORDER BY next_run,claimed_at,first_seen,egress_jobs.hash LIMIT 1"
+			}
+			return order
+		}(), args...).Scan(&j.Hash, &j.Kind, &size, &j.Revision, &j.Deep, &j.Attempt, &state, &previousToken)
 		if !errors.Is(e, sql.ErrNoRows) {
 			break
 		}

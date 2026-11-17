@@ -26,4 +26,25 @@ class QualityTests(unittest.TestCase):
  def test_timeout_cannot_be_success(self):
   with patch.object(q.subprocess,'run',side_effect=subprocess.TimeoutExpired('curl',20)):
    self.assertEqual(q.request('https://www.gstatic.com/generate_204',20)['status'],'failed')
+ def test_only_transient_failed_leg_retries_and_keeps_full_contract(self):
+  for failure in ('download','upload','recheck'):
+   calls=[]
+   def request(url,timeout,payload=None,size=None,http1=False):
+    name='upload' if payload else 'download' if size else 'recheck';calls.append((name,http1,timeout))
+    fail=name==failure and not http1
+    return {'status':'failed' if fail else 'passed','bytes':(q.UPLOAD if payload else q.DOWNLOAD if size else 0),'ms':10,'curl_exit':28 if fail else 0,'http_status':0 if fail else 204 if name=='recheck' else 200}
+   with patch.object(q,'request',side_effect=request):e=q.run(10)
+   self.assertTrue(q.verified(e));self.assertEqual(len(calls),4)
+   self.assertEqual([n for n,h,t in calls if h],[failure])
+   self.assertEqual(e['payload_'+failure+'_attempts'],'2')
+ def test_tls_rejection_not_retried_or_promoted(self):
+  def request(url,timeout,payload=None,size=None,http1=False):
+   return {'status':'failed','bytes':0,'ms':1,'curl_exit':60,'http_status':0}
+  with patch.object(q,'request',side_effect=request) as run:e=q.run(10)
+  self.assertFalse(q.verified(e));self.assertEqual(run.call_count,3)
+ def test_repeated_partial_bytes_never_qualify(self):
+  def request(url,timeout,payload=None,size=None,http1=False):
+   return {'status':'failed','bytes':100,'ms':1,'curl_exit':18,'http_status':200}
+  with patch.object(q,'request',side_effect=request):e=q.run(10)
+  self.assertFalse(q.verified(e));self.assertEqual(e['payload_download_attempts'],'2')
 if __name__=='__main__':unittest.main()

@@ -40,9 +40,10 @@ class ClientGateTest(unittest.TestCase):
             self.assertEqual(box.core,pathlib.Path('/original'))
     def test_runtime_uses_bundled_core_and_restores_on_failure(self):
         box=FakeBox();candidate={'sha256':'unchanged'}
-        def execute(b,c,t):
+        def execute(b,c,t,validated_sha256=None):
             self.assertEqual(b.core,pathlib.Path('/bundled'))
             self.assertIs(c,candidate);self.assertEqual(t,7)
+            self.assertEqual(validated_sha256,candidate['sha256'])
             return {'connection':'passed'}
         with patch.object(driver.lab,'test_candidate',side_effect=execute):
             r=driver.run_target(box,candidate,7,'/bundled')
@@ -51,6 +52,16 @@ class ClientGateTest(unittest.TestCase):
         with patch.object(driver.lab,'test_candidate',side_effect=ValueError('synthetic')):
             with self.assertRaises(ValueError):driver.run_target(box,candidate,7,'/bundled')
         self.assertEqual(box.core,pathlib.Path('/original'));self.assertEqual(box.stops,2)
+    def test_peer_close_retries_one_fresh_exact_session_but_auth_does_not(self):
+        candidate={'sha256':'same-bytes'}
+        for code,want in [('peer_closed_connection',2),('peer_reset_connection',2),('proxy_request_failed',2),('reality_authentication_rejected',1),('client_core_incompatible',1)]:
+            box=FakeBox();failure={'core':'passed','connection':'failed','code':code}
+            with patch.object(driver.lab,'test_candidate',side_effect=lambda *a,**k:dict(failure)) as run:
+                result=driver.run_target(box,candidate,7,'/bundled')
+                self.assertEqual(run.call_count,want)
+                self.assertEqual(result['connection'],'failed')
+                for call in run.call_args_list:self.assertIs(call.args[1],candidate)
+            self.assertEqual(box.core,pathlib.Path('/original'))
     def test_app_array_object_and_relay_preservation(self):
         root={'inbounds':[{'tag':'relay','protocol':'dokodemo-door','listen':'127.0.0.1','port':39081}], 'outbounds':[], 'routing':{'rules':[{'inboundTag':['relay'],'outboundTag':'carrier'}]},'stats':{},'policy':{'levels':{'0':{'handshake':12}},'system':{'statsInboundUplink':True}}}
         before=copy.deepcopy(root)

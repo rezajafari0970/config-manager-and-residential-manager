@@ -141,6 +141,14 @@ class ProbeTests(unittest.TestCase):
    self.assertEqual(set(p.endpoints(c)),{'1.1.1.1','8.8.8.8'})
   self.assertEqual(p.runtime_config(c,{}),original)
   self.assertEqual(c,original)
+  masked=copy.deepcopy(c)
+  mask={'tcp':[{'type':'fragment','settings':{'packets':'1-1','lengths':['1'],'delays':['4']}}]}
+  masked['outbounds'][0]['streamSettings']['finalmask']=mask
+  with patch.object(p,'cmd',return_value=R()):self.assertEqual(set(p.endpoints(masked)),{'1.1.1.1','8.8.8.8'})
+  self.assertEqual(p.runtime_config(masked,{}),masked)
+  for badmask in [None,{'tcp':[{'type':'xdns'}]},{'udp':[]},{'future':True}]:
+   bad=copy.deepcopy(masked);bad['outbounds'][0]['streamSettings']['finalmask']=badmask
+   with self.assertRaises(ValueError):p.runtime_config(bad,{})
   for value in ['127.0.0.1:443','1.1.1.1:444','1.1.1.1:0','bad value:443']:
    bad=copy.deepcopy(c);bad['outbounds'][1]['settings']['redirect']=value
    with self.assertRaises(ValueError):p.runtime_config(bad,{})

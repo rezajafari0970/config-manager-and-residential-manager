@@ -146,6 +146,10 @@ func (b Budget) try(bytes, available, limit int64, alive func(int) (string, erro
 	return b.tryClass(bytes, available, limit, alive, false)
 }
 func (b Budget) tryClass(bytes, available, limit int64, alive func(int) (string, error), control bool) (func(), bool) {
+	return b.tryDemand(bytes, available, limit, alive, control, false)
+}
+
+func (b Budget) tryDemand(bytes, available, limit int64, alive func(int) (string, error), control, priority bool) (func(), bool) {
 	if bytes <= 0 || available < 512*1024*1024+bytes {
 		return nil, false
 	}
@@ -178,6 +182,36 @@ func (b Budget) tryClass(bytes, available, limit int64, alive func(int) (string,
 	entries, e := os.ReadDir(b.Directory)
 	if e != nil {
 		return nil, false
+	}
+	// A short-lived waiting ordinary probe can accumulate its larger permit
+	// instead of losing every released 128MiB chunk to a smaller Ads job.
+	var pending int64
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "demand-") {
+			continue
+		}
+		path := filepath.Join(b.Directory, entry.Name())
+		s, e := os.Lstat(path)
+		if e != nil || !s.Mode().IsRegular() || s.Size() > 1024 {
+			return nil, false
+		}
+		data, e := os.ReadFile(path)
+		if e != nil || len(data) > 1024 {
+			return nil, false
+		}
+		var d demand
+		if json.Unmarshal(data, &d) != nil || d.PID < 1 || d.Start == "" || d.Bytes < 1 {
+			return nil, false
+		}
+		start, e := alive(d.PID)
+		if os.IsNotExist(e) || (e == nil && start != d.Start) || time.Now().UnixMilli() > d.Until {
+			os.Remove(path)
+			continue
+		}
+		if e != nil {
+			return nil, false
+		}
+		pending = max(pending, d.Bytes)
 	}
 	var used int64
 	for _, entry := range entries {
@@ -214,12 +248,24 @@ func (b Budget) tryClass(bytes, available, limit int64, alive func(int) (string,
 			continue
 		}
 		if r.Bytes > limit-used {
+			if priority {
+				b.rememberDemand(bytes, alive, owner)
+			}
 			return nil, false
 		}
 		used += r.Bytes
 	}
-	if bytes > limit-used {
+	if !control && !priority && pending > 0 && bytes > limit-used-pending {
 		return nil, false
+	}
+	if bytes > limit-used {
+		if priority {
+			b.rememberDemand(bytes, alive, owner)
+		}
+		return nil, false
+	}
+	if priority {
+		os.Remove(filepath.Join(b.Directory, fmt.Sprintf("demand-%d.json", os.Getpid())))
 	}
 	start, e := alive(os.Getpid())
 	if e != nil {
@@ -253,4 +299,52 @@ func (b Budget) tryClass(bytes, available, limit int64, alive func(int) (string,
 		return nil, false
 	}
 	return func() { _ = os.Remove(path) }, true
+}
+
+// TryProbe borrows no fixed reserve: only a currently waiting probe briefly
+// defers smaller admissions. Running work and the 512MiB floor remain intact.
+func (b Budget) TryProbe(bytes int64) (func(), bool) {
+	if b.Directory == "" {
+		return func() {}, true
+	}
+	available, limit, e := sharedHeadroom()
+	if e != nil {
+		return nil, false
+	}
+	return b.tryDemand(bytes, available, limit, processStart, false, true)
+}
+
+type demand struct {
+	PID          int
+	Start        string
+	Bytes, Until int64
+}
+
+func (b Budget) rememberDemand(bytes int64, alive func(int) (string, error), owner *syscall.Stat_t) {
+	start, e := alive(os.Getpid())
+	if e != nil {
+		return
+	}
+	data, _ := json.Marshal(demand{os.Getpid(), start, bytes, time.Now().Add(3 * time.Second).UnixMilli()})
+	f, e := os.CreateTemp(b.Directory, "waiting-")
+	if e != nil {
+		return
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if os.Geteuid() == 0 {
+		if f.Chown(int(owner.Uid), int(owner.Gid)) != nil {
+			return
+		}
+	}
+	if f.Chmod(0660) != nil {
+		return
+	}
+	if _, e = f.Write(data); e != nil {
+		return
+	}
+	if f.Close() != nil {
+		return
+	}
+	os.Rename(f.Name(), filepath.Join(b.Directory, fmt.Sprintf("demand-%d.json", os.Getpid())))
 }

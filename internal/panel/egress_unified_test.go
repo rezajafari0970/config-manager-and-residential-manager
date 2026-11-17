@@ -303,3 +303,39 @@ func TestUnifiedExpiredProofUsesFollowupWithoutStarvingInitial(t *testing.T) {
 		t.Fatal("expired proof was abandoned instead of rechecked", err)
 	}
 }
+
+func TestExpiredRenewalGetsBoundedTurnDespiteUrgentWork(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	newExportSource(t, s, "fair-renewal", sourceURI(747), sourceURI(748), sourceURI(749), sourceURI(750))
+	var jobs []*egress.Job
+	for range 4 {
+		j, err := s.ClaimEgress(ctx)
+		if err != nil || j == nil {
+			t.Fatal(err)
+		}
+		jobs = append(jobs, j)
+	}
+	now := egress.Now()
+	if _, err := s.db.Exec("UPDATE egress_jobs SET token='',lease_until=0,ever_accepted=1,tested=?,state='RESIDENTIAL',next_run=0,valid_until=?", now, now+60000); err != nil {
+		t.Fatal(err)
+	}
+	old := jobs[0].Hash
+	if _, err := s.db.Exec("UPDATE egress_jobs SET state='QUARANTINED',valid_until=0,next_run=1,reason='evidence_expired' WHERE hash=?", old); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		j, err := s.ClaimEgressLane(ctx, "followup")
+		if err != nil || j == nil {
+			t.Fatal(err)
+		}
+		if (i == 2) != (j.Hash == old) {
+			t.Fatal("expired/safety turn fairness lost", i, j.Hash == old)
+		}
+	}
+	var until int64
+	s.db.QueryRow("SELECT valid_until FROM egress_jobs WHERE hash=?", old).Scan(&until)
+	if until != 0 {
+		t.Fatal("unverified proof extended")
+	}
+}

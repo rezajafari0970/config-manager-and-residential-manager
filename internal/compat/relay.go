@@ -369,7 +369,10 @@ func eligible(ob M, e endpoint) error {
 			}
 		}
 	}
-	for _, key := range []string{"finalmask", "address", "port"} {
+	if mask, exists := s["finalmask"]; exists && !relayTCPMask(mask, network) {
+		return errors.New("relay_stream_override_requires_driver")
+	}
+	for _, key := range []string{"address", "port"} {
 		if _, ok := s[key]; ok {
 			return errors.New("relay_stream_override_requires_driver")
 		}
@@ -386,6 +389,35 @@ func eligible(ob M, e endpoint) error {
 		}
 	}
 	return nil
+}
+
+// Fragment wraps the existing TCP connection, including a dialerProxy pipe.
+// Keep it on the original stream, byte-for-byte. Masks that dial another
+// destination, UDP transports and unknown extensions need their own driver.
+func relayTCPMask(value any, network string) bool {
+	switch network {
+	case "", "tcp", "raw", "ws", "websocket", "httpupgrade", "grpc", "xhttp", "splithttp":
+	default:
+		return false
+	}
+	m, ok := value.(M)
+	if !ok || !allowedKeys(m, "tcp") {
+		return false
+	}
+	if len(m) == 0 {
+		return true
+	}
+	masks, ok := m["tcp"].([]any)
+	if !ok {
+		return false
+	}
+	for _, value := range masks {
+		mask, ok := value.(M)
+		if !ok || mask["type"] != "fragment" || !allowedKeys(mask, "type", "settings") {
+			return false
+		}
+	}
+	return true
 }
 
 // Wrap replaces only the carrier destination; protocol/header/credentials stay intact.

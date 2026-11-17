@@ -22,3 +22,19 @@ func TestInvestigationLanesAtEveryPositiveCapacity(t *testing.T) {
 		}
 	}
 }
+
+func TestFollowupsSurvivePartialMemoryAdmission(t *testing.T) {
+	for cap := 2; cap <= 31; cap++ {
+		for admitted := 2; admitted <= cap; admitted++ {
+			follow := 0
+			for slot := 1; slot <= admitted; slot++ {
+				if investigationLane(slot, cap, 0) == "followup" {
+					follow++
+				}
+			}
+			if follow == 0 {
+				t.Fatal("renewals starved", cap, admitted)
+			}
+		}
+	}
+}

@@ -1,15 +1,15 @@
 package main
 
-// Reserve follow-up capacity even under resource pressure. A single surviving
-// slot rotates every fifth completed claim; idle lanes can steal in the store.
+// Interleave follow-up slots at every admitted prefix, including when shared
+// memory permits admit fewer slots than the CPU governor advertises.
 func investigationLane(slot, capacity int, claims uint64) string {
 	if capacity == 1 {
-		if claims%5 == 4 {
+		if claims%3 == 2 {
 			return "followup"
 		}
 		return "initial"
 	}
-	if capacity > 1 && slot > capacity-max(1, (capacity+4)/5) {
+	if slot%2 == 0 {
 		return "followup"
 	}
 	return "initial"

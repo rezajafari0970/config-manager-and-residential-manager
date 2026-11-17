@@ -5,9 +5,55 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 const gib = int64(1024 * 1024 * 1024)
+
+func TestWaitingLargeProbeAccumulatesReleasedMemory(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0700)
+	b := Budget{dir}
+	alive := func(int) (string, error) { return "boot:100", nil }
+	const unit = gib / 8
+	var releases []func()
+	for range 7 {
+		r, ok := b.try(unit, 4*gib, gib, alive)
+		if !ok {
+			t.Fatal("initial allocation")
+		}
+		releases = append(releases, r)
+	}
+	if _, ok := b.tryDemand(3*unit, 4*gib, gib, alive, false, true); ok {
+		t.Fatal("overcommitted")
+	}
+	if _, ok := b.try(unit, 4*gib, gib, alive); ok {
+		t.Fatal("small job stole pending capacity")
+	}
+	releases[0]()
+	releases[1]()
+	large, ok := b.tryDemand(3*unit, 4*gib, gib, alive, false, true)
+	if !ok {
+		t.Fatal("large job starved")
+	}
+	defer large()
+	for _, release := range releases {
+		release()
+	}
+	small, ok := b.try(unit, 4*gib, gib, alive)
+	if !ok {
+		t.Fatal("priority persisted after admission")
+	}
+	small()
+	// A crashed or idle worker cannot reserve capacity forever.
+	data, _ := json.Marshal(demand{os.Getpid(), "boot:100", gib, time.Now().Add(-time.Second).UnixMilli()})
+	os.WriteFile(filepath.Join(dir, "demand-expired.json"), data, 0600)
+	small, ok = b.try(unit, 4*gib, gib, alive)
+	if !ok {
+		t.Fatal("expired demand retained")
+	}
+	small()
+}
 
 func TestSharedReservationsBoundCombinedPipelinesAndRecover(t *testing.T) {
 	dir := t.TempDir()

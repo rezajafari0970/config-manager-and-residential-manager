@@ -100,7 +100,7 @@ def runtime_config(config,resolved):
 
 # Disjoint /30 blocks for simultaneous worker scopes and trusted test adapters.
 # Keep crw's existing block stable. Resource names/cleanup ownership do not change.
-SANDBOX_ADDRESS_BASES={'crw':8192,'ctw':8288,'ctf':8384,'cge':8704,'cgt':8736}
+SANDBOX_ADDRESS_BASES={'crw':8192,'ctw':8288,'ctf':8384,'crr':8448,'crt':8480,'cge':8704,'cgt':8736}
 
 class Sandbox:
     def __init__(self, core, runid, index, prefix="crp"):
@@ -239,20 +239,24 @@ def application_site_check(box, timeout):
     except (OSError,subprocess.SubprocessError):
         return False
 
-def test_candidate(box,candidate,timeout):
+def test_candidate(box,candidate,timeout,validated_sha256=None):
     b=base64.b64decode(candidate['config'],validate=True)
     if digest(b)!=candidate['sha256']: raise ValueError('candidate_hash_mismatch')
     result={'core':'not_run','connection':'not_run','code':'not_run','runtime_sha256':'','endpoints_passed':0}
-    box.policy({});p=box.launch(b,True)
-    try:p.wait(timeout=10)
-    except subprocess.TimeoutExpired:result['code']='core_validation_timeout';box.stop();return result
-    log=box.logs();rc=p.returncode;box.stop()
-    if rc!=0:
-        code=classify(log,'core_rejected')
-        if getattr(box,'driver','xray')=='xray' and not log.startswith(b'Xray '):code='probe_infrastructure_error'
-        if rc<0:code='probe_resource_or_signal_failure'
-        blocked=code in {'missing_runtime_asset','probe_infrastructure_error','probe_resource_or_signal_failure'}
-        result.update(core='blocked' if blocked else 'failed',code=code);return result
+    box.policy({})
+    # Only the trusted one-job caller can reuse its immediately preceding
+    # exact-byte, same-core syntax check. This is never connection evidence.
+    if validated_sha256 != candidate['sha256']:
+        p=box.launch(b,True)
+        try:p.wait(timeout=10)
+        except subprocess.TimeoutExpired:result['code']='core_validation_timeout';box.stop();return result
+        log=box.logs();rc=p.returncode;box.stop()
+        if rc!=0:
+            code=classify(log,'core_rejected')
+            if getattr(box,'driver','xray')=='xray' and not log.startswith(b'Xray '):code='probe_infrastructure_error'
+            if rc<0:code='probe_resource_or_signal_failure'
+            blocked=code in {'missing_runtime_asset','probe_infrastructure_error','probe_resource_or_signal_failure'}
+            result.update(core='blocked' if blocked else 'failed',code=code);return result
     result['core']='passed'
     try:
         config=json.loads(b);resolved=box.inspect(config)
@@ -312,7 +316,7 @@ def test_candidate(box,candidate,timeout):
     def payload_checks():
         checks_out={}
         try:
-            q=box.net(['/usr/bin/python3',str(pathlib.Path(__file__).with_name('payload-quality.py')),str(timeout)],timeout=2*max(20,min(45,timeout))+15)
+            q=box.net(['/usr/bin/python3',str(pathlib.Path(__file__).with_name('payload-quality.py')),str(timeout)],timeout=2*max(20,min(45,timeout))+110)
             quality=json.loads(q.stdout)
             if not isinstance(quality,dict):raise ValueError('invalid payload receipt')
             checks_out.update(quality)

@@ -3,11 +3,12 @@
 Synthetic credentials only. Separate server process: final client bytes unchanged.
 TCP + UDP + UDP/443 echo; TLS/HTTP3/Android are separate evidence dimensions.
 """
-import importlib.util,json,pathlib,secrets,subprocess,sys,tempfile,time
+import argparse,importlib.util,json,pathlib,secrets,subprocess,sys,tempfile,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('lab',HERE/'live-probe.py')
 lab=importlib.util.module_from_spec(spec);spec.loader.exec_module(lab)
 def run():
+    parser=argparse.ArgumentParser();parser.add_argument('--fragment',action='store_true');parser.add_argument('--transport',choices=['tcp','raw','ws'],default='tcp');args=parser.parse_args()
     report={}
     for version,sha in [('26.10.31','cc4b84d3069569f297a61f04b914f2bb37e9d202fd7b84cb50def1fc30fd40e1'),('26.11.9','e87bce586acdb9136aa5b1f1d9c8db9f1ea1d145b6d86368c7f6f662f9f6a66d')]:
         core=pathlib.Path('/opt/config-repair/core-'+version+'/xray');assert lab.digest(core.read_bytes())==sha
@@ -15,9 +16,15 @@ def run():
         user='11111111-1111-4111-8111-111111111111'
         client={'inbounds':[{'tag':'socks','listen':'127.0.0.1','port':10808,'protocol':'socks','settings':{'auth':'noauth','udp':True}}],'outbounds':[{'tag':'proxy','protocol':'vless','settings':{'address':'203.0.113.81','port':24443,'id':user,'encryption':'none'},'streamSettings':{'network':'tcp','security':'none','tcpSettings':{'header':header}}},{'tag':'block','protocol':'blackhole','settings':{}}],'routing':{'rules':[{'type':'field','network':'tcp,udp','outboundTag':'proxy'}]}}
         client['log']={'loglevel':'debug'}
+        if args.transport=='ws':client['outbounds'][0]['streamSettings']={'network':'ws','security':'none','wsSettings':{'host':'fast.com','path':'/fixture'}}
+        if args.transport=='raw':client['outbounds'][0]['streamSettings']={'network':'tcp','security':'none'}
+        if args.fragment:
+            client['outbounds'][0]['streamSettings']['finalmask']={'tcp':[{'type':'fragment','settings':{'packets':'1-1','lengths':['1-8'],'delays':['1'],'maxSplit':'64'}}]}
         compiled=subprocess.run([str(HERE.parent/'.local/config-compat')],input=json.dumps(client).encode(),capture_output=True,check=True).stdout
         server={'inbounds':[{'tag':'fixture','listen':'203.0.113.81','port':24443,'protocol':'vless','settings':{'decryption':'none','clients':[{'id':user}]},'streamSettings':{'network':'tcp','security':'none','tcpSettings':{'header':{'type':'http'}}}}],'outbounds':[{'protocol':'freedom','settings':{}}]}
         server['log']={'loglevel':'debug'}
+        if args.transport=='ws':server['inbounds'][0]['streamSettings']={'network':'ws','security':'none','wsSettings':{'path':'/fixture'}}
+        if args.transport=='raw':server['inbounds'][0]['streamSettings']={'network':'tcp','security':'none'}
         server['outbounds'][0]['settings']={'finalRules':[{'action':'allow','network':'tcp,udp','ip':['127.0.0.1/32'],'port':'443,24444,24445'}]}
         with lab.Sandbox(str(core),secrets.token_hex(3),8200,prefix='ctf') as box:
             box.net([lab.IP,'addr','add','203.0.113.81/32','dev','lo'])
@@ -48,5 +55,5 @@ def run():
                     p.terminate()
                     try:p.wait(timeout=3)
                     except subprocess.TimeoutExpired:p.kill();p.wait()
-    print(json.dumps({'driver':'legacy-vless-tcp-redirect.v2','passed':True,'tests':report,'https':'separate_test_required','http3':'not_run','android':'not_run'}))
+    print(json.dumps({'driver':'legacy-vless-tcp-redirect.v2','fragment':args.fragment,'transport':args.transport,'passed':True,'tests':report,'https':'separate_test_required','http3':'not_run','android':'not_run'}))
 if __name__=='__main__':run()

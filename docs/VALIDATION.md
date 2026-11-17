@@ -1,5 +1,35 @@
 # Validation
 
+P77 recovery and scheduling (17 November 2026): the complete normal Go suite,
+vet, focused race checks for admission/renewal/accounting/compatibility, Python
+probe/payload/Residential suites and JavaScript source/API/polling checks passed.
+The exhaustive panel race run was stopped to limit CPU use; it is not reported
+as passing. Targeted panel race checks and the complete normal panel suite passed.
+
+The isolated durable worker completed all 13 fixtures, including six live inputs,
+with all 13 passing core validation. Five passed the full payload contract
+(including one native output), one had an application-site diagnostic, six were
+deliberately nonpublic endpoints and one had a DNS failure. Worker SIGKILL recovery
+and the three-worker ceiling passed. The TCP echo fixture now reads the full
+stream instead of treating its first read as the complete payload.
+
+Both pinned Xray cores passed real TCP, UDP and UDP/443 forwarding with preserved
+Fragment on raw TCP and WebSocket. TCP HTTP camouflage without Fragment also
+passed. Byte-sized fragmentation of its first HTTP header was rejected by the
+pinned server parser; that combination is not claimed fixed. Unknown masks and
+destination overrides still fail closed. Independent canary prefixes have
+separate address blocks as well as separate names and cleanup ownership.
+
+A read-only canary rechecked 20 previously failing live inputs with exact final
+templates. All 20 passed core checks, including the former empty-Host rejection
+and the Fragment-driver rejection. Four of five previous payload failures passed
+the complete qualification; the fifth completed its transfer after one retry but
+still had an application-site diagnostic. The empty-Host sample likewise had an
+application-site diagnostic. Thirteen cases still reported peer closure and one
+reported a proxy request failure. These remain failures; a structure repair or
+retry is not a connectivity certificate. Network conditions were not controlled,
+so this canary is not a percentage speedup benchmark or Android test.
+
 The following checks completed for the initial release on 17 November 2026:
 
 - Complete Go test suite: passed.

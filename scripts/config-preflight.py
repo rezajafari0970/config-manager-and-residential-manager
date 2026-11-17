@@ -2,6 +2,14 @@
 import copy,ipaddress
 VERSION='exact-runtime-preflight.v2'
 def fail(code):raise ValueError(code)
+def relay_tcp_mask(value,network):
+    # Same narrow driver as internal/compat: only a TCP Fragment wrapper;
+    # nothing here may add another dial destination or UDP camouflage.
+    if network not in ('','tcp','raw','ws','websocket','httpupgrade','grpc','xhttp','splithttp'):return False
+    if not isinstance(value,dict) or set(value)-{'tcp'}:return False
+    if not value:return True
+    masks=value.get('tcp')
+    return isinstance(masks,list) and all(isinstance(m,dict) and m.get('type')=='fragment' and not set(m)-{'type','settings'} for m in masks)
 def relay_endpoints(c):
     obs=c.get('outbounds',[]);ins=c.get('inbounds',[])
     bytag={x.get('tag'):x for x in obs};rules=c.get('routing',{}).get('rules',[])
@@ -81,7 +89,8 @@ def logical_for_inspection(config):
         if stream.get('security','none') not in ('','none') or stream.get('method',stream.get('network','tcp')) not in ('','tcp','raw','ws','websocket','httpupgrade','grpc','xhttp','splithttp','kcp','mkcp'):fail('relay_family_not_qualified')
         users=[settings] if node is settings else node.get('users',[])
         if len(users)!=1 or users[0].get('encryption','none') not in ('','none') or users[0].get('flow'):fail('relay_family_not_qualified')
-        if set(opt)!={'dialerProxy'} or ob.get('proxySettings') or ob.get('sendThrough') or any(k in stream for k in ('finalmask','address','port')):fail('relay_local_carrier_invalid')
+        if set(opt)!={'dialerProxy'} or ob.get('proxySettings') or ob.get('sendThrough') or any(k in stream for k in ('address','port')):fail('relay_local_carrier_invalid')
+        if 'finalmask' in stream and not relay_tcp_mask(stream['finalmask'],stream.get('method',stream.get('network','tcp'))):fail('relay_local_carrier_invalid')
         if set(leg)-{'tag','protocol','settings','streamSettings','sendThrough'} or set(leg.get('settings',{}))!={'redirect'} or set(leg.get('streamSettings',{}))-{'sockopt'}:fail('relay_carrier_invalid')
         host,sep,port=dest.rpartition(':');host=host.strip('[]')
         if not sep or not port.isdigit() or not 1<=int(port)<=65535 or int(port)!=node.get('port') or not host:fail('relay_destination_invalid')

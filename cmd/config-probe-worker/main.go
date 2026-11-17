@@ -98,7 +98,11 @@ func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
 	release := func() {}
 	if q.budget != nil {
 		var ok bool
-		release, ok = q.budget.Try(384 * 1024 * 1024)
+		if priority, yes := q.budget.(interface{ TryProbe(int64) (func(), bool) }); yes {
+			release, ok = priority.TryProbe(384 * 1024 * 1024)
+		} else {
+			release, ok = q.budget.Try(384 * 1024 * 1024)
+		}
 		if !ok {
 			return nil, nil
 		}

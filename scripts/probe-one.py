@@ -64,7 +64,13 @@ def run_target(box,candidate,timeout,core):
     previous=box.core
     try:
         box.core=pathlib.Path(core).resolve()
-        result=lab.test_candidate(box,candidate,timeout)
+        result=lab.test_candidate(box,candidate,timeout,validated_sha256=candidate['sha256'])
+        if result.get('code') in {'peer_closed_connection','peer_reset_connection','proxy_request_failed'} and result.get('core')=='passed':
+            # A new exact-config session and fresh endpoint resolution, once.
+            # Never invent credentials or relax TLS after an upstream close.
+            first=result['code'];box.stop()
+            result=lab.test_candidate(box,candidate,timeout,validated_sha256=candidate['sha256'])
+            result.setdefault('evidence',{}).update(session_attempts='2',first_failure=first)
         result.setdefault('evidence',{})['runtime_core']='xray_26_10_31'
         return result
     finally:

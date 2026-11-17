@@ -428,8 +428,10 @@ func transport(q url.Values, server string) (M, error) {
 			return nil, errors.New("unsupported_tcp_header")
 		}
 		if header == "http" {
-			h["request"] = M{"version": "1.1", "method": "GET", "path": csv(path), "headers": M{"Host": csv(host), "User-Agent": []string{"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36"}, "Accept-Encoding": []string{"gzip, deflate"}, "Connection": []string{"keep-alive"}, "Pragma": "no-cache"}}
+			headers := M{"User-Agent": []string{"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36"}, "Accept-Encoding": []string{"gzip, deflate"}, "Connection": []string{"keep-alive"}, "Pragma": []string{"no-cache"}}
+			h["request"] = M{"version": "1.1", "method": "GET", "path": csv(path), "headers": headers}
 			if hs := csv(host); len(hs) > 0 {
+				headers["Host"] = hs
 				sniHost = hs[0]
 			}
 		}

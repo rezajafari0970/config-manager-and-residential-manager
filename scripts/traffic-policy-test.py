@@ -20,8 +20,10 @@ def echo():
         with c:
             c.settimeout(3)
             try:
-                b=c.recv(8192)
-                if b:c.sendall(b)
+                while True:
+                    b=c.recv(8192)
+                    if not b:break
+                    c.sendall(b)
             except OSError:pass
     while True:threading.Thread(target=client,args=(s.accept()[0],),daemon=True).start()
 

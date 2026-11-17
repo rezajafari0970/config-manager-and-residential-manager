@@ -72,6 +72,14 @@ func TestEgressAccountingPartitionsAndOutputUnits(t *testing.T) {
 	if pub["eligible"] != 1 || pub["awaiting_proof"] != 1 || pub["published"] != 1 {
 		t.Fatal(pub)
 	}
+	renewal := a["renewal"].(map[string]int)
+	sum := 0
+	for _, n := range renewal {
+		sum += n
+	}
+	if sum != pub["awaiting_proof"] {
+		t.Fatal("renewal partition diverged", renewal, pub)
+	}
 	exec("UPDATE egress_country_policy SET allowed='[]'")
 	a, err = egressAccounting(frozen, q)
 	if err != nil {

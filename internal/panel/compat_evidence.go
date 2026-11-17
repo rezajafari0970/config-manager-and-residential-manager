@@ -65,7 +65,7 @@ func (s *Store) migrateV20() error {
 	return tx.Commit()
 }
 func receipt(r probe.Result) ([]byte, error) {
-	if len(r.Evidence) > 32 {
+	if len(r.Evidence) > 48 {
 		return nil, ErrInvalid
 	}
 	for key, status := range r.Evidence {

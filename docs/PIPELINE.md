@@ -102,3 +102,27 @@ The five independent DNS/QUIC transport checks run concurrently. Authenticated
 HTTP/3 can independently prove QUIC when version negotiation is filtered, while
 DNS, required HTTPS destinations and upload/download remain mandatory. A failed
 QUIC negotiation alone is never relabelled as a successful probe.
+
+## Bounded recovery and renewal fairness
+
+Ordinary probes publish a short-lived memory demand when small jobs keep taking
+the available shared permits. Smaller new admissions briefly defer; running jobs,
+collection's bounded control reserve and the host memory floor remain intact.
+Residential initial/follow-up slots are interleaved even under partial admission.
+Every third follow-up turn gives the oldest due expired accepted proof a chance
+before repeatedly urgent work. Expired proof stays unpublished; no evidence TTL
+is extended. The panel separates due, running, scheduled and paused renewals.
+
+Full 2MiB download, acknowledged 1MiB upload and post-load HTTPS remain mandatory.
+Only a transient failed leg receives one fresh HTTP/1.1 retry with a bounded
+30–45s transfer budget; successful legs are not repeated. TLS rejection is never
+relaxed. A closed/reset proxy session receives one new exact-config session,
+with fresh endpoint resolution, before recording the final failure. Authentication
+failures do not trigger guessed credentials. Immediately verified same-core syntax
+is reused within that one job; actual connection proof is always measured.
+
+Absent HTTP-camouflage Host values are omitted from candidates, preserving explicit
+hosts and immutable raw data. The fixed-destination compatibility driver preserves
+TCP Fragment on supported TCP transports, including its original settings. Unknown
+masks, UDP carrier masks and destination overrides still require a suitable driver.
+Core/app import checks and real connectivity decide whether the result is usable.

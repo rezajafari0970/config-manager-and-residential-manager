@@ -11,6 +11,7 @@ import (
 // adapter. This lets normal and Residential compose the same original graph.
 func Logical(root M) ([]Change, error) {
 	normalized := append(NormalizeEndpointLiterals(root), EnforceStrictTLS(root)...)
+	normalized = append(normalized, NormalizeEmptyHTTPHeaders(root)...)
 	changes, err := logicalRedirect(root)
 	changes = append(normalized, changes...)
 	if err != nil {
@@ -172,6 +173,7 @@ func Wrap(root M) ([]Change, error) {
 		return nil, err
 	}
 	normalizedChanges := append(NormalizeEndpointLiterals(root), EnforceStrictTLS(root)...)
+	normalizedChanges = append(normalizedChanges, NormalizeEmptyHTTPHeaders(root)...)
 	_, err := Logical(root)
 	if err != nil {
 		return nil, err
