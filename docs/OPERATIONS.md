@@ -34,6 +34,8 @@ Self-signed TLS permits initial encrypted administration but subscription client
 
 If hosted behind NAT, pass `CMRM_HOST` on first install. Changes to the public hostname or port require coordinated origin, certificate and Nginx changes; the installer rejects accidental changes on rerun.
 
+If another application already listens on TCP 18443, choose a free port with `export CMRM_PORT=18444` before the first installation. Do not stop the other application to free its port. The internal loopback port 18191 must also be available.
+
 The country updater preserves last-good datasets and retries daily. Inspect `/var/lib/config-repair/country/update-status.json` if the installer reports incomplete country data. No healthy/Residential result is manufactured when evidence is missing.
 
 
