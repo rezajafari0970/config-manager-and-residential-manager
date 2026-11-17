@@ -95,6 +95,30 @@ def cleanup(slot=None,runid=None):
         for p in pathlib.Path('/dev/shm').glob(name+'-*'):
             if p.is_dir() and not p.is_symlink():shutil.rmtree(p)
 
+NATIVE_CORE='/opt/config-repair/sing-box-1.14.4/sing-box'
+NATIVE_SHA='1264361b5f8868c8768f7555d3e77e20118bf503c41ac08bb290a0d99056aa3a'
+class NativeBox(lab.Sandbox):
+    driver='sing-box'
+    def core_mounts(self):
+        out=['--ro-bind','/lib64/ld-linux-x86-64.so.2','/lib64/ld-linux-x86-64.so.2']
+        for name in ('libdl.so.2','libpthread.so.0','libc.so.6'):out+=['--ro-bind','/usr/lib/x86_64-linux-gnu/'+name,'/lib/x86_64-linux-gnu/'+name]
+        return out
+    def core_command(self,test):return ['/xray','check' if test else 'run','-c','/config.json']
+    def inspect(self,config):
+        mapped=[]
+        for ob in config.get('outbounds',[]):
+            if ob.get('type') not in ('hysteria','hysteria2','tuic'):raise ValueError('outbound_driver_pending')
+            settings={'address':ob.get('server'),'port':ob.get('server_port',443)}
+            item={'protocol':'socks','settings':settings}
+            if ob.get('server_ports'):
+                ports=','.join(str(p).replace(':','-') for p in ob['server_ports'])
+                item['streamSettings']={'finalmask':{'quicParams':{'udpHop':{'ports':ports}}}}
+            mapped.append(item)
+        for endpoint in config.get('endpoints',[]):
+            if endpoint.get('type')!='wireguard' or endpoint.get('system'):raise ValueError('outbound_driver_pending')
+            for peer in endpoint.get('peers',[]):mapped.append({'protocol':'socks','settings':{'address':peer.get('address'),'port':peer.get('port')}})
+        return lab.endpoints({'outbounds':mapped})
+
 def main():
     global OWN
     if PREFIX not in ('crw','ctw','crr','crt'):raise SystemExit('invalid resource prefix')
@@ -146,35 +170,51 @@ def main():
     if not isinstance(timeout,int) or not 1<=timeout<=120 or not 1<=len(plan['candidates'])<=12:raise SystemExit('invalid request')
     runid=args.run_id or uuid.uuid4().hex[:6]
     rows=[];best=None
+    native=all(c.get('engine')=='sing-box' for c in plan['candidates'])
+    if any(c.get('engine')=='sing-box' for c in plan['candidates']) and not native:raise SystemExit('mixed core plan')
+    if native and core_digest(NATIVE_CORE)!=NATIVE_SHA:raise SystemExit('native core mismatch')
+    box_type=NativeBox if native else lab.Sandbox
     try:
-        with lab.Sandbox(args.core,runid,8192+args.slot,prefix=PREFIX) as box:
+        with box_type(NATIVE_CORE if native else args.core,runid,8192+args.slot,prefix=PREFIX) as box:
             for candidate in plan['candidates']:
                 client_failure={'code':'not_run'}
                 try:
                     data=base64.b64decode(candidate['config'],validate=True)
                     if len(data)>2*1024*1024 or lab.digest(data)!=candidate['sha256']:raise ValueError('invalid candidate')
-                    client_failure=validate_client(box,data,args.client_core)
-                    if client_failure is None:
-                        for variant in app.variants(data):
-                            client_failure=validate_client(box,variant,args.client_core)
-                            if client_failure is not None:
-                                client_failure["code"]="app_transform_core_rejected"
-                                break
-                    if client_failure is not None:
-                        r=client_failure
+                    if native:
+                        r=lab.test_candidate(box,candidate,timeout)
                     else:
-                        # Both official cores must build the exact output. Real traffic
-                        # runs on the core actually bundled with the target Android app.
-                        latest_failure=validate_client(box,data,args.core)
-                        if latest_failure is not None:
-                            r=latest_failure
+                        client_failure=validate_client(box,data,args.client_core)
+                        if client_failure is None:
+                            seen_variants={lab.digest(data)}
+                            for variant in app.variants(data):
+                                if lab.digest(variant) in seen_variants:continue
+                                seen_variants.add(lab.digest(variant))
+                                client_failure=validate_client(box,variant,args.client_core)
+                                if client_failure is not None:
+                                    client_failure["code"]="app_transform_core_rejected"
+                                    break
+                        if client_failure is not None:
+                            r=client_failure
                         else:
-                            r=run_target(box,candidate,timeout,args.client_core)
+                            # Both official cores must build the exact output. Real traffic
+                            # runs on the core actually bundled with the target Android app.
+                            latest_failure=validate_client(box,data,args.core)
+                            if latest_failure is not None:
+                                r=latest_failure
+                            else:
+                                r=run_target(box,candidate,timeout,args.client_core)
                 except Exception:r={'core':'blocked','connection':'not_run','code':'probe_infrastructure_error','runtime_sha256':'','endpoints_passed':0}
-                r.setdefault('evidence',{})['bundled_core']='passed' if client_failure is None else 'failed'
-                r['evidence']['target_core']=r['core']
-                r['evidence']['app_import_contract']='passed' if client_failure is None else 'failed'
-                r['evidence']['android']='not_run'
+                if native:
+                    r['engine']='sing-box'
+                    r.setdefault('evidence',{})['native_core']=r['core']
+                    r['evidence']['runtime_core']='sing_box_1_14_4'
+                    r['evidence']['android']='not_run'
+                else:
+                    r.setdefault('evidence',{})['bundled_core']='passed' if client_failure is None else 'failed'
+                    r['evidence']['target_core']=r['core']
+                    r['evidence']['app_import_contract']='passed' if client_failure is None else 'failed'
+                    r['evidence']['android']='not_run'
                 r.update(sha256=candidate['sha256'],rule=candidate['rule']);rows.append(r)
                 score=attempt_score(r,candidate)
                 if best is None or score>best_score:best=r;best_score=score

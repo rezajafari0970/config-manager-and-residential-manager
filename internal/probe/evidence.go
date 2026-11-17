@@ -23,3 +23,16 @@ func VerifiedPayload(e map[string]string) bool {
 		e["payload_recheck"] == "passed" && e["payload_download_bytes"] == "2097152" &&
 		e["payload_upload_bytes"] == "1048576"
 }
+
+// Native output is never represented as V2RayNG/Xray acceptance.
+func VerifiedNativeEvidence(e map[string]string) bool {
+	if e["native_core"] != "passed" || e["runtime_core"] != "sing_box_1_14_4" {
+		return false
+	}
+	for _, k := range []string{"https", "dns_tcp", "doh_cloudflare", "doh_google", "dns_udp", "quic_vn"} {
+		if e[k] != "passed" {
+			return false
+		}
+	}
+	return VerifiedPayload(e)
+}

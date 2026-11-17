@@ -19,6 +19,7 @@ type Job struct {
 	Settings Settings `json:"settings"`
 }
 type Attempt struct {
+	Engine          string            `json:"engine,omitempty"`
 	Evidence        map[string]string `json:"evidence,omitempty"`
 	SHA256          string            `json:"sha256"`
 	Rule            string            `json:"rule"`

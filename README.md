@@ -61,3 +61,5 @@ Go 1.27.1، Python 3.11+ و Node.js برای تست‌های JavaScript لازم
 ## Datacenter and CDN
 
 The **Datacenter** page adds 10 named hosting providers plus Unknown, five CDN providers, Non-CDN and CDN Unknown. Every group has raw and independently rotating single-template URLs. Classification runs automatically in the background. See [the evidence model and operating limits](docs/DATACENTER.md).
+
+Preparation and native output: [pipeline contracts](docs/PIPELINE.md) and [OpenAPI](docs/openapi-preparation.json). Prepared-only templates are available independently of connection tests; sing-box output has separate links.

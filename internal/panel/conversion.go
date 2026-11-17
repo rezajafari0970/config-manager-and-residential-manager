@@ -9,6 +9,7 @@ import (
 	"errors"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/blob"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/convert"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/native"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"io"
@@ -151,7 +152,7 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 	j := &probe.Job{Settings: settings}
 	var size int64
 	priority := s.probeTurn.Add(1)%4 == 0
-	e = tx.QueryRowContext(ctx, `SELECT i.hash,i.kind,i.size,j.revision FROM conversion_inputs i JOIN conversion_jobs j ON j.hash=i.hash WHERE (j.token='' OR j.lease_until<=?) AND (j.next_run<=? OR j.version!=?) ORDER BY CASE WHEN ((j.version=? AND j.next_run>0)=?) THEN 0 ELSE 1 END,j.next_run,j.hash LIMIT 1`, now, now, convert.Version, convert.Version, priority).Scan(&j.Hash, &j.Kind, &size, &j.Revision)
+	e = tx.QueryRowContext(ctx, `SELECT i.hash,i.kind,i.size,j.revision FROM conversion_inputs i JOIN conversion_jobs j ON j.hash=i.hash WHERE (j.token='' OR j.lease_until<=?) AND (j.next_run<=? OR j.version!=?) AND NOT EXISTS(SELECT 1 FROM template_preparations own JOIN template_preparations same ON same.candidate_hash=own.candidate_hash AND same.version=own.version AND same.engine=own.engine JOIN conversion_jobs busy ON busy.hash=same.hash WHERE own.hash=j.hash AND own.candidate_hash!='' AND busy.hash!=j.hash AND busy.token!='' AND busy.lease_until>CAST(unixepoch('subsec')*1000 AS INTEGER)) ORDER BY CASE WHEN ((j.version=? AND j.next_run>0)=?) THEN 0 ELSE 1 END,j.next_run,j.hash LIMIT 1`, now, now, convert.Version, convert.Version, priority).Scan(&j.Hash, &j.Kind, &size, &j.Revision)
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -195,7 +196,15 @@ func (s *Store) RenewProbe(ctx context.Context, j probe.Job) error {
 	return nil
 }
 func (s *Store) CompleteProbe(ctx context.Context, r probe.Result) error {
-	if !safeCode(r.Rule) || !safeCode(r.Code) || !validDigest(r.Hash) || r.Version != convert.Version || r.CoreSHA256 != probe.CoreSHA256 {
+	coreSHA := probe.CoreSHA256
+	verified := probe.VerifiedEvidence(r.Evidence)
+	if r.Engine == "sing-box" {
+		coreSHA = native.NativeSHA
+		verified = probe.VerifiedNativeEvidence(r.Evidence)
+	} else if r.Engine != "" && r.Engine != "xray" {
+		return ErrInvalid
+	}
+	if !safeCode(r.Rule) || !safeCode(r.Code) || !validDigest(r.Hash) || r.Version != convert.Version || r.CoreSHA256 != coreSHA {
 		return ErrInvalid
 	}
 	if r.Core != "passed" && r.Core != "failed" && r.Core != "blocked" && r.Core != "not_run" {
@@ -207,7 +216,7 @@ func (s *Store) CompleteProbe(ctx context.Context, r probe.Result) error {
 	if r.Code == "https_payload_verified" && !probe.VerifiedPayload(r.Evidence) {
 		return ErrInvalid
 	}
-	if r.Connection == "passed" && (r.Core != "passed" || r.EndpointsPassed != 2 || r.RuntimeSHA256 != r.SHA256 || !probe.VerifiedEvidence(r.Evidence)) {
+	if r.Connection == "passed" && (r.Core != "passed" || r.EndpointsPassed != 2 || r.RuntimeSHA256 != r.SHA256 || !verified || !probe.VerifiedPayload(r.Evidence)) {
 		return ErrInvalid
 	}
 	var ref blob.Ref
@@ -229,7 +238,7 @@ func (s *Store) CompleteProbe(ctx context.Context, r probe.Result) error {
 		p := convert.Prepare(raw)
 		matched := false
 		for _, c := range p.Candidates {
-			if c.SHA256 == r.SHA256 && c.Rule == r.Rule {
+			if c.SHA256 == r.SHA256 && c.Rule == r.Rule && ((c.Engine == r.Engine) || (c.Engine == "" && r.Engine == "xray")) {
 				matched = true
 				requires = c.RequiresConnection
 				break
@@ -287,6 +296,46 @@ func (s *Store) CompleteProbe(ctx context.Context, r probe.Result) error {
 	_, e = tx.ExecContext(ctx, "UPDATE conversion_jobs SET state=?,token='',lease_until=0,next_run=?,failures=?,version=? WHERE hash=?", state, now+delay*1000, failures, r.Version, r.Hash)
 	if e != nil {
 		return e
+	}
+	if r.Connection == "passed" {
+		// Reuse only a fresh receipt for byte-identical deterministic output,
+		// preserving its timestamp/expiry and recording the tested raw identity.
+		rows, err := tx.QueryContext(ctx, `SELECT p.hash,p.rule FROM template_preparations p JOIN conversion_jobs j ON j.hash=p.hash WHERE p.candidate_hash=? AND p.version=? AND p.hash!=? AND j.token='' AND p.engine=? AND EXISTS(SELECT 1 FROM conversion_inputs i WHERE i.hash=p.hash)`, ref.Hash, r.Version, r.Hash, func() string {
+			if r.Engine == "sing-box" {
+				return "sing-box"
+			}
+			return "xray"
+		}())
+		if err != nil {
+			return err
+		}
+		var aliases [][2]string
+		for rows.Next() {
+			var a [2]string
+			if err = rows.Scan(&a[0], &a[1]); err != nil {
+				break
+			}
+			aliases = append(aliases, a)
+		}
+		rowErr := rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if rowErr != nil {
+			return rowErr
+		}
+		for _, a := range aliases {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO conversion_results SELECT ?,candidate_hash,candidate_size,?,core,connection,code,tested,valid_until,runtime_hash,version,requires_connection FROM conversion_results WHERE hash=? ON CONFLICT(hash) DO UPDATE SET candidate_hash=excluded.candidate_hash,candidate_size=excluded.candidate_size,rule=excluded.rule,core=excluded.core,connection=excluded.connection,code=excluded.code,tested=excluded.tested,valid_until=excluded.valid_until,runtime_hash=excluded.runtime_hash,version=excluded.version,requires_connection=excluded.requires_connection`, a[0], a[1], r.Hash); err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO conversion_evidence SELECT ?,json_set(metadata,'$.raw_sha256',?,'$.rule',?,'$.reused_from_raw_sha256',?) FROM conversion_evidence WHERE hash=? ON CONFLICT(hash) DO UPDATE SET metadata=excluded.metadata`, a[0], a[0], a[1], r.Hash, r.Hash); err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, "UPDATE conversion_jobs SET state='converted',next_run=?,failures=0,version=? WHERE hash=? AND token=''", now+delay*1000, r.Version, a[0]); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit()
 }

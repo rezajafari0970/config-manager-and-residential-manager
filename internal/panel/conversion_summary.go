@@ -8,13 +8,17 @@ import (
 )
 
 type SourceConversionSummary struct {
-	Total     int            `json:"total"`
-	Ready     int            `json:"ready"`
-	Connected int            `json:"connected"`
-	Repaired  int            `json:"repaired"`
-	Pending   int            `json:"pending"`
-	Blocked   int            `json:"blocked"`
-	Issues    map[string]int `json:"issues,omitempty"`
+	Prepared          int            `json:"prepared"`
+	NativeReady       int            `json:"native_ready"`
+	NativePrepared    int            `json:"native_prepared"`
+	PreparationFailed int            `json:"preparation_failed"`
+	Total             int            `json:"total"`
+	Ready             int            `json:"ready"`
+	Connected         int            `json:"connected"`
+	Repaired          int            `json:"repaired"`
+	Pending           int            `json:"pending"`
+	Blocked           int            `json:"blocked"`
+	Issues            map[string]int `json:"issues,omitempty"`
 }
 
 // Use the same representative ranking and source membership as Output, then
@@ -37,7 +41,7 @@ func (s *Store) SourceConversionSummaries(ctx context.Context, sources []Source)
 		out[source.ID] = SourceConversionSummary{}
 	}
 	q = strings.Replace(q, "/* source filter */", "AND m.source_id IN ("+strings.Join(marks, ",")+")", 1)
-	q += ` SELECT source_id,coalesce(result_version,''),coalesce(result_rule,''),coalesce(state,'queued'),coalesce(code,''),coalesce(available,0),coalesce(connection,''),coalesce(valid_until,0) FROM choices WHERE choice=1`
+	q += ` SELECT source_id,coalesce(result_version,''),coalesce(result_rule,''),coalesce(state,'queued'),coalesce(code,''),coalesce(available,0),coalesce(connection,''),coalesce(valid_until,0),coalesce((SELECT candidate_hash FROM template_preparations p WHERE p.hash=choices.raw_hash AND p.version='` + convert.Version + `'),''),coalesce((SELECT engine FROM template_preparations p WHERE p.hash=choices.raw_hash AND p.version='` + convert.Version + `'),''),coalesce((SELECT code FROM template_preparations p WHERE p.hash=choices.raw_hash AND p.version='` + convert.Version + `'),'') FROM choices WHERE choice=1`
 	rows, err := s.read(ctx).QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -46,14 +50,27 @@ func (s *Store) SourceConversionSummaries(ctx context.Context, sources []Source)
 	for rows.Next() {
 		var id string
 		var version, rule, state, code, connection string
+		var preparedHash, engine, prepCode string
 		var available bool
 		var validUntil int64
-		if err = rows.Scan(&id, &version, &rule, &state, &code, &available, &connection, &validUntil); err != nil {
+		if err = rows.Scan(&id, &version, &rule, &state, &code, &available, &connection, &validUntil, &preparedHash, &engine, &prepCode); err != nil {
 			return nil, err
 		}
 		v := out[id]
 		v.Total++
-		if available {
+		if preparedHash != "" {
+			v.Prepared++
+			if engine == "sing-box" {
+				v.NativePrepared++
+			}
+		} else if prepCode != "" {
+			v.PreparationFailed++
+		}
+		nativeHealthy := engine == "sing-box" && version == convert.Version && connection == "passed" && validUntil > now
+		if nativeHealthy {
+			v.NativeReady++
+		}
+		if available || nativeHealthy {
 			v.Ready++
 			if connection == "passed" && validUntil > now {
 				v.Connected++
@@ -64,7 +81,7 @@ func (s *Store) SourceConversionSummaries(ctx context.Context, sources []Source)
 		}
 		if version != convert.Version || state == "queued" || state == "running" {
 			v.Pending++
-		} else if !available {
+		} else if !available && !nativeHealthy {
 			v.Blocked++
 			if code == "" {
 				code = "structural_unresolved"

@@ -152,7 +152,7 @@ func (s *Store) reconcileEgressVersion() error {
 	if e = tx.QueryRow("SELECT version FROM egress_settings").Scan(&previous); e != nil {
 		return e
 	}
-	current := egress.Version + "|" + convert.Version + "|" + egress.PolicyDigest()
+	current := egress.Version + "|" + convert.EnvelopeVersion + "|" + egress.PolicyDigest()
 	if previous != current {
 		where := "state!='DELETED'"
 		if _, e = tx.Exec("UPDATE egress_jobs SET state=CASE WHEN ever_accepted=1 THEN 'QUARANTINED' ELSE 'PENDING' END,reason='implementation_changed',tested=0,deep_completed=0,retry_streak=0,valid_until=0,revision=revision+1,token='',lease_until=0,next_run=0 WHERE " + where); e != nil {

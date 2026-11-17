@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/compat"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/native"
 	"net"
 	"strconv"
 
@@ -14,7 +15,11 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 )
 
-const Version = "xray-26.11.9.template.v9"
+const Version = "xray-26.11.9.template.v10"
+
+// Apply's shared Xray envelope has not changed. Residential proofs pin its
+// contract separately from ordinary queue/preparation/repair policy.
+const EnvelopeVersion = "xray-26.11.9.template.v9"
 
 type M = map[string]any
 
@@ -22,7 +27,17 @@ type M = map[string]any
 const envelope = `{"remarks":"@shenvpn","log":{"loglevel":"warning","access":"none","dnsLog":false},"dns":{"servers":["https://1.1.1.1/dns-query","https://8.8.8.8/dns-query","https://9.9.9.9/dns-query"],"queryStrategy":"UseIPv4","tag":"dns-module"},"inbounds":[{"tag":"socks","listen":"127.0.0.1","port":10808,"protocol":"socks","settings":{"auth":"noauth","udp":true},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}],"outbounds":[],"routing":{"domainStrategy":"AsIs","rules":[{"type":"field","inboundTag":["dns-module"],"outboundTag":"proxy"},{"type":"field","inboundTag":["socks","tun"],"port":"53","network":"tcp,udp","outboundTag":"dns-out"},{"type":"field","network":"tcp,udp","outboundTag":"proxy"}]},"stats":{},"policy":{"system":{"statsOutboundUplink":true,"statsOutboundDownlink":true}}}`
 
 func Prepare(raw []byte) probe.Plan {
-	p := probe.Prepare(raw)
+	if p, ok := native.Prepare(raw); ok && p.Code != "wireguard_native_finalmask_unsupported" {
+		p.Version = Version
+		p.OriginalSHA256 = repair.Digest(raw)
+		return p
+	}
+	decoded, e := probe.DecodeEnvelope(raw)
+	if e != nil {
+		decoded = raw
+	}
+	p := probe.Prepare(decoded)
+	p.OriginalSHA256 = repair.Digest(raw)
 	p.Version = Version
 	candidates := p.Candidates
 	// Custom JSON may need the same explicit TLS hypothesis as a Trojan URI.
@@ -78,9 +93,10 @@ func Prepare(raw []byte) probe.Plan {
 			continue
 		}
 		seen[h] = true
-		p.Candidates = append(p.Candidates, probe.Candidate{Rule: Version + "." + c.Rule, SHA256: h, Config: b, RequiresConnection: true})
+		p.Candidates = append(p.Candidates, probe.Candidate{Rule: boundedRule(Version + "." + c.Rule), SHA256: h, Config: b, RequiresConnection: true})
 	}
 	if len(p.Candidates) > 0 {
+		p.Candidates = realityAlternatives(p.Candidates)
 		p.Code = "prepared"
 	}
 	return p
@@ -384,4 +400,42 @@ func hostnames(ob M) []string {
 		}
 	}
 	return hosts
+}
+
+// Only the client fingerprint changes; endpoint, SNI, UUID, public key and
+// short ID remain exact. This alternative needs its own complete health proof.
+func realityAlternatives(in []probe.Candidate) []probe.Candidate {
+	out := append([]probe.Candidate(nil), in...)
+	for _, c := range in {
+		m, e := object(c.Config)
+		if e != nil {
+			continue
+		}
+		changed := false
+		obs, _ := m["outbounds"].([]any)
+		for _, v := range obs {
+			ob, _ := v.(M)
+			stream, _ := ob["streamSettings"].(M)
+			if stream["security"] != "reality" {
+				continue
+			}
+			r, _ := stream["realitySettings"].(M)
+			if r != nil && r["fingerprint"] != "chrome" {
+				r["fingerprint"] = "chrome"
+				changed = true
+			}
+		}
+		if changed {
+			b, _ := json.Marshal(m)
+			out = append(out, probe.Candidate{Rule: c.Rule + ".reality-chrome-hypothesis", SHA256: repair.Digest(b), Config: b, RequiresConnection: true})
+		}
+	}
+	return out
+}
+
+func boundedRule(rule string) string {
+	if len(rule) <= 165 {
+		return rule
+	}
+	return Version + ".repair-chain." + repair.Digest([]byte(rule))[:24]
 }

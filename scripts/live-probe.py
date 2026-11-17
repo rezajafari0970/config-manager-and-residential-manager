@@ -147,6 +147,8 @@ class Sandbox:
         allow='\n'.join(f'ip daddr {ip} tcp dport {p} accept\nip daddr {ip} udp dport {p} accept' for ip,p in pairs)
         rules='flush ruleset\ntable inet guard { chain out { type filter hook output priority 0; policy drop; oifname "lo" accept; '+allow+'\n}; chain in { type filter hook input priority 0; policy drop; iifname "lo" accept; ct state established,related accept; }; }\n'
         self.net([NFT,'-f','-'],input=rules.encode())
+    def inspect(self,config):
+        resolved=endpoints(config);runtime_config(config,resolved);return resolved
     def core_mounts(self):
         return []
     def core_command(self,test):
@@ -202,13 +204,13 @@ def test_candidate(box,candidate,timeout):
     log=box.logs();rc=p.returncode;box.stop()
     if rc!=0:
         code=classify(log,'core_rejected')
-        if not log.startswith(b'Xray '):code='probe_infrastructure_error'
+        if getattr(box,'driver','xray')=='xray' and not log.startswith(b'Xray '):code='probe_infrastructure_error'
         if rc<0:code='probe_resource_or_signal_failure'
         blocked=code in {'missing_runtime_asset','probe_infrastructure_error','probe_resource_or_signal_failure'}
         result.update(core='blocked' if blocked else 'failed',code=code);return result
     result['core']='passed'
     try:
-        config=json.loads(b);resolved=endpoints(config);runtime=runtime_config(config,resolved)
+        config=json.loads(b);resolved=box.inspect(config)
     except (ValueError,TypeError,KeyError) as e:
         code=str(e);result['code']=code if code in {'outbound_driver_pending','wireguard_endpoint_invalid','no_proxy_endpoint','invalid_proxy_endpoint','endpoint_dns_failed','nonpublic_endpoint_blocked','ipv6_only_probe_pending','custom_dns_mapping_requires_review','invalid_download_settings','invalid_download_endpoint','transport_dependency_depth','port_hopping_invalid'} else 'probe_preparation_failed';return result
     box.resolved=resolved
@@ -226,50 +228,61 @@ def test_candidate(box,candidate,timeout):
         check=box.net(['/usr/bin/python3','-c','import socket; s=socket.socket();s.settimeout(.1); print(s.connect_ex(("127.0.0.1",10808)))'])
         if check.stdout.strip()==b'0':ready=True;break
         time.sleep(.1)
+    def https_check(test):
+        url,expected=test;error=b""
+        args=[IP,'netns','exec',box.name,'/usr/bin/curl','--noproxy','','--proxy','socks5h://127.0.0.1:10808','--max-time',str(timeout),'--connect-timeout',str(timeout),'--max-filesize','65536','--retry','1','--retry-all-errors','--retry-delay','0','--retry-max-time',str(timeout),'--silent','--show-error','--output','/dev/null','--write-out','%{http_code}',url]
+        if config.get('burstObservatory'):
+            # Cold leastLoad has no successful observation yet. Retry the
+            # SAME final runtime through SOCKS; never substitute a member.
+            args[args.index('--max-time')+1]=str(min(timeout,4))
+            args[args.index('--connect-timeout')+1]=str(min(timeout,4))
+            args+=['--retry','4','--retry-all-errors','--retry-delay','1','--retry-max-time',str(min(15,timeout+5))]
+        try:
+            r=subprocess.run(args,capture_output=True,timeout=timeout+20,env={'PATH':'/usr/bin:/usr/sbin'})
+            passed=r.returncode==0 and r.stdout.strip()==str(expected).encode()
+            if not passed: error=r.stderr[-4096:]
+        except subprocess.TimeoutExpired:
+            passed=False;error=b'operation timed out'
+        return passed,error
     if ready:
-        for url,expected in TESTS:
-            args=[IP,'netns','exec',box.name,'/usr/bin/curl','--noproxy','','--proxy','socks5h://127.0.0.1:10808','--max-time',str(timeout),'--connect-timeout',str(timeout),'--max-filesize','65536','--silent','--show-error','--output','/dev/null','--write-out','%{http_code}',url]
-            if config.get('burstObservatory'):
-                # Cold leastLoad has no successful observation yet. Retry the
-                # SAME final runtime through SOCKS; never substitute a member.
-                args[args.index('--max-time')+1]=str(min(timeout,4))
-                args[args.index('--connect-timeout')+1]=str(min(timeout,4))
-                args+=['--retry','4','--retry-all-errors','--retry-delay','1','--retry-max-time',str(min(15,timeout+5))]
-            try:
-                r=subprocess.run(args,capture_output=True,timeout=timeout+20,env={'PATH':'/usr/bin:/usr/sbin'})
-                passed=r.returncode==0 and r.stdout.strip()==str(expected).encode()
-                if not passed: curl_errors.append(r.stderr[-4096:])
-            except subprocess.TimeoutExpired:
-                passed=False;curl_errors.append(b'operation timed out')
-            codes.append(passed)
-            if not passed and len(codes)==1:
-                # A second independent destination distinguishes endpoint-specific failures.
-                continue
-    site_ok=bool(codes and all(codes) and application_site_check(box,timeout))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes=list(pool.map(https_check,TESTS))
+        codes=[passed for passed,_ in outcomes];curl_errors=[error for passed,error in outcomes if not passed]
+    site_ok=False
     evidence={'https':'passed' if len(codes)==2 and all(codes) else 'failed','http3':'not_run','android':'not_run'}
-    if ready and len(codes)==2 and all(codes):
+    def transport_checks():
+        checks_out={}
         try:
             tcp_only={o.get('protocol') for o in config.get('outbounds',[]) if o.get('protocol') not in ('freedom','blackhole','dns','loopback')}=={'http'}
             checks=box.net(['/usr/bin/python3',str(pathlib.Path(__file__).with_name('transport-checks.py')),'--timeout',str(min(timeout,6))]+(['--tcp-only'] if tcp_only else []),timeout=min(timeout,6)*4+5)
             report=json.loads(checks.stdout)
-            evidence.update({x['name']:x['status'] for x in report['checks']})
-            evidence['http3']=report['http3']
+            checks_out.update({x['name']:x['status'] for x in report['checks']})
+            checks_out['http3']=report['http3']
             h3python=pathlib.Path('/opt/config-repair/http3-venv/bin/python')
-            if not tcp_only and h3python.exists() and evidence.get('quic_vn')=='passed':
+            if not tcp_only and h3python.exists() and checks_out.get('quic_vn')=='passed':
                 response=box.net([str(h3python),str(pathlib.Path(__file__).with_name('http3-check.py')),str(min(timeout,8))],timeout=min(timeout,8)+3)
-                evidence['http3']=json.loads(response.stdout)['status']
-        except (OSError,ValueError,subprocess.SubprocessError):evidence['transport']='infrastructure_error'
-    # Full payloads use the SAME exact running profile/namespace. No cache,
-    # direct fallback, small-request substitution or TLS bypass earns this proof.
-    if ready and len(codes)==2 and all(codes):
+                checks_out['http3']=json.loads(response.stdout)['status']
+        except (OSError,ValueError,subprocess.SubprocessError):checks_out['transport']='infrastructure_error'
+        return checks_out
+    def payload_checks():
+        checks_out={}
         try:
             q=box.net(['/usr/bin/python3',str(pathlib.Path(__file__).with_name('payload-quality.py')),str(timeout)],timeout=2*max(20,min(45,timeout))+15)
             quality=json.loads(q.stdout)
             if not isinstance(quality,dict):raise ValueError('invalid payload receipt')
-            evidence.update(quality)
+            checks_out.update(quality)
         except (OSError,ValueError,subprocess.SubprocessError):
-            evidence['payload_version']='payload_v1'
-            evidence['payload_download']='infrastructure_error'
+            checks_out['payload_version']='payload_v1'
+            checks_out['payload_download']='infrastructure_error'
+        return checks_out
+    # Independent checks share the same exact core session. The pool is bounded;
+    # all children finish before teardown and every original evidence gate remains.
+    if ready and len(codes)==2 and all(codes):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            site=pool.submit(application_site_check,box,timeout)
+            transports=pool.submit(transport_checks)
+            payloads=pool.submit(payload_checks)
+            site_ok=site.result();evidence.update(transports.result());evidence.update(payloads.result())
     payload_ok=evidence.get('payload_version')=='payload_v1' and all(evidence.get('payload_'+k)=='passed' for k in ('download','upload','recheck')) and evidence.get('payload_download_bytes')=='2097152' and evidence.get('payload_upload_bytes')=='1048576'
     result['evidence']=evidence
     log=box.logs();box.stop();result['endpoints_passed']=sum(codes)
@@ -278,7 +291,7 @@ def test_candidate(box,candidate,timeout):
     else:result.update(connection='failed',code=classify(log,classify(b'\n'.join(curl_errors),'proxy_request_failed' if ready else 'runtime_start_failed')))
     if result['connection']=='passed' and (any(evidence.get(k)!='passed' for k in ('dns_tcp','doh_cloudflare','doh_google')) or any(evidence.get(k) not in ('passed','unsupported') for k in ('dns_udp','quic_vn'))):
         result.update(connection='partial',code='transport_verification_incomplete')
-    if config.get('burstObservatory') and result['connection']=='passed' and not payload_ok:
+    if result['connection']=='passed' and not payload_ok:
         result.update(connection='partial',code='https_payload_incomplete')
     return result
 

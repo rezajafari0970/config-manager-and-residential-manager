@@ -27,3 +27,42 @@ Datacenter/CDN grouping (2026-11-17): the complete Go suite, focused race checks
 The additive schema42 migration was rehearsed twice against a current database copy and deployed under the shared lock with a matched backup. All 37 pre-existing tables and the Residential policy epoch were preserved. All three services were verified against their binary checksums; Nginx retained its process identity. The initial deployment took 24.793 seconds from service stop to panel readiness. A subsequent raw-export concurrency refinement restarted only the panel, becoming ready in 2.082 seconds; other binaries were unchanged.
 
 Production verification checked all 36 scoped links with HEAD and decrypted the original stored bodies in memory to verify raw membership across 14 populated groups. Every group with an available healthy candidate returned its exact stored template bytes. Raw exports admit new arrivals on the next request, while actual member revocation or reclassification may return a retryable 503. The live mobile/desktop page and inline raw/single-template link navigation passed without JavaScript errors. Initial classification runs asynchronously; pending and expired entries remain in Unknown until fresh evidence is available.
+
+Independent preparation and native drivers (2026-11-17): the complete Go suite,
+`go vet`, focused race checks, 18 live-probe Python tests, four payload tests and
+source-status/diagnostic JavaScript tests passed. The actual pinned sing-box core
+accepted the Hysteria 1, Hysteria 2 and userspace WireGuard schema matrix. The
+isolated worker integration completed all 13 samples, including six live samples;
+all 13 passed their core checks and four passed full connection/payload checks.
+One verified connection used the native driver. Invalid or inaccessible endpoints
+remained rejected. The same harness verified recovery after killing a worker.
+These are server-side checks; no Android or mobile-operator test is claimed.
+
+Schema 42 to 43 was rehearsed twice on a private operational database copy. The
+38 unaffected tables matched exactly; retained conversion rows were unchanged,
+with only the existing expiry/ownership reconciliation applied. Integrity,
+foreign keys and the Residential epoch passed. Deployment used a matched backup.
+All three services were active and checked against their release checksums; the
+Nginx process was preserved. Initial stop-to-ready time was 34.162 seconds. A
+subsequent preparation batching refinement restarted only the panel in 2.234
+seconds; ordinary and Residential workers retained their process identities.
+
+A controlled single-run comparison on the same private database copy and the
+same 128 raw input hashes measured preparation/persistence at 9691.618 ms before
+batching and 275.947 ms after batching (97.153% less elapsed time for that stage).
+Both runs used existing encrypted blobs; filesystem caches and shared-host load
+were not independently controlled. This is not a whole-system, network-test or
+99% end-to-end speed claim. A separate synthetic regression prepared 200 inputs
+in 85.698 ms while verifying ownership and health isolation.
+
+After the refinement, the live preparation backlog was zero for 1523 eligible
+raw inputs: 1472 had templates (including five native templates), and 51 had
+explicit structural diagnostics. Canonical deduplication produced 1405 Xray
+profiles and five native profiles in the group exports at that snapshot. Both
+group formats and both single-profile rotations returned valid JSON/JSONL with
+HTTP 200. Health tests continue independently and prepared-only output is clearly
+marked unverified. Counts change as sources refresh and memberships expire.
+Live Chromium checks passed Input, Output and Datacenter pages at 390 and 1440
+pixels without JavaScript errors or horizontal overflow; prepared single-profile
+navigation also passed. Existing datacenter/CDN and Residential pipelines remain
+separate from template preparation.

@@ -57,6 +57,15 @@ func TestTemplateProtocolMatrix(t *testing.T) {
 			if json.Unmarshal(c.Config, &m) != nil || bytes.ContainsAny(c.Config, "\r\n") {
 				t.Fatal("not compact JSON")
 			}
+			if c.Engine == "sing-box" {
+				if m["inbounds"].([]any)[0].(M)["type"] != "socks" || m["route"].(M)["final"] == nil {
+					t.Fatal("native template missing SOCKS/default route")
+				}
+				if string(before) != raw || !c.RequiresConnection {
+					t.Fatal("native evidence/raw changed")
+				}
+				return
+			}
 			if m["remarks"] != "@shenvpn" || m["dns"].(M)["tag"] != "dns-module" || m["inbounds"].([]any)[0].(M)["tag"] != "socks" {
 				t.Fatal("template fields missing")
 			}
@@ -92,6 +101,9 @@ func TestTemplatePinnedCoreMatrix(t *testing.T) {
 			if len(p.Candidates) == 0 {
 				t.Fatal(p.Code)
 			}
+			if p.Candidates[0].Engine == "sing-box" {
+				t.Skip("checked by native pinned matrix")
+			}
 			file := filepath.Join(t.TempDir(), "config.json")
 			if e := os.WriteFile(file, p.Candidates[0].Config, 0600); e != nil {
 				t.Fatal(e)
@@ -118,7 +130,7 @@ func TestTemplatePreservesCredentialsTransportAndNumbers(t *testing.T) {
 }
 func TestTemplateRejectsUnsupportedAmbiguityAndChains(t *testing.T) {
 	cases := map[string]string{
-		"hysteria://secret@192.0.2.1:443": "hysteria1_unsupported_by_target_core",
+
 		`{"outbounds":[{"tag":"a","protocol":"socks","settings":{}},{"tag":"b","protocol":"socks","settings":{}}]}`: "ambiguous_proxy_selection",
 		`{"outbounds":[{"tag":"proxy","protocol":"socks","settings":{},"proxySettings":{"tag":"missing"}}]}`:        "missing_proxy_dependency",
 		`{"outbounds":[{"tag":"proxy","protocol":"socks","settings":{},"proxySettings":{"tag":"proxy"}}]}`:          "cyclic_proxy_chain",

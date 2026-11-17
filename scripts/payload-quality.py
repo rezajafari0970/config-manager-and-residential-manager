@@ -2,6 +2,7 @@
 """Bounded full-payload qualification through SOCKS, never direct.
 A finite server-side test, not app/Android/long-term stability evidence.
 """
+import concurrent.futures
 import json,os,pathlib,subprocess,sys,tempfile,time
 VERSION='payload_v1'
 DOWNLOAD=2097152
@@ -26,8 +27,10 @@ def run(timeout):
  timeout=max(20,min(45,int(timeout)))
  with tempfile.TemporaryDirectory(prefix='config-payload-',dir='/dev/shm') as folder:
   payload=pathlib.Path(folder)/'upload.bin';payload.write_bytes(os.urandom(UPLOAD));payload.chmod(0o600)
-  down=request('https://speed.cloudflare.com/__down?bytes='+str(DOWNLOAD)+'&nonce='+str(time.time_ns()),timeout,size=DOWNLOAD)
-  up=request('https://speed.cloudflare.com/__up',timeout,payload=payload)
+  with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+   download=pool.submit(request,'https://speed.cloudflare.com/__down?bytes='+str(DOWNLOAD)+'&nonce='+str(time.time_ns()),timeout,size=DOWNLOAD)
+   upload=pool.submit(request,'https://speed.cloudflare.com/__up',timeout,payload=payload)
+   down,up=download.result(),upload.result()
   check=request('https://www.gstatic.com/generate_204',min(timeout,10))
  result={'payload_version':VERSION,'payload_download':down['status'],'payload_upload':up['status'],'payload_recheck':check['status']}
  for key,row in [('download',down),('upload',up)]:

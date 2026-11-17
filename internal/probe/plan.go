@@ -24,6 +24,7 @@ const Version = "xray-26.11.9.probe-plan.v7"
 
 type M = map[string]any
 type Candidate struct {
+	Engine             string `json:"engine,omitempty"`
 	Rule               string `json:"rule"`
 	SHA256             string `json:"sha256"`
 	Config             []byte `json:"config"`
@@ -88,6 +89,11 @@ func Prepare(raw []byte) (p Plan) {
 	switch {
 	case strings.HasPrefix(strings.ToLower(s), "vmess://"):
 		p.Kind = "vmess"
+		if cs, ok := vmessSecurityHypotheses(s[len("vmess://"):]); ok {
+			p.Candidates = cs
+			p.Code = "prepared"
+			return
+		}
 		ob, err = vmess(s[len("vmess://"):])
 	case strings.HasPrefix(strings.ToLower(s), "[interface]"):
 		p.Kind = "wireguard"
@@ -115,19 +121,17 @@ func Prepare(raw []byte) (p Plan) {
 			ob, err = wireguardURI(u)
 		case "hysteria", "hy":
 			err = errors.New("hysteria1_unsupported_by_target_core")
-		case "json", "custom":
-			payload := strings.SplitN(strings.TrimPrefix(s, u.Scheme+"://"), "#", 2)[0]
-			b, e := url.PathUnescape(payload)
-			if e == nil && !strings.HasPrefix(strings.TrimSpace(b), "{") {
-				var decoded []byte
-				decoded, e = decode(b)
-				b = string(decoded)
+		case "json", "custom", "napsternet":
+			decoded, e := DecodeEnvelope(raw)
+			if e != nil {
+				p.Code = e.Error()
+				return
 			}
-			if e != nil || !strings.HasPrefix(strings.TrimSpace(b), "{") {
+			if !bytes.HasPrefix(bytes.TrimSpace(decoded), []byte("{")) {
 				p.Code = "custom_json_envelope_invalid"
 				return
 			}
-			nested := Prepare([]byte(b))
+			nested := Prepare(decoded)
 			p.Candidates = nested.Candidates
 			p.Code = nested.Code
 			return
@@ -168,7 +172,7 @@ func Prepare(raw []byte) (p Plan) {
 }
 func candidate(m M, rule string, connection bool) Candidate {
 	b, _ := json.Marshal(m)
-	return Candidate{rule, repair.Digest(b), b, connection}
+	return Candidate{Rule: rule, SHA256: repair.Digest(b), Config: b, RequiresConnection: connection}
 }
 
 // Keep bypass flags only in immutable raw storage. Every generated candidate
@@ -406,7 +410,7 @@ func uri(u *url.URL) (M, error) {
 }
 
 func transport(q url.Values, server string) (M, error) {
-	network := def(q.Get("type"), "tcp")
+	network := def(strings.ToLower(strings.TrimSpace(q.Get("type"))), "tcp")
 	if strings.Contains(network, "://") {
 		return nil, errors.New("concatenated_config_uri")
 	}
@@ -418,7 +422,7 @@ func transport(q url.Values, server string) (M, error) {
 	sniHost := host
 	switch network {
 	case "tcp", "raw":
-		header := def(q.Get("headerType"), "none")
+		header := def(strings.ToLower(strings.TrimSpace(q.Get("headerType"))), "none")
 		h := M{"type": header}
 		if header != "none" && header != "http" {
 			return nil, errors.New("unsupported_tcp_header")
@@ -486,7 +490,7 @@ func transport(q url.Values, server string) (M, error) {
 	default:
 		return nil, errors.New("transport_driver_pending")
 	}
-	sec := def(q.Get("security"), "none")
+	sec := def(strings.ToLower(strings.TrimSpace(q.Get("security"))), "none")
 	if sec != "none" && sec != "tls" && sec != "reality" {
 		return nil, errors.New("unsupported_security")
 	}

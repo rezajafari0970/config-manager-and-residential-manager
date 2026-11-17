@@ -12,10 +12,10 @@ assert.match(sourceStatus({...base,state:'error',config_count:31})[0],/قبلی 
 assert.match(sourceStatus({...base,state:'error',error_code:'processing_timeout'})[0],/پردازش/);
 assert.equal(sourceStatus({...base,state:'error',error_code:'fetch_timeout'})[1],'bad');
 assert.equal(sourceStatus({...base,state:'fetching'})[1],'working');
-assert.equal(sourceStatus({...base,config_count:29,suppressed_count:1})[1],'wait');
-assert.equal(sourceStatus({...base,config_count:1},{blocked:1})[1],'wait');
+assert.equal(sourceStatus({...base,config_count:29,suppressed_count:1})[1],'good');
+assert.equal(sourceStatus({...base,config_count:1},{blocked:1})[1],'bad');
 assert.equal(sourceStatus({...base,config_count:1,content_state:'partial'},{total:1,ready:1})[1],'good');
-assert.equal(sourceStatus({...base,config_count:1},{total:1,ready:0,pending:1})[1],'wait');
+assert.equal(sourceStatus({...base,config_count:1},{total:1,ready:0,pending:1})[1],'working');
 console.log('14 source status assertions passed; zero current configs never show collection success');
 const {receiptCounts}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 assert.deepEqual(receiptCounts({received_count:6,receipt_unique:2,receipt_new:0,suppressed_count:0}),{unique:2,repeated:4,added:0,existing:2});
@@ -49,3 +49,6 @@ assert.equal(conversionDetail('https_proxy_verified_site_unavailable').category,
 
 for (const state of ['error','queued','fetching']) {const got=sourceStatus({...base,state,config_count:148,refresh_reason:'source_count_drop_pending'});assert.equal(got[1],'wait');assert.match(got[0],/افت تعداد/)}
 assert.equal(receiptCounts({received_count:6,receipt_unique:2,receipt_new:-1}).added,null);
+
+assert.equal(sourceStatus({...base,config_count:200},{total:200,prepared:200,pending:200})[1],'working');
+assert.match(sourceStatus({...base,config_count:200,suppressed_count:2},{total:200,prepared:200,pending:0,blocked:5})[0],/نتیجهٔ خطا/);

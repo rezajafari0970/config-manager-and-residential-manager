@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/convert"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/native"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/resources"
@@ -171,6 +172,9 @@ func execute(ctx context.Context, c client, helper, core string, slot int, j pro
 		var h helperResult
 		if e == nil && json.Unmarshal(out.Bytes(), &h) == nil && h.Code != "" {
 			r.Attempt = h.Attempt
+			if r.Engine == "sing-box" {
+				r.CoreSHA256 = native.NativeSHA
+			}
 			r.Attempts = h.Attempts
 			for _, candidate := range p.Candidates {
 				if candidate.SHA256 == h.SHA256 {
@@ -194,8 +198,20 @@ func execute(ctx context.Context, c client, helper, core string, slot int, j pro
 	}
 	completeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if e := c.call(completeCtx, "/complete", r, nil); e != nil {
-		log.Print("probe completion deferred; lease will recover")
+	for attempt := 0; attempt < 3; attempt++ {
+		e := c.call(completeCtx, "/complete", r, nil)
+		if e == nil {
+			return
+		}
+		log.Printf("probe completion deferred: %v", e)
+		if e.Error() == "api_status_409" || e.Error() == "api_status_422" {
+			return
+		}
+		select {
+		case <-completeCtx.Done():
+			return
+		case <-time.After(time.Second):
+		}
 	}
 }
 func run() error {

@@ -1,0 +1,85 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Config preparation exports",
+    "version": "43"
+  },
+  "paths": {
+    "/api/prepared/export": {
+      "get": {
+        "summary": "Export independently prepared templates",
+        "description": "Defaults to unverified preparation. Original bytes, health proof and format are separate. Xray groups are JSON arrays, native groups are JSONL. Single exports are JSON objects.",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional source ID"
+          },
+          {
+            "name": "engine",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xray",
+                "sing-box"
+              ],
+              "default": "xray"
+            },
+            "description": "Output core format"
+          },
+          {
+            "name": "single",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "description": "Rotate one JSON profile"
+          },
+          {
+            "name": "healthy",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "description": "Only fresh exact-byte health proof"
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional canonical configuration ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current owned templates; inspect X-Verification-Scope and X-Config-Engine"
+          },
+          "204": {
+            "description": "No eligible single profile"
+          },
+          "404": {
+            "description": "Unknown source"
+          },
+          "409": {
+            "description": "Membership changed during export; retry"
+          },
+          "422": {
+            "description": "Invalid engine"
+          }
+        }
+      }
+    }
+  }
+}

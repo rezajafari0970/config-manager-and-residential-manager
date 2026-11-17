@@ -42,6 +42,16 @@ func TestAllTemplatesPermitTCPUDPAndQUICRouting(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			if p.Candidates[0].Engine == "sing-box" {
+				in := root["inbounds"].([]any)[0].(M)
+				if in["type"] != "socks" || in["network"] != nil {
+					t.Fatal("native TCP/UDP SOCKS required")
+				}
+				if root["route"].(M)["final"] == nil {
+					t.Fatal("native final route absent")
+				}
+				return
+			}
 			assertTrafficEnvelope(t, root)
 			ob := root["outbounds"].([]any)[0].(M)
 			if _, ok := ob["mux"]; ok && name != "vless-explicit-xudp" {

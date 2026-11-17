@@ -75,6 +75,9 @@ func TestBrowserFixtureServer(t *testing.T) {
 	defer stop()
 	done := make(chan error, 1)
 	go func() { done <- engine.Run(ctx) }()
+	preparerDone := make(chan struct{})
+	go func() { defer close(preparerDone); store.RunPreparer(ctx) }()
+	defer func() { stop(); <-preparerDone }()
 	// Synthetic UI evidence only; this harness is never part of a shipped binary.
 	converted := make(chan struct{})
 	go func() {

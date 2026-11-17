@@ -77,7 +77,30 @@ func receipt(r probe.Result) ([]byte, error) {
 	if len(r.Candidate) > 0 {
 		_, changes, _ = compat.ApplyJSON(r.Candidate)
 	}
-	return json.Marshal(map[string]any{"family": compat.Family(r.Candidate), "target": target.Pinned(), "pipeline": r.Version, "driver_version": compat.Version, "raw_sha256": r.Hash, "candidate_sha256": r.SHA256, "runtime_sha256": r.RuntimeSHA256, "core_sha256": r.CoreSHA256, "bundled_core_sha256": "cc4b84d3069569f297a61f04b914f2bb37e9d202fd7b84cb50def1fc30fd40e1", "changes": changes, "checks": r.Evidence, "attempts": r.Attempts, "rule": r.Rule, "code": r.Code, "tested": time.Now().UnixMilli(), "android": "not_run", "http3": r.Evidence["http3"]})
+	engine := r.Engine
+	if engine == "" {
+		engine = "xray"
+	}
+	family := compat.Family(r.Candidate)
+	var targetInfo any = target.Pinned()
+	bundled := "cc4b84d3069569f297a61f04b914f2bb37e9d202fd7b84cb50def1fc30fd40e1"
+	if engine == "sing-box" {
+		targetInfo = map[string]string{"id": "sing-box-1.14.4"}
+		bundled = ""
+		var root map[string]any
+		if json.Unmarshal(r.Candidate, &root) == nil {
+			for _, field := range []string{"outbounds", "endpoints"} {
+				if nodes, ok := root[field].([]any); ok && len(nodes) > 0 {
+					if ob, ok := nodes[0].(map[string]any); ok {
+						if typ, ok := ob["type"].(string); ok {
+							family = "sing-box." + typ
+						}
+					}
+				}
+			}
+		}
+	}
+	return json.Marshal(map[string]any{"engine": engine, "family": family, "target": targetInfo, "pipeline": r.Version, "driver_version": compat.Version, "raw_sha256": r.Hash, "candidate_sha256": r.SHA256, "runtime_sha256": r.RuntimeSHA256, "core_sha256": r.CoreSHA256, "bundled_core_sha256": bundled, "changes": changes, "checks": r.Evidence, "attempts": r.Attempts, "rule": r.Rule, "code": r.Code, "tested": time.Now().UnixMilli(), "android": "not_run", "http3": r.Evidence["http3"]})
 }
 func saveConversionEvidence(ctx context.Context, tx *sql.Tx, r probe.Result) error {
 	b, e := receipt(r)

@@ -15,6 +15,25 @@ const shareCompatibilityVersion = "share-compat.v2"
 
 func normalizeVMessShare(m M) ([]string, error) {
 	rules := []string{}
+	if value, exists := m["tls"]; exists {
+		switch v := value.(type) {
+		case bool:
+			if v {
+				m["tls"] = "tls"
+			} else {
+				m["tls"] = "none"
+			}
+			rules = appendRule(rules, "tls-boolean")
+		case string:
+			n := strings.ToLower(strings.TrimSpace(v))
+			if n == "tls" || n == "none" || n == "" {
+				if v != n {
+					m["tls"] = n
+					rules = appendRule(rules, "tls-spelling")
+				}
+			}
+		}
+	}
 	// Known alternate VMess exporters call scy "security". Never confuse it
 	// with transport TLS, and never silently override an explicit cipher.
 	if v, exists := m["security"]; exists {

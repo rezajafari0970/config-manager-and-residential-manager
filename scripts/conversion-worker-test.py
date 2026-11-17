@@ -66,7 +66,7 @@ def main():
      time.sleep(1)
     else:raise RuntimeError('durable conversion queue did not finish')
     configs=json.loads(get(state['export_url']));lines=[json.dumps(c,sort_keys=True) for c in configs]
-    assert killed and max_active<=3 and any(r['code']=='hysteria1_unsupported_by_target_core' for r in rows)
+    assert killed and max_active<=3 and any(r.get('engine')=='sing-box' and r['tested']>0 for r in rows)
     assert any(r['core']=='passed' and not r['available'] and r['connection']!='passed' for r in rows)
     assert not any(r['available'] and r['connection']!='passed' for r in rows)
     assert len(lines)==len(set(lines)) and all(c['remarks']=='@shenvpn' and len(c['outbounds'])>=4 for c in configs)
