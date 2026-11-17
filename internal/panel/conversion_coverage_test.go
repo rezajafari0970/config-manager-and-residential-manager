@@ -231,3 +231,53 @@ func TestPreparedHeadAndPrefetchDoNotConsumeRotation(t *testing.T) {
 		t.Fatal(rr.Code, rr.Header())
 	}
 }
+
+func TestCoverageAccountsForPausedAndSafetyGatedSourceInputs(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	raws := []string{}
+	for i := 101; i <= 117; i++ {
+		raws = append(raws, sourceURI(i))
+	}
+	source, _ := newExportSource(t, s, "account-every-input", raws...)
+	rows, e := s.Conversions(ctx, 0, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for i, c := range rows[:5] {
+		if i < 2 {
+			_, e = s.db.Exec("INSERT INTO config_controls VALUES(?,'disabled',?,?)", c.ID, time.Now().UnixMilli(), time.Now().Add(time.Hour).UnixMilli())
+		} else {
+			_, e = s.db.Exec("INSERT INTO input_exclusions(identity,at,hash,manual) VALUES(?,?,?,1)", c.ID, time.Now().UnixMilli(), c.Hash)
+		}
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	summaries, e := s.SourceConversionSummaries(ctx, []Source{{ID: source}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	v := summaries[source]
+	c := v.Coverage
+	if c.Total != 17 || c.Ready != 12 || c.Paused != 2 || c.Withheld != 3 || len(v.Excluded) != 5 {
+		t.Fatalf("lost input: %+v", v)
+	}
+	visible, e := querySourceConversions(ctx, s.reader(), source, 0, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	seen := map[string]bool{}
+	for _, c := range visible {
+		seen[c.ID] = true
+	}
+	for _, x := range v.Excluded {
+		if seen[x.ID] {
+			t.Fatal("double counted", x.ID)
+		}
+		seen[x.ID] = true
+	}
+	if len(seen) != 17 {
+		t.Fatal("unaccounted identity", len(seen))
+	}
+}

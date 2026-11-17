@@ -72,9 +72,11 @@ Datacenter/CDN classification remains an independent background pipeline.
 
 ## Complete accounting and fair scheduling
 
-Every eligible canonical input has exactly one exclusive coverage state: ready,
-queued, running, structural, connection_failed, environment, or expired. Their
-sum equals total inventory. Tested and core_passed are separate progress counters.
+Every current source input has exactly one exclusive coverage state: ready,
+queued, running, structural, connection_failed, environment, expired, paused or
+withheld. Their sum equals the source inventory, including safety-gated inputs.
+Paused/withheld members list their canonical IDs and reason without bypassing
+Residential or deletion guards. Network exports retain only eligible members. Tested and core_passed are separate progress counters.
 Network groups show full received inventory separately from usable raw and tested
 templates. Usable raw count equals Xray plus native template count; no second
 candidate-hash deduplication can silently drop a distinct canonical identity.

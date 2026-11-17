@@ -93,3 +93,10 @@ every IPv6 proxy. Schema43 to 44 was rehearsed twice on a private database copy;
 and foreign-key checks passing. No Android/mobile-operator run or 99% end-to-end
 performance improvement is claimed. Existing P75 preparation timing above is a
 stage-specific historical measurement, not a new whole-system benchmark.
+
+The final source-inventory check also identified safety-gated members that were
+omitted from the old eligible-only summary. Source coverage now includes paused
+and withheld identities, with their reason and ID. A 17-input regression verifies
+12 healthy + two paused + three safety-gated inputs, with no omission or overlap.
+The complete Go suite, focused race and source-status checks passed again after
+this accounting correction. Publication guards remain unchanged.

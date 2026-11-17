@@ -3,6 +3,8 @@ package panel
 // Coverage is an exclusive partition of canonical inputs. Prepared syntax,
 // attempted tests, and currently publishable connectivity are different counts.
 type ConversionCoverage struct {
+	Paused           int `json:"paused"`
+	Withheld         int `json:"withheld"`
 	Total            int `json:"total"`
 	Ready            int `json:"ready"`
 	Queued           int `json:"queued"`
