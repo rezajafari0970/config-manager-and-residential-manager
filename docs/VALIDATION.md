@@ -16,6 +16,19 @@ revocation while the export waits for the writer, then verify only the remaining
 healthy input is returned. Lease-scope tests cover current, unowned, retained,
 quarantined, blocked, excluded, nonrepresentative and paused identities for both
 renewal and completion. Existing expired-writer lease fences remain enforced.
+The full normal panel suite, focused race tests and panel vet passed. Live checks
+passed raw/Xray/native exports and non-consuming rotation HEAD requests across
+all 18 datacenter/CDN groups (90 requests). At that changing snapshot, Amazon had
+116 healthy raw entries and 116 tested templates, and Residential had 147 of each.
+Coverage partitions reconciled across 38 sources and every network group. The
+refinement restarted only the panel; both workers and Nginx retained their PIDs,
+and database schema and Residential epoch were unchanged. Queue work remains in
+progress; these counts do not imply every received endpoint connects.
+
+Live export profiling then identified duplicate full conversion ranking in the
+network template path. The path now reuses the canonical conversion rows already
+returned by network selection; it keeps the final writer-protected health and
+membership recheck. Source-specific selection retains its independent ranking.
 
 P77 recovery and scheduling (17 November 2026): the complete normal Go suite,
 vet, focused race checks for admission/renewal/accounting/compatibility, Python

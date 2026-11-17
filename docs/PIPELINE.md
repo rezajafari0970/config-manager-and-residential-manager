@@ -133,3 +133,5 @@ each heartbeat; ownership, exclusions, Iran guards, revision and lease expiry ar
 still checked under the writer reservation. Public raw/template downloads rebuild
 a concurrently revoked snapshot once before publishing any bytes. Repeated churn
 returns a retryable error instead of stale proof or a partially written response.
+Network template exports reuse the canonical conversions already selected by the
+network query, avoiding a second full conversion ranking for the same group.

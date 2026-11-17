@@ -214,9 +214,23 @@ func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (comp
 }
 
 func scopedPreparedEntries(ctx context.Context, q readQuerier, source, engine, axis, group string) ([]preparedEntry, error) {
-	rows, e := querySourceConversions(ctx, q, source, 0, true)
-	if e != nil {
-		return nil, e
+	var rows []Conversion
+	if axis != "" && source == "" {
+		// Network entries already contain the same canonical conversion winners.
+		// Reuse them instead of reading and ranking every input a second time.
+		network, e := networkEntries(ctx, q, axis, group)
+		if e != nil {
+			return nil, e
+		}
+		for _, n := range network {
+			rows = append(rows, n.Conversion)
+		}
+	} else {
+		var e error
+		rows, e = querySourceConversions(ctx, q, source, 0, true)
+		if e != nil {
+			return nil, e
+		}
 	}
 	entries := []preparedEntry{}
 	for _, c := range rows {
@@ -224,7 +238,7 @@ func scopedPreparedEntries(ctx context.Context, q readQuerier, source, engine, a
 			entries = append(entries, preparedEntry{ID: c.ID, Hash: c.Hash, Candidate: c.CandidateHash, Engine: c.Engine, Code: c.Code, Healthy: true})
 		}
 	}
-	if axis == "" {
+	if axis == "" || source == "" {
 		return entries, nil
 	}
 	network, e := networkEntries(ctx, q, axis, group)
