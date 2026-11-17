@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+bash -n install.sh
+python3 scripts/installer-download-test.py
 test -z "$(gofmt -l cmd internal)"
 go mod verify
 go vet ./...

@@ -35,3 +35,10 @@ Self-signed TLS permits initial encrypted administration but subscription client
 If hosted behind NAT, pass `CMRM_HOST` on first install. Changes to the public hostname or port require coordinated origin, certificate and Nginx changes; the installer rejects accidental changes on rerun.
 
 The country updater preserves last-good datasets and retries daily. Inspect `/var/lib/config-repair/country/update-status.json` if the installer reports incomplete country data. No healthy/Residential result is manufactured when evidence is missing.
+
+
+## A download shows zero bytes
+
+The bootstrap prints the source URL and transport for each attempt. It downloads directly from GitHub codeload first, then tries the official archive URL if needed. Downloads abort after 20 seconds below one byte per second, use an eight-second connection timeout, and share a total retry budget (120 seconds for source; 300 seconds per pinned dependency). Automatic transport selection falls back to IPv4 with HTTP/1.1. Set `CMRM_IP_VERSION=4` or `6` before running the README command to select an address family explicitly. This does not change system DNS or IPv6 configuration. TLS verification and dependency checksums remain mandatory.
+
+If the budget expires, the installer reports the failed URL and stops; fix DNS/HTTPS reachability and rerun the same command. The bootstrap download in the README also has connection, idle-transfer and total-attempt limits. A transient stall does not by itself establish an IPv6 or application fault. Compilation is announced separately with a `[build]` line and can legitimately take several minutes.

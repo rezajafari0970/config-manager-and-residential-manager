@@ -9,10 +9,12 @@
 روی **سرور تازه، با کاربر root** اجرا کنید:
 
 ```bash
-bash -c 'set -e; apt-get update; apt-get install -y curl ca-certificates; f=$(mktemp); curl -fsSL --retry 3 https://raw.githubusercontent.com/rezajafari0970/config-manager-and-residential-manager/main/install.sh -o "$f"; bash "$f"; rm -f "$f"'
+bash -c 'set -e; apt-get update; apt-get install -y curl ca-certificates; f=$(mktemp); trap "rm -f -- \"$f\"" EXIT; curl -qfsSL --connect-timeout 8 --max-time 45 --speed-limit 1 --speed-time 20 --retry 2 --retry-delay 1 --retry-max-time 60 https://raw.githubusercontent.com/rezajafari0970/config-manager-and-residential-manager/main/install.sh -o "$f"; bash "$f"'
 ```
 
 نصب‌کننده کد منبع، Go، نسخه‌های قفل‌شدهٔ Xray و sing-box، Python، HTTP/3، Nginx و پیش‌نیازهای جداسازی پردازش را نصب می‌کند. دانلودها به دسترسی اینترنت نیاز دارند؛ مسدود بودن GitHub یا مخازن بسته مانع نصب می‌شود.
+
+دانلود هر فایل با نام مرحله و نتیجه نمایش داده می‌شود. انتقالِ بدون دریافت داده برای ۲۰ ثانیه قطع می‌شود؛ نصب‌کننده با HTTP/1.1 و IPv4 دوباره تلاش می‌کند و برای سورس، مسیر جایگزین رسمی گیت‌هاب نیز دارد. بودجهٔ کل تلاش دانلود سورس ۱۲۰ ثانیه و هر فایل وابستگی ۳۰۰ ثانیه است. فایل ناقص یا دارای هش اشتباه جایگزین فایل معتبر نمی‌شود. برای انتخاب صریح خانوادهٔ IP می‌توانید پیش از نصب `export CMRM_IP_VERSION=4` یا `export CMRM_IP_VERSION=6` اجرا کنید؛ حالت پیش‌فرض `auto` است.
 
 پشتیبانی این نسخه: **Ubuntu 24.04/26.04 و Debian 12/13، معماری amd64/x86_64، systemd و cgroup v2**. حداقل ۱ گیگابایت RAM و ۲ گیگابایت فضای آزاد برای ساخت لازم است؛ ۲ گیگابایت RAM و فضای اضافه برای داده‌ها پیشنهاد می‌شود. Windows، ARM و کانتینر فاقد مجوز namespace/cgroup پشتیبانی نمی‌شوند. نصب‌کننده امکانات واقعی sandbox را قبل از راه‌اندازی بررسی می‌کند.
 

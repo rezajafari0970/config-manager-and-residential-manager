@@ -14,8 +14,7 @@ def write(path,text,mode=0o600):
     path=pathlib.Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     tmp=path.with_name(path.name+'.install-new');tmp.write_text(text);tmp.chmod(mode);os.replace(tmp,path)
 def download(url,path,pin=None):
-    run('curl','--fail','--location','--retry','3','--connect-timeout','20','--max-time','300','--max-filesize','268435456','--silent','--show-error',url,'-o',path)
-    if pin and sha(path)!=pin:raise RuntimeError('Dependency checksum mismatch: '+path.name)
+    run('bash',ROOT/'install.sh','--download',url,path,'268435456',pin or '')
 def valid_host(value):
     try:ip=ipaddress.ip_address(value);return str(ip)
     except ValueError:
@@ -105,7 +104,9 @@ def main():
             dest.mkdir(exist_ok=True);p.chmod(0o755);os.replace(p,binary)
         venv=OPT/'http3-venv'
         if not (venv/'bin/python').exists():run(sys.executable,'-m','venv',venv)
-        run(venv/'bin/python','-m','pip','install','--disable-pip-version-check','aioquic=='+deps['aioquic'])
+        print('[install] Installing HTTP/3 Python dependencies...',flush=True)
+        run(venv/'bin/python','-m','pip','install','--disable-pip-version-check','--timeout','20','--retries','2','aioquic=='+deps['aioquic'])
+        print('[install] Checking kernel sandbox support...',flush=True)
         sandbox_check(ROOT,OPT/'core-26.11.9/xray')
         release=OPT/'releases'/release_id
         if not (release/'build-complete').exists():
@@ -114,6 +115,7 @@ def main():
             stage=work/'release';stage.mkdir()
             env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=1',GOTOOLCHAIN='local',GOCACHE=str(work/'go-cache'),GOMODCACHE=str(work/'go-mod'),CGO_ENABLED='0')
             for name in ('config-panel','config-probe-worker','config-egress-worker','config-compat','config-repair','config-probe-plan','config-route-audit'):
+                print('[build] '+name+' (compilation may take several minutes)...',flush=True)
                 run(work/'go/bin/go','build','-mod=readonly','-trimpath','-buildvcs=false','-o',stage/name,'./cmd/'+name,cwd=ROOT,env=env)
             shutil.copytree(ROOT/'scripts',stage/'scripts',ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
             shutil.copytree(ROOT/'deploy',stage/'deploy')
@@ -173,6 +175,7 @@ def main():
     (DATA/'country').mkdir(exist_ok=True,mode=0o700)
     link=OPT/'current.install-new';link.unlink(missing_ok=True);link.symlink_to(release);os.replace(link,OPT/'current')
     write(MARKER,json.dumps(dict(product='cmrm',release=release_id,port=port,host=host),indent=2)+'\n')
+    print('[install] Starting application services...',flush=True)
     run('systemctl','daemon-reload')
     run('systemctl','enable',*SERVICES,'config-repair-country-update.timer','nginx')
     run('systemctl','restart',*SERVICES)
@@ -181,6 +184,7 @@ def main():
     health(origin)
     run('systemctl','is-active',*SERVICES)
     # Country refresh is bounded; readiness is reported, never silently assumed.
+    print('[install] Updating country data...',flush=True)
     run('systemctl','start','config-repair-country-update.service')
     geo=ETC/'egress-country.json'
     ready=geo.exists() and len(json.loads(geo.read_text()).get('providers',[]))>=2
