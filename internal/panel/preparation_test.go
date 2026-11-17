@@ -7,7 +7,6 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/convert"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -34,7 +33,7 @@ func TestPreparationIndependentOfHealthAndSourceIsolation(t *testing.T) {
 	}
 	a, _ := newExportSource(t, s, "bulk", raws...)
 	b, _ := newExportSource(t, s, "other", sourceURI(9))
-	if _, e := s.db.Exec("DELETE FROM conversion_results;UPDATE conversion_jobs SET state='queued',next_run=0"); e != nil {
+	if _, e := s.db.Exec("DELETE FROM conversion_receipts;DELETE FROM conversion_results;UPDATE conversion_jobs SET state='queued',next_run=0"); e != nil {
 		t.Fatal(e)
 	}
 	start := time.Now()
@@ -51,18 +50,45 @@ func TestPreparationIndependentOfHealthAndSourceIsolation(t *testing.T) {
 		return rr
 	}
 	rr := fetch("/api/prepared/export?source=" + a)
-	if rr.Code != 200 || rr.Header().Get("X-Config-Count") != "200" || !strings.Contains(rr.Header().Get("X-Verification-Scope"), "not-verified") {
-		t.Fatal(rr.Code, rr.Header())
+	if rr.Code != 200 || rr.Header().Get("X-Config-Count") != "0" {
+		t.Fatal("unverified output published", rr.Code, rr.Header())
 	}
 	var profiles []json.RawMessage
-	if e := json.Unmarshal(rr.Body.Bytes(), &profiles); e != nil || len(profiles) != 200 {
-		t.Fatal("invalid import array", e)
+	if e := json.Unmarshal(rr.Body.Bytes(), &profiles); e != nil || len(profiles) != 0 {
+		t.Fatal(e)
+	}
+	for i := 0; i < 200; i++ {
+		j, e := s.ClaimProbe(ctx)
+		if e != nil || j == nil {
+			t.Fatal(e)
+		}
+		if e = s.CompleteProbe(ctx, conversionResult(*j, 0, true)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	// The other source may be interleaved; finish the finite initial pass.
+	for {
+		j, e := s.ClaimProbe(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if j == nil {
+			break
+		}
+		if e = s.CompleteProbe(ctx, conversionResult(*j, 0, true)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	rr = fetch("/api/prepared/export?source=" + a)
+	if rr.Header().Get("X-Config-Count") != "200" {
+		t.Fatal("verified identity omitted", rr.Header())
 	}
 	first := fetch("/api/prepared/export?source=" + a + "&single=1")
 	second := fetch("/api/prepared/export?source=" + a + "&single=1")
 	if first.Code != 200 || second.Code != 200 || first.Body.String() == second.Body.String() {
-		t.Fatal("rotation failed")
+		t.Fatal("verified rotation failed")
 	}
+
 	rows, e := preparedEntries(ctx, s.reader(), a, "xray")
 	if e != nil {
 		t.Fatal(e)

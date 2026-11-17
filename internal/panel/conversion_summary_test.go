@@ -30,6 +30,8 @@ func TestSourceConversionSummaryMatchesScopedCanonicalOutput(t *testing.T) {
 			t.Fatal(e)
 		}
 		valueA, valueB := got[a], got[b]
+		valueA.Coverage = ConversionCoverage{}
+		valueB.Coverage = ConversionCoverage{}
 		valueA.Issues = nil
 		valueB.Issues = nil
 		if !reflect.DeepEqual(valueA, wantA) || !reflect.DeepEqual(valueB, wantB) {

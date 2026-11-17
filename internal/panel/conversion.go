@@ -73,6 +73,10 @@ func syncConversions(ctx context.Context, tx *sql.Tx) error {
 		return e
 	}
 	_, e := tx.ExecContext(ctx, `INSERT INTO conversion_jobs(hash) SELECT hash FROM conversion_inputs WHERE true ON CONFLICT(hash) DO NOTHING`)
+	if e != nil {
+		return e
+	}
+	_, e = tx.ExecContext(ctx, `INSERT INTO conversion_schedule(hash,created) SELECT hash,CAST(unixepoch('subsec')*1000 AS INTEGER) FROM conversion_jobs WHERE true ON CONFLICT(hash) DO NOTHING`)
 	return e
 }
 func (s *Store) ProbeSettings(ctx context.Context) (probe.Settings, error) {
@@ -152,7 +156,7 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 	j := &probe.Job{Settings: settings}
 	var size int64
 	priority := s.probeTurn.Add(1)%4 == 0
-	e = tx.QueryRowContext(ctx, `SELECT i.hash,i.kind,i.size,j.revision FROM conversion_inputs i JOIN conversion_jobs j ON j.hash=i.hash WHERE (j.token='' OR j.lease_until<=?) AND (j.next_run<=? OR j.version!=?) AND NOT EXISTS(SELECT 1 FROM template_preparations own JOIN template_preparations same ON same.candidate_hash=own.candidate_hash AND same.version=own.version AND same.engine=own.engine JOIN conversion_jobs busy ON busy.hash=same.hash WHERE own.hash=j.hash AND own.candidate_hash!='' AND busy.hash!=j.hash AND busy.token!='' AND busy.lease_until>CAST(unixepoch('subsec')*1000 AS INTEGER)) ORDER BY CASE WHEN ((j.version=? AND j.next_run>0)=?) THEN 0 ELSE 1 END,j.next_run,j.hash LIMIT 1`, now, now, convert.Version, convert.Version, priority).Scan(&j.Hash, &j.Kind, &size, &j.Revision)
+	e = tx.QueryRowContext(ctx, `WITH active_inputs AS MATERIALIZED(SELECT * FROM conversion_inputs) SELECT i.hash,i.kind,i.size,j.revision FROM active_inputs i JOIN conversion_jobs j ON j.hash=i.hash LEFT JOIN conversion_schedule fifo ON fifo.hash=j.hash WHERE (j.token='' OR j.lease_until<=?) AND (j.next_run<=? OR j.version!=?) AND NOT EXISTS(SELECT 1 FROM template_preparations own JOIN template_preparations same ON same.candidate_hash=own.candidate_hash AND same.version=own.version AND same.engine=own.engine JOIN conversion_jobs busy ON busy.hash=same.hash WHERE own.hash=j.hash AND own.candidate_hash!='' AND busy.hash!=j.hash AND busy.token!='' AND busy.lease_until>CAST(unixepoch('subsec')*1000 AS INTEGER)) ORDER BY CASE WHEN ((j.version=? AND j.next_run>0)=?) THEN 0 ELSE 1 END,CASE WHEN j.next_run=0 THEN coalesce(fifo.created,0) ELSE j.next_run END,j.hash LIMIT 1`, now, now, convert.Version, convert.Version, priority).Scan(&j.Hash, &j.Kind, &size, &j.Revision)
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -161,6 +165,9 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 	}
 	j.Token = randomToken()
 	if _, e = tx.ExecContext(ctx, "UPDATE conversion_jobs SET token=?,lease_until=?,state='running',version=? WHERE hash=?", j.Token, now+120000, convert.Version, j.Hash); e != nil {
+		return nil, e
+	}
+	if _, e = tx.ExecContext(ctx, "UPDATE conversion_schedule SET last_started=? WHERE hash=?", now, j.Hash); e != nil {
 		return nil, e
 	}
 	if e = tx.Commit(); e != nil {
@@ -297,7 +304,18 @@ func (s *Store) CompleteProbe(ctx context.Context, r probe.Result) error {
 	if e != nil {
 		return e
 	}
+	if r.Connection == "failed" || r.Connection == "partial" {
+		if _, e = tx.ExecContext(ctx, "DELETE FROM conversion_receipts WHERE candidate_hash=? AND version=?", r.SHA256, r.Version); e != nil {
+			return e
+		}
+		if _, e = tx.ExecContext(ctx, "UPDATE conversion_results SET valid_until=0 WHERE candidate_hash=? AND version=? AND hash!=? AND tested<?", r.SHA256, r.Version, r.Hash, now); e != nil {
+			return e
+		}
+	}
 	if r.Connection == "passed" {
+		if e = retainConversionReceipt(ctx, tx, r.Hash, r.Engine); e != nil {
+			return e
+		}
 		// Reuse only a fresh receipt for byte-identical deterministic output,
 		// preserving its timestamp/expiry and recording the tested raw identity.
 		rows, err := tx.QueryContext(ctx, `SELECT p.hash,p.rule FROM template_preparations p JOIN conversion_jobs j ON j.hash=p.hash WHERE p.candidate_hash=? AND p.version=? AND p.hash!=? AND j.token='' AND p.engine=? AND EXISTS(SELECT 1 FROM conversion_inputs i WHERE i.hash=p.hash)`, ref.Hash, r.Version, r.Hash, func() string {

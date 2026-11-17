@@ -316,13 +316,12 @@ func (s *Server) writeJSONLines(w http.ResponseWriter, r *http.Request, source s
 	}
 	defer out.Close()
 	out.array = strings.HasSuffix(r.URL.Path, "/configs.json")
-	seen := map[string]bool{}
 	count := 0
 	for _, c := range rows {
 		if r.Context().Err() != nil {
 			return
 		}
-		if !c.Available || seen[c.CandidateHash] {
+		if !c.Available {
 			continue
 		}
 		b, e := s.store.conversionBytes(c)
@@ -330,7 +329,6 @@ func (s *Server) writeJSONLines(w http.ResponseWriter, r *http.Request, source s
 			_ = s.store.retryConversionBlob(r.Context(), c)
 			continue
 		}
-		seen[c.CandidateHash] = true
 		if e = out.Line(b); e != nil {
 			failure(w, e)
 			return

@@ -66,3 +66,30 @@ Live Chromium checks passed Input, Output and Datacenter pages at 390 and 1440
 pixels without JavaScript errors or horizontal overflow; prepared single-profile
 navigation also passed. Existing datacenter/CDN and Residential pipelines remain
 separate from template preparation.
+
+Coverage and exact-candidate receipts, P76 (2026-11-17): this release supersedes
+P75's public prepared-only export policy. Public prepared links now require fresh
+core and connection proof. Received diagnostic inventory remains separately visible.
+The 17-input regression returned exactly 17 verified raw/templates, then 16 after
+one connection failure, with all 17 inputs accounted for. Mixed Xray/native group
+counts, FIFO fairness, cache reuse without expiry extension, failure revocation,
+explicit deletion and non-consuming HEAD/prefetch checks passed.
+
+The complete Go suite and vet passed on the target host, as did focused race
+checks, 18 Python sandbox tests, four payload tests and the JavaScript source and
+diagnostic suites. The isolated real worker test completed all 13 inputs including
+six live samples and recovered from SIGKILL. Twelve passed core validation; four
+reported connection success (three full verified payload results and one explicit
+application-site-unavailable diagnostic). Other results were one native format
+rejection, one DNS failure, six deliberately nonpublic fixtures and one incomplete
+transport result. Failed results were not promoted into healthy output. Two-phase
+Chromium acceptance passed, including mobile/desktop layout and restart persistence.
+
+An actual isolated IPv6 sandbox control passed IPv6 HTTPS, IPv4 HTTPS and IPv6 UDP
+DNS, denied unlisted and subsequently revoked destinations, and left host global
+forwarding settings unchanged. This proves sandbox capability, not connectivity of
+every IPv6 proxy. Schema43 to 44 was rehearsed twice on a private database copy;
+39 existing table checks and the Residential epoch were preserved, with integrity
+and foreign-key checks passing. No Android/mobile-operator run or 99% end-to-end
+performance improvement is claimed. Existing P75 preparation timing above is a
+stage-specific historical measurement, not a new whole-system benchmark.

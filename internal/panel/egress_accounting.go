@@ -44,6 +44,6 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 		"awaiting_first": first, "assessed_versions": assessed, "retained_outside_current": retainedOutside,
 		"queue": map[string]int{"paused": paused, "running": running, "due": due, "scheduled": scheduled, "cached": cached},
 		"publication": map[string]int{"retained": retained, "awaiting_proof": retained - eligible, "eligible": eligible,
-			"country_unknown": eligible - known, "country_filtered": known - published, "published": published, "distinct_templates": templates, "identities": identities},
+			"country_unknown": eligible - known, "country_filtered": known - published, "published": published, "raw_count": published, "template_count": published, "tested_template_count": published, "distinct_templates": templates, "identities": identities},
 	}, nil
 }

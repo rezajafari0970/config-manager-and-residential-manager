@@ -612,7 +612,7 @@ func (s *Store) Expire(ctx context.Context, now time.Time) error {
 }
 func (s *Store) Referenced(ctx context.Context, hash string) (bool, error) {
 	var used bool
-	e := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM egress_jobs WHERE hash=? AND state!='DELETED' UNION ALL SELECT 1 FROM egress_jobs WHERE candidate_hash=? AND state!='DELETED' UNION ALL SELECT 1 FROM memberships WHERE raw_hash=? UNION ALL SELECT 1 FROM responses WHERE hash=? UNION ALL SELECT 1 FROM staged WHERE hash=? UNION ALL SELECT 1 FROM repairs WHERE candidate_hash=? AND ("+repairReferences+") UNION ALL SELECT 1 FROM conversion_results WHERE candidate_hash=? UNION ALL SELECT 1 FROM template_preparations WHERE candidate_hash=?)", hash, hash, hash, hash, hash, hash, hash, hash).Scan(&used)
+	e := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM egress_jobs WHERE hash=? AND state!='DELETED' UNION ALL SELECT 1 FROM egress_jobs WHERE candidate_hash=? AND state!='DELETED' UNION ALL SELECT 1 FROM memberships WHERE raw_hash=? UNION ALL SELECT 1 FROM responses WHERE hash=? UNION ALL SELECT 1 FROM staged WHERE hash=? UNION ALL SELECT 1 FROM repairs WHERE candidate_hash=? AND ("+repairReferences+") UNION ALL SELECT 1 FROM conversion_results WHERE candidate_hash=? UNION ALL SELECT 1 FROM template_preparations WHERE candidate_hash=? UNION ALL SELECT 1 FROM conversion_receipts WHERE candidate_hash=? AND valid_until>CAST(unixepoch('subsec')*1000 AS INTEGER))", hash, hash, hash, hash, hash, hash, hash, hash, hash).Scan(&used)
 	return used, e
 }
 

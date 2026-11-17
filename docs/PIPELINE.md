@@ -55,18 +55,48 @@ overwritten by background preparation or receipt reuse.
 |---|---|
 | `source` | Optional source ID; omission includes all eligible sources |
 | `engine` | `xray` (default) or `sing-box` |
-| `single=1` | One JSON object, rotating independently by source/engine/health mode |
-| `healthy=1` | Require fresh health proof for the exact prepared bytes |
+| `single=1` | One JSON object, rotating independently by source/engine/group |
+| `healthy=1` | Compatibility parameter; fresh exact-byte health proof is always required |
 | `id` | Optional canonical config ID |
 
 Xray group exports are JSON arrays. Native group exports are JSONL; single
 exports are JSON objects. The `X-Verification-Scope`, `X-Config-Engine` and
-`X-Config-Count` headers identify the result. Prepared-only links are explicitly
-labelled unverified in the panel. Existing healthy Xray links keep their format.
+`X-Config-Count` headers identify the result. Public links cannot publish unverified preparation. Existing healthy Xray links keep their format.
 Disabled, deleted, expired or excluded members cannot enter prepared exports.
 Ownership and health are rechecked under the writer before publication.
 
-Schema43 adds only preparation references and an independent rotation cursor.
+Schema44 adds expiring exact-candidate receipts, FIFO scheduling and rotation cycle counters.
 Existing Residential evidence pins the unchanged Xray envelope contract separately
 from ordinary preparation policy; this queue update does not reset that evidence.
 Datacenter/CDN classification remains an independent background pipeline.
+
+## Complete accounting and fair scheduling
+
+Every eligible canonical input has exactly one exclusive coverage state: ready,
+queued, running, structural, connection_failed, environment, or expired. Their
+sum equals total inventory. Tested and core_passed are separate progress counters.
+Network groups show full received inventory separately from usable raw and tested
+templates. Usable raw count equals Xray plus native template count; no second
+candidate-hash deduplication can silently drop a distinct canonical identity.
+`received.txt` preserves diagnostic inventory, including unverified items. Native
+profiles use their own sing-box links. Residential counts use the same eligible
+identity set for raw and tested templates, preserving all existing guards.
+
+First-time probes use persistent FIFO age and three of every four claim priority
+turns; the fourth prioritizes due retests. Source churn cannot repeatedly let new
+low hashes bypass older work. A bounded cache survives ordinary response churn
+only for byte-identical tested candidates. Original proof timestamps and expiry
+never extend. Explicit deletion forgets unowned receipts; a newer failed/partial
+probe invalidates older equivalent proof. Leases and membership checks remain.
+
+## IPv6 and parallel transport probes
+
+IPv6 endpoints use a scoped, unprivileged TCP/UDP byte relay through the host's
+existing IPv6 route. Exact endpoint allowlists, namespace DNAT, per-veth rules,
+bounded sessions and cleanup isolate it from other projects. It does not terminate
+TLS or change template credentials, routing or bytes. Global forwarding is not
+changed. Unsupported endpoint ranges fail explicitly rather than bypass isolation.
+The five independent DNS/QUIC transport checks run concurrently. Authenticated
+HTTP/3 can independently prove QUIC when version negotiation is filtered, while
+DNS, required HTTPS destinations and upload/download remain mandatory. A failed
+QUIC negotiation alone is never relabelled as a successful probe.

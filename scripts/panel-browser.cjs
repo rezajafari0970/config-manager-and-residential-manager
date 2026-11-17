@@ -16,7 +16,7 @@ const dir=process.env.PANEL_TEST_DIR,origin=process.env.PANEL_TEST_ORIGIN||'http
  }else{const s=await state();assert.equal(s.stats.sources,3);assert.equal(s.settings.timeout_seconds,19);await page.goto(origin+'/output')}
  await page.waitForFunction(()=>document.querySelectorAll('#output-list [data-view]').length===2);assert.equal(await page.locator('#bank-list').count(),0);await noOverflow();
  await page.waitForFunction(()=>document.querySelectorAll('#output-list a[href*="/api/prepared/export"]').length===2);
- const prepared=await context.request.get(origin+'/api/prepared/export?engine=xray');assert.equal(prepared.status(),200);assert.equal((await prepared.json()).length,2);assert.match(prepared.headers()['x-verification-scope'],/connection-not-verified/);
+ const prepared=await context.request.get(origin+'/api/prepared/export?engine=xray');assert.equal(prepared.status(),200);assert.equal((await prepared.json()).length,2);assert.match(prepared.headers()['x-verification-scope'],/exact-core/);
  const c=await(await context.request.get(origin+'/api/conversions')).json();assert.equal(c.entries.length,2);assert.ok(c.entries.every(x=>x.core==='passed'&&x.connection==='passed'));
  const response=await context.request.get(c.export_url);assert.equal(response.status(),200);assert.equal(response.headers()['content-type'],'application/json; charset=utf-8');assert.equal(response.headers()['content-disposition'],'inline');const lines=JSON.parse(await response.text()).map(x=>JSON.stringify(x));assert.equal(lines.length,2);for(const line of lines){const j=JSON.parse(line);assert.equal(j.remarks,'@shenvpn');assert.equal(j.inbounds[0].tag,'socks');const legs=j.outbounds.filter(x=>x.protocol==='freedom'&&x.settings?.redirect);assert.equal(j.inbounds.filter(x=>x.protocol==='dokodemo-door').length,0);assert.equal(j.outbounds.length,4+legs.length);for(const leg of legs){assert(j.outbounds.some(x=>x.streamSettings?.sockopt?.dialerProxy===leg.tag));assert(!j.routing.rules.some(x=>x.outboundTag===leg.tag));assert(leg.settings.redirect.includes(':'))}}
  const families=await(await context.request.get(origin+'/api/conversion/families')).json();assert.equal(families.version,c.version);assert.equal(Object.values(families.families).reduce((n,x)=>n+x.accepted,0),2);
@@ -84,7 +84,7 @@ const dir=process.env.PANEL_TEST_DIR,origin=process.env.PANEL_TEST_ORIGIN||'http
  await page.waitForFunction(()=>document.querySelectorAll('.network-card').length===18);
  assert.equal(await page.locator('#datacenter-groups .network-card').count(),11);
  assert.equal(await page.locator('#cdn-groups .network-card').count(),7);
- assert.equal(await page.locator('[data-network-copy]').count(),36);
+ assert.equal(await page.locator('[data-network-copy]').count(),54);
  const network=(await(await context.request.get(origin+'/api/datacenter')).json());
  assert.equal(network.total,2);assert.equal(network.datacenters.reduce((n,g)=>n+g.raw_count,0),2);assert.equal(network.cdns.reduce((n,g)=>n+g.raw_count,0),2);
  for(const width of [390,1440]){await page.setViewportSize({width,height:900});await noOverflow();await page.screenshot({path:dir+'/datacenter-'+width+'.png',fullPage:true})}

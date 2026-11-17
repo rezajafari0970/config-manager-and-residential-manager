@@ -7,12 +7,12 @@ func VerifiedEvidence(e map[string]string) bool {
 			return false
 		}
 	}
-	for _, key := range []string{"dns_udp", "quic_vn"} {
+	for _, key := range []string{"dns_udp"} {
 		if e[key] != "passed" && e[key] != "unsupported" {
 			return false
 		}
 	}
-	return true
+	return e["quic_vn"] == "passed" || e["quic_vn"] == "unsupported" || e["http3"] == "passed"
 }
 
 // VerifiedPayload is a finite 2 MiB download / 1 MiB upload plus post-load check.
@@ -29,10 +29,10 @@ func VerifiedNativeEvidence(e map[string]string) bool {
 	if e["native_core"] != "passed" || e["runtime_core"] != "sing_box_1_14_4" {
 		return false
 	}
-	for _, k := range []string{"https", "dns_tcp", "doh_cloudflare", "doh_google", "dns_udp", "quic_vn"} {
+	for _, k := range []string{"https", "dns_tcp", "doh_cloudflare", "doh_google", "dns_udp"} {
 		if e[k] != "passed" {
 			return false
 		}
 	}
-	return VerifiedPayload(e)
+	return VerifiedPayload(e) && (e["quic_vn"] == "passed" || e["http3"] == "passed")
 }

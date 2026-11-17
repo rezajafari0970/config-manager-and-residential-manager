@@ -7,7 +7,7 @@ Only pre-resolved public proxy endpoint IP:port pairs and DNS:53 can leave it.
 Receipts contain hashes and bounded diagnosis codes, never credentials/logs.
 """
 import argparse, base64, concurrent.futures, contextlib, copy, fcntl, hashlib, ipaddress
-import json, os, pathlib, resource, signal, subprocess, importlib.util
+import json, os, pathlib, resource, signal, subprocess, importlib.util, select
 import tempfile, threading, time, urllib.request, uuid
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -90,16 +90,9 @@ def endpoints(config):
             except (subprocess.SubprocessError,json.JSONDecodeError): raise ValueError('endpoint_dns_failed')
         ips=answers[host]
         if not ips or any(not ipaddress.ip_address(ip).is_global or ipaddress.ip_address(ip).is_multicast or ipaddress.ip_address(ip).is_reserved for ip in ips): raise ValueError('nonpublic_endpoint_blocked')
-        ipv4=[ip for ip in ips if ipaddress.ip_address(ip).version==4]
-        # IPv6 remains blocked by the namespace inet policy. A mixed pool can
-        # still be tested through its actual IPv4 members without removing or
-        # rewriting IPv6 outbounds. This proves the config on this network,
-        # not connectivity of every individual pool member.
-        if not ipv4: continue
         previous=resolved.get(host,{})
         ports=set(previous.get('ports',[]))|{str(port)}|hopping.get(host,set())
-        resolved[host]={'ips':ipv4,'port':port,'ports':sorted(ports)}
-    if not resolved: raise ValueError('ipv6_only_probe_pending')
+        resolved[host]={'ips':ips,'port':port,'ports':sorted(ports)}
     return resolved
 
 def runtime_config(config,resolved):
@@ -122,6 +115,8 @@ class Sandbox:
             address_index=SANDBOX_ADDRESS_BASES[prefix]+slot
         base=int(ipaddress.IPv4Address('198.18.0.0'))+4*(address_index+1)
         self.gateway=str(ipaddress.IPv4Address(base+1));self.addr=str(ipaddress.IPv4Address(base+2))
+        v6base=int(ipaddress.IPv6Address('fd7c:636d:7200::'))+4*(address_index+1)
+        self.gateway6=str(ipaddress.IPv6Address(v6base+1));self.addr6=str(ipaddress.IPv6Address(v6base+2));self.v6_ready=False;self.relay=None
         self.cg=pathlib.Path('/sys/fs/cgroup')/self.name;self.temp=None;self.process=None
     def __enter__(self):
         try:
@@ -141,11 +136,60 @@ class Sandbox:
     def network_command(self): return [IP,'netns','exec',self.name]
     def launch_command(self): return ['/usr/bin/python3',str(pathlib.Path(__file__).resolve()),'--sandbox-launch',str(self.cg)]
     def net(self,args,**kw): return cmd(self.network_command()+args,**kw)
+    def stop_relay(self):
+        if self.relay:
+            self.relay.terminate()
+            try:self.relay.wait(timeout=2)
+            except subprocess.TimeoutExpired:self.relay.kill();self.relay.wait()
+            if self.relay.stdout:self.relay.stdout.close()
+            self.relay=None
+    def ipv6_relays(self,pairs):
+        self.stop_relay()
+        if not pairs:return []
+        expanded=[]
+        for ip,ports in pairs:
+            if ipaddress.ip_address(ip).version!=6:continue
+            bounds=ports.split('-');first=int(bounds[0]);last=int(bounds[-1])
+            if last-first>127 or len(expanded)+last-first+1>128:raise ValueError('ipv6_endpoint_capacity')
+            expanded.extend((ip,port) for port in range(first,last+1))
+        if not expanded:return []
+        # Never bridge to an address belonging to this host (the IPv4 sandbox
+        # likewise drops its host input). Numeric targets prevent DNS rebinding.
+        own={v.get('local') for link in json.loads(cmd([IP,'-j','-6','addr','show']).stdout) for v in link.get('addr_info',[])}
+        if any(ip in own for ip,_ in expanded):raise ValueError('nonpublic_endpoint_blocked')
+        if not self.v6_ready:
+            cmd([IP,'-6','addr','add',self.gateway6+'/126','dev',self.hostif,'nodad'])
+            self.net([IP,'-6','addr','add',self.addr6+'/126','dev',self.peer,'nodad'])
+            self.net([IP,'-6','route','add','default','via',self.gateway6])
+            hostmac=json.loads(cmd([IP,'-j','link','show',self.hostif]).stdout)[0]['address']
+            peermac=json.loads(self.net([IP,'-j','link','show',self.peer]).stdout)[0]['address']
+            cmd([IP,'-6','neigh','replace',self.addr6,'lladdr',peermac,'nud','permanent','dev',self.hostif])
+            self.net([IP,'-6','neigh','replace',self.gateway6,'lladdr',hostmac,'nud','permanent','dev',self.peer])
+            self.v6_ready=True
+        self.relay=subprocess.Popen(['/usr/bin/python3',str(pathlib.Path(__file__).with_name('ipv6-endpoint-relay.py'))],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+        (self.cg/'cgroup.procs').write_text(str(self.relay.pid))
+        self.relay.stdin.write(json.dumps({'gateway':self.gateway6,'peer':self.addr6,'pairs':sorted(set(expanded))}).encode()+b'\n');self.relay.stdin.close()
+        if not select.select([self.relay.stdout],[],[],5)[0]:raise ValueError('ipv6_relay_unavailable')
+        mappings=json.loads(self.relay.stdout.readline(32768))
+        ports=','.join(str(row[2]) for row in mappings)
+        # This table is confined to this task's veth; no host forwarding,
+        # default route or pre-existing firewall table is changed.
+        subprocess.run([NFT,'delete','table','inet',self.table],capture_output=True)
+        hostrules=f'table inet {self.table} {{ chain input {{ type filter hook input priority 0; policy accept; iifname "{self.hostif}" ip6 saddr {self.addr6} tcp dport {{ {ports} }} accept; iifname "{self.hostif}" ip6 saddr {self.addr6} udp dport {{ {ports} }} accept; iifname "{self.hostif}" meta nfproto ipv6 drop; }}; }}\n'
+        cmd([NFT,'-f','-'],input=hostrules.encode())
+        return mappings
     def policy(self,resolved):
         pairs=sorted({(ip,str(p)) for v in resolved.values() for ip in v['ips'] for p in v.get('ports',[v['port']])})
-        # Namespace-local rules apply equally to all transports and all DNS rebinds.
-        allow='\n'.join(f'ip daddr {ip} tcp dport {p} accept\nip daddr {ip} udp dport {p} accept' for ip,p in pairs)
-        rules='flush ruleset\ntable inet guard { chain out { type filter hook output priority 0; policy drop; oifname "lo" accept; '+allow+'\n}; chain in { type filter hook input priority 0; policy drop; iifname "lo" accept; ct state established,related accept; }; }\n'
+        mappings=self.ipv6_relays(pairs)
+        allow='\n'.join(f'ip daddr {ip} tcp dport {p} accept\nip daddr {ip} udp dport {p} accept' for ip,p in pairs if ipaddress.ip_address(ip).version==4)
+        allow+='\n'+'\n'.join(f'ip6 daddr {self.gateway6} tcp dport {local} accept\nip6 daddr {self.gateway6} udp dport {local} accept' for _,_,local in mappings)
+        nat=''
+        if mappings:
+            rules='\n'.join(f'ip6 daddr {ip} tcp dport {port} dnat ip6 to [{self.gateway6}]:{local}\nip6 daddr {ip} udp dport {port} dnat ip6 to [{self.gateway6}]:{local}' for ip,port,local in mappings)
+            nat='table inet endpoint_nat { chain out { type nat hook output priority dstnat; policy accept; '+rules+'\n}; }\n'
+        # Only namespace-local rules are replaced. Both families remain closed
+        # except pre-resolved endpoint tuples; the exact config stays unchanged.
+        rules='flush ruleset\n'+nat+'table inet guard { chain out { type filter hook output priority 0; policy drop; oifname "lo" accept; '+allow+'\n}; chain in { type filter hook input priority 0; policy drop; iifname "lo" accept; ct state established,related accept; }; }\n'
         self.net([NFT,'-f','-'],input=rules.encode())
     def inspect(self,config):
         resolved=endpoints(config);runtime_config(config,resolved);return resolved
@@ -168,6 +212,7 @@ class Sandbox:
     def logs(self):
         self.log.seek(0);return self.log.read(128*1024)
     def stop(self):
+        self.stop_relay()
         if self.process:
             with contextlib.suppress(ProcessLookupError):os.killpg(self.process.pid,signal.SIGKILL)
             with contextlib.suppress(subprocess.TimeoutExpired):self.process.wait(timeout=3)
@@ -176,7 +221,7 @@ class Sandbox:
         if hasattr(self,'log'):self.log.close()
     def __exit__(self,*exc):
         self.stop()
-        for args in [[NFT,'delete','table','ip',self.table],[IP,'link','del',self.hostif],[IP,'netns','del',self.name]]:
+        for args in [[NFT,'delete','table','inet',self.table],[NFT,'delete','table','ip',self.table],[IP,'link','del',self.hostif],[IP,'netns','del',self.name]]:
             subprocess.run(args,capture_output=True)
         for _ in range(20):
             try:self.cg.rmdir();break
@@ -212,7 +257,7 @@ def test_candidate(box,candidate,timeout):
     try:
         config=json.loads(b);resolved=box.inspect(config)
     except (ValueError,TypeError,KeyError) as e:
-        code=str(e);result['code']=code if code in {'outbound_driver_pending','wireguard_endpoint_invalid','no_proxy_endpoint','invalid_proxy_endpoint','endpoint_dns_failed','nonpublic_endpoint_blocked','ipv6_only_probe_pending','custom_dns_mapping_requires_review','invalid_download_settings','invalid_download_endpoint','transport_dependency_depth','port_hopping_invalid'} else 'probe_preparation_failed';return result
+        code=str(e);result['code']=code if code in {'outbound_driver_pending','wireguard_endpoint_invalid','no_proxy_endpoint','invalid_proxy_endpoint','endpoint_dns_failed','nonpublic_endpoint_blocked','ipv6_only_probe_pending','ipv6_relay_unavailable','ipv6_endpoint_capacity','custom_dns_mapping_requires_review','invalid_download_settings','invalid_download_endpoint','transport_dependency_depth','port_hopping_invalid'} else 'probe_preparation_failed';return result
     box.resolved=resolved
     # Explicit bootstrap DoH may reach its fixed resolver; app DNS stays routed.
     for server in config.get('dns',{}).get('servers',[]):
@@ -259,7 +304,7 @@ def test_candidate(box,candidate,timeout):
             checks_out.update({x['name']:x['status'] for x in report['checks']})
             checks_out['http3']=report['http3']
             h3python=pathlib.Path('/opt/config-repair/http3-venv/bin/python')
-            if not tcp_only and h3python.exists() and checks_out.get('quic_vn')=='passed':
+            if not tcp_only and h3python.exists():
                 response=box.net([str(h3python),str(pathlib.Path(__file__).with_name('http3-check.py')),str(min(timeout,8))],timeout=min(timeout,8)+3)
                 checks_out['http3']=json.loads(response.stdout)['status']
         except (OSError,ValueError,subprocess.SubprocessError):checks_out['transport']='infrastructure_error'
@@ -289,7 +334,7 @@ def test_candidate(box,candidate,timeout):
     if codes and all(codes):result.update(connection='passed',code=('https_payload_verified' if payload_ok else 'https_payload_incomplete') if site_ok else 'https_proxy_verified_site_unavailable')
     elif any(codes):result.update(connection='partial',code='test_destination_partial')
     else:result.update(connection='failed',code=classify(log,classify(b'\n'.join(curl_errors),'proxy_request_failed' if ready else 'runtime_start_failed')))
-    if result['connection']=='passed' and (any(evidence.get(k)!='passed' for k in ('dns_tcp','doh_cloudflare','doh_google')) or any(evidence.get(k) not in ('passed','unsupported') for k in ('dns_udp','quic_vn'))):
+    if result['connection']=='passed' and (any(evidence.get(k)!='passed' for k in ('dns_tcp','doh_cloudflare','doh_google')) or evidence.get('dns_udp') not in ('passed','unsupported') or (evidence.get('quic_vn') not in ('passed','unsupported') and evidence.get('http3')!='passed')):
         result.update(connection='partial',code='transport_verification_incomplete')
     if result['connection']=='passed' and not payload_ok:
         result.update(connection='partial',code='https_payload_incomplete')

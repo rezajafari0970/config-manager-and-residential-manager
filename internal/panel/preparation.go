@@ -39,7 +39,7 @@ func (s *Store) migrateV43() error {
 // A bounded batch releases the DB reader before decrypting or formatting. Blob
 // references are pinned until the ownership-checked insert commits, including GC.
 func (s *Store) PrepareBatch(ctx context.Context) (int, error) {
-	rows, e := s.workerReader().QueryContext(ctx, `SELECT i.hash FROM conversion_inputs i LEFT JOIN template_preparations p ON p.hash=i.hash WHERE coalesce(p.version,'')!=? OR (p.code='original_blob_unavailable' AND p.prepared<?) ORDER BY coalesce(p.prepared,0),i.hash LIMIT 128`, convert.Version, time.Now().Add(-time.Minute).UnixMilli())
+	rows, e := s.workerReader().QueryContext(ctx, `SELECT i.hash FROM conversion_inputs i LEFT JOIN template_preparations p ON p.hash=i.hash LEFT JOIN conversion_jobs j ON j.hash=i.hash LEFT JOIN conversion_results r ON r.hash=i.hash WHERE coalesce(p.version,'')!=? OR (p.code='original_blob_unavailable' AND p.prepared<?) OR (j.token='' AND EXISTS(SELECT 1 FROM conversion_receipts c WHERE c.candidate_hash=p.candidate_hash AND c.version=p.version AND c.engine=p.engine AND c.valid_until>CAST(unixepoch('subsec')*1000 AS INTEGER) AND (coalesce(r.tested,0)<c.tested OR coalesce(r.version,'')!=c.version))) ORDER BY coalesce(p.prepared,0),i.hash LIMIT 128`, convert.Version, time.Now().Add(-time.Minute).UnixMilli())
 	if e != nil {
 		return 0, e
 	}
@@ -153,6 +153,9 @@ func (s *Store) PrepareBatch(ctx context.Context) (int, error) {
 		if _, err = statement.ExecContext(ctx, v.hash, convert.Version, v.candidate, v.code, v.engine, v.rule, now); err != nil {
 			return 0, err
 		}
+		if err = reuseConversionReceipt(ctx, tx, v.hash, v.candidate, v.engine, v.rule, now); err != nil {
+			return 0, err
+		}
 		if v.candidate == "" && v.code != "original_blob_unavailable" {
 			// No leased probe is superseded by structural preparation.
 			_, err = tx.ExecContext(ctx, `INSERT INTO conversion_results SELECT hash,'',0,'preparation','not_run','not_run',?,?,0,'',?,0 FROM conversion_jobs WHERE hash=? AND token='' ON CONFLICT(hash) DO UPDATE SET candidate_hash='',candidate_size=0,rule='preparation',core='not_run',connection='not_run',code=excluded.code,tested=excluded.tested,valid_until=0,runtime_hash='',version=excluded.version,requires_connection=0`, v.code, now, convert.Version, v.hash)
@@ -172,7 +175,18 @@ func (s *Store) PrepareBatch(ctx context.Context) (int, error) {
 }
 
 func (s *Store) RunPreparer(ctx context.Context) {
+	lastCleanup := time.Time{}
 	for ctx.Err() == nil {
+		if time.Since(lastCleanup) > time.Minute {
+			release, e := s.operations.acquire(ctx, false)
+			if e == nil {
+				_, e = s.db.ExecContext(ctx, "DELETE FROM conversion_receipts WHERE valid_until<=? OR rowid IN(SELECT rowid FROM conversion_receipts ORDER BY tested DESC LIMIT -1 OFFSET 10000)", time.Now().UnixMilli())
+				release()
+				if e == nil {
+					lastCleanup = time.Now()
+				}
+			}
+		}
 		n, e := s.PrepareBatch(ctx)
 		if e != nil && ctx.Err() == nil {
 			log.Print("template preparation will retry")

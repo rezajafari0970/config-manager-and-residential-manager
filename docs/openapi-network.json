@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Config Manager network grouping API",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "paths": {
     "/api/datacenter": {
@@ -10,7 +10,7 @@
         "summary": "Group counts, scoped export URLs, pending work and feed validity",
         "responses": {
           "200": {
-            "description": "datacenters (11), cdns (7), total, pending, feeds, now; each group includes id, name, raw_count, ready_count, raw_url, single_url"
+            "description": "datacenters (11), cdns (7), total received inventory, pending, feeds, now. Groups include inventory_count, coverage (exclusive states), raw_count=ready_count=xray_ready+native_ready, tested/core-passed counters and scoped raw/single/all/native/received URLs."
           },
           "503": {
             "description": "Store temporarily unavailable"
@@ -56,13 +56,17 @@
             "type": "string",
             "enum": [
               "raw.txt",
-              "next.json"
+              "received.txt",
+              "next.json",
+              "configs.json",
+              "native.jsonl",
+              "native-next.json"
             ]
           }
         }
       ],
       "get": {
-        "summary": "Immutable raw bodies or one existing healthy template; independent group rotation",
+        "summary": "Verified raw/templates by canonical identity; received.txt is explicitly unverified diagnostic inventory",
         "responses": {
           "200": {
             "description": "Exact group member(s); X-Config-Count, X-Content-SHA256, X-Network-Axis, X-Network-Group; next.json also X-Export-Cycle"

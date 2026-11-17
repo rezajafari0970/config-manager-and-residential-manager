@@ -116,12 +116,12 @@ class ProbeTests(unittest.TestCase):
   c={'outbounds':[{'tag':'a','protocol':'trojan','settings':{'address':'a.example','port':443}}, {'tag':'b','protocol':'trojan','settings':{'address':'b.example','port':443}}]}
   with patch.object(p,'cmd',side_effect=[V4(),V6()]):
    resolved=p.endpoints(c)
-  self.assertEqual(set(resolved),{'a.example'})
+  self.assertEqual(set(resolved),{'a.example','b.example'})
   c['inbounds']=[{'listen':'127.0.0.1','port':10808,'protocol':'socks','settings':{'udp':True}}]
   runtime=p.runtime_config(c,resolved)
   self.assertEqual(runtime['outbounds'],c['outbounds'])
   with patch.object(p,'cmd',return_value=V6()):
-   with self.assertRaisesRegex(ValueError,'ipv6_only_probe_pending'):p.endpoints(c)
+   self.assertEqual(set(p.endpoints(c)),{'a.example','b.example'})
  def test_mixed_pool_still_rejects_nonpublic_ipv6(self):
   class V4:stdout=b'["1.1.1.1"]'
   class V6:stdout=b'["fd00::1"]'

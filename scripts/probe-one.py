@@ -86,11 +86,11 @@ def cleanup(slot=None,runid=None):
     if r.returncode==0:
         for item in json.loads(r.stdout).get('nftables',[]):
             t=item.get('table',{});name=t.get('name','')
-            if t.get('family')=='ip' and OWN.fullmatch(name) and (slot is None or name.endswith(format(8192+slot,'x'))) and (runid is None or name.startswith(PREFIX+runid)):names.add(name)
+            if t.get('family') in ('ip','inet') and OWN.fullmatch(name) and (slot is None or name.endswith(format(8192+slot,'x'))) and (runid is None or name.startswith(PREFIX+runid)):names.add(name)
     for name in names:
         cg=pathlib.Path('/sys/fs/cgroup')/name
         with contextlib.suppress(OSError):(cg/'cgroup.kill').write_text('1')
-        for args in [[lab.NFT,'delete','table','ip',name],[lab.IP,'link','del',name+'h'],[lab.IP,'netns','del',name]]:subprocess.run(args,capture_output=True,timeout=5)
+        for args in [[lab.NFT,'delete','table','inet',name],[lab.NFT,'delete','table','ip',name],[lab.IP,'link','del',name+'h'],[lab.IP,'netns','del',name]]:subprocess.run(args,capture_output=True,timeout=5)
         with contextlib.suppress(OSError):cg.rmdir()
         for p in pathlib.Path('/dev/shm').glob(name+'-*'):
             if p.is_dir() and not p.is_symlink():shutil.rmtree(p)

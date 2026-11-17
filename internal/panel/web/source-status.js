@@ -11,7 +11,8 @@ export function sourceStatus(s, conversion={}) {
  if(s.config_count===0&&(['updated','unchanged'].includes(s.state)||s.content_state==='config'))return [s.stored_count>0?'ورودی‌های قبلی دیگر موجود نیستند؛ دریافت تازه لازم است':'ورودی یکتای موجود ندارد','wait'];
 
  if(s.config_count>0&&s.disabled_count>=s.config_count)return ['ورودی‌ها ذخیره‌اند؛ خروجی متوقف است','wait'];
- if(conversion.prepared>0)return [conversion.pending>0?'قالب‌ها آماده؛ آزمون اتصال در صف':conversion.blocked>0?'قالب‌ها آماده؛ نتیجهٔ خطا مشخص است':'قالب‌ها و نتیجهٔ آزمون آماده‌اند',conversion.pending>0?'working':conversion.blocked>0?'bad':'good'];
+ if(conversion.coverage){const c=conversion.coverage;if(c.total>0&&c.ready===c.total)return ['همهٔ ورودی‌ها آزموده و اتصال تأیید شد','good'];if(c.running>0)return ['آزمون در حال اجرا؛ وضعیت هر ورودی مشخص است','working'];if(c.queued>0)return ['در صف آزمون؛ خروجی فقط موارد تأییدشده','working'];if(c.environment>0)return ['مانع محیط آزمون؛ تلاش خودکار ادامه دارد','wait'];if(c.expired>0)return ['در انتظار تمدید آزمون اتصال','wait'];if(c.total>0)return ['آزمون تمام شد؛ نتیجهٔ هر ورودی مشخص است',c.ready?'wait':'bad'];}
+ if(conversion.prepared>0)return [conversion.pending>0?'آزمون اتصال در صف':conversion.blocked>0?'نتیجهٔ خطا مشخص است':'قالب‌ها و نتیجهٔ آزمون آماده‌اند',conversion.pending>0?'working':conversion.blocked>0?'bad':'good'];
  if(conversion.blocked>0)return ['آزمون تمام شد؛ اتصال برخی موارد تأیید نشد','bad'];
  if(s.config_count>0&&conversion.total>0&&conversion.ready===0&&conversion.pending>0)return ['دریافت کامل؛ آزمون اتصال در صف','working'];
  if(s.config_count>0&&conversion.total>0&&conversion.ready===conversion.total&&['partial','invalid'].includes(s.content_state))return ['خروجی‌های شناسایی‌شده آماده‌اند','good'];

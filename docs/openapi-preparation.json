@@ -2,13 +2,13 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Config preparation exports",
-    "version": "43"
+    "version": "44"
   },
   "paths": {
     "/api/prepared/export": {
       "get": {
-        "summary": "Export independently prepared templates",
-        "description": "Defaults to unverified preparation. Original bytes, health proof and format are separate. Xray groups are JSON arrays, native groups are JSONL. Single exports are JSON objects.",
+        "summary": "Export one verified template per current canonical input",
+        "description": "Every exported template has fresh exact-byte core and connection proof. Xray groups are JSON arrays, native groups are JSONL. Single exports are JSON objects. Health filtering is always enabled, including when healthy is omitted or 0.",
         "parameters": [
           {
             "name": "source",
@@ -51,7 +51,8 @@
                 "1"
               ]
             },
-            "description": "Only fresh exact-byte health proof"
+            "description": "Deprecated compatibility parameter; cannot disable mandatory exact-byte health proof",
+            "deprecated": true
           },
           {
             "name": "id",
@@ -60,6 +61,22 @@
               "type": "string"
             },
             "description": "Optional canonical configuration ID"
+          },
+          {
+            "name": "network_axis",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional datacenter or cdn axis"
+          },
+          {
+            "name": "network_group",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Group ID, required with network_axis"
           }
         ],
         "responses": {
@@ -77,6 +94,17 @@
           },
           "422": {
             "description": "Invalid engine"
+          },
+          "503": {
+            "description": "A verified blob is unavailable or invalid; no partial export"
+          }
+        }
+      },
+      "head": {
+        "summary": "Validate scope without consuming rotation",
+        "responses": {
+          "200": {
+            "description": "Valid scope; does not imply a populated group"
           }
         }
       }

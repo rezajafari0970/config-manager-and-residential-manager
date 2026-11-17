@@ -133,6 +133,11 @@ func (s *Store) ManageSources(ctx context.Context, b SourceBatch) (BatchResult, 
 	if e = syncConversions(ctx, tx); e != nil {
 		return result, e
 	}
+	if b.Action == "delete" {
+		if e = forgetUnownedConversionReceipts(ctx, tx); e != nil {
+			return result, e
+		}
+	}
 	return result, tx.Commit()
 }
 
@@ -216,6 +221,11 @@ func (s *Store) ManageConfigs(ctx context.Context, b ConfigBatch) (BatchResult, 
 	}
 	if e = syncConversions(ctx, tx); e != nil {
 		return result, e
+	}
+	if b.Action == "delete" {
+		if e = forgetUnownedConversionReceipts(ctx, tx); e != nil {
+			return result, e
+		}
 	}
 	return result, tx.Commit()
 }

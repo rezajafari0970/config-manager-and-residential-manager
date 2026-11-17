@@ -77,7 +77,7 @@ def check(kind,timeout,socks_port=10808):
     return result
 def run(timeout=4,udp=True,socks_port=10808):
     names=['dns_tcp','doh_cloudflare','doh_google']+(['dns_udp','quic_vn'] if udp else [])
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:checks=list(pool.map(lambda n:check(n,timeout,socks_port),names))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:checks=list(pool.map(lambda n:check(n,timeout,socks_port),names))
     if not udp:checks += [{'name':n,'status':'unsupported','milliseconds':0} for n in ['dns_udp','quic_vn']]
     return {'version':VERSION,'checks':checks,'http3':'not_run'}
 if __name__=='__main__':

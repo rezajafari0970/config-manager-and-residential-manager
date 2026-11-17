@@ -24,10 +24,18 @@ func (s *Server) networkURL(axis, group, file string) string {
 
 type networkGroup struct {
 	networkclass.Group
-	Raw       int    `json:"raw_count"`
-	Ready     int    `json:"ready_count"`
-	RawURL    string `json:"raw_url"`
-	SingleURL string `json:"single_url"`
+	Raw             int                `json:"raw_count"`
+	Inventory       int                `json:"inventory_count"`
+	Coverage        ConversionCoverage `json:"coverage"`
+	NativeReady     int                `json:"native_ready"`
+	XrayReady       int                `json:"xray_ready"`
+	AllURL          string             `json:"all_url"`
+	NativeURL       string             `json:"native_url"`
+	NativeSingleURL string             `json:"native_single_url"`
+	ReceivedURL     string             `json:"received_url"`
+	Ready           int                `json:"ready_count"`
+	RawURL          string             `json:"raw_url"`
+	SingleURL       string             `json:"single_url"`
 }
 
 func (s *Server) networkSummary(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +54,10 @@ func (s *Server) networkSummary(w http.ResponseWriter, r *http.Request) {
 		out := []networkGroup{}
 		for _, g := range items {
 			v := networkGroup{Group: g, RawURL: s.networkURL(axis, g.ID, "raw.txt"), SingleURL: s.networkURL(axis, g.ID, "next.json")}
-			seen := map[string]bool{}
+			v.AllURL = s.networkURL(axis, g.ID, "configs.json")
+			v.NativeURL = s.networkURL(axis, g.ID, "native.jsonl")
+			v.NativeSingleURL = s.networkURL(axis, g.ID, "native-next.json")
+			v.ReceivedURL = s.networkURL(axis, g.ID, "received.txt")
 			for _, n := range entries {
 				id := n.Datacenter
 				if axis == "cdn" {
@@ -55,10 +66,16 @@ func (s *Server) networkSummary(w http.ResponseWriter, r *http.Request) {
 				if id != g.ID {
 					continue
 				}
-				v.Raw++
-				if n.Available && !seen[n.CandidateHash] {
+				v.Inventory++
+				v.Coverage.Add(n.Conversion, readStamp(ctx))
+				if n.Healthy(readStamp(ctx)) {
+					v.Raw++
 					v.Ready++
-					seen[n.CandidateHash] = true
+					if n.Engine == "sing-box" {
+						v.NativeReady++
+					} else {
+						v.XrayReady++
+					}
 				}
 			}
 			out = append(out, v)
@@ -81,7 +98,7 @@ func (s *Server) networkSummary(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) networkExport(w http.ResponseWriter, r *http.Request) {
 	axis, group, file := r.PathValue("axis"), r.PathValue("group"), r.PathValue("file")
-	if !networkclass.ValidGroup(axis, group) || (file != "raw.txt" && file != "next.json") || !equal(r.PathValue("token"), s.store.digest("network-export-v1", axis+"\x00"+group+"\x00"+file)) {
+	if !networkclass.ValidGroup(axis, group) || !networkExportFile(file) || !equal(r.PathValue("token"), s.store.digest("network-export-v1", axis+"\x00"+group+"\x00"+file)) {
 		http.NotFound(w, r)
 		return
 	}
@@ -97,25 +114,28 @@ func (s *Server) networkExport(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
 		return
 	}
-	if file == "raw.txt" {
+	if file == "raw.txt" || file == "received.txt" {
 		s.networkRaw(w, r, axis, group)
 		return
 	}
-	item, e := s.store.nextNetwork(r.Context(), axis, group)
-	if e != nil {
-		http.Error(w, "network output temporarily unavailable", 503)
-		return
+	q := r.URL.Query()
+	q.Set("network_axis", axis)
+	q.Set("network_group", group)
+	q.Set("healthy", "1")
+	q.Set("engine", "xray")
+	if file == "native.jsonl" || file == "native-next.json" {
+		q.Set("engine", "sing-box")
 	}
-	if item == nil {
-		w.Header().Set("X-Config-Count", "0")
-		w.WriteHeader(204)
-		return
+	if file == "next.json" || file == "native-next.json" {
+		q.Set("single", "1")
+	} else {
+		q.Del("single")
 	}
-	w.Header().Set("X-Config-Count", "1")
-	w.Header().Set("X-Content-SHA256", item.Conversion.CandidateHash)
-	w.Header().Set("X-Export-Cycle", strconv.FormatInt(item.Cycle, 10))
-	w.Write(item.Bytes)
-	w.Write([]byte{'\n'})
+	copy := r.Clone(r.Context())
+	url := *r.URL
+	url.RawQuery = q.Encode()
+	copy.URL = &url
+	s.preparedExport(w, copy)
 }
 func networkFingerprint(entries []networkEntry) string {
 	type pair struct{ ID, Hash string }
@@ -151,6 +171,9 @@ func (s *Server) networkRaw(w http.ResponseWriter, r *http.Request, axis, group 
 		return
 	}
 	entries, e := networkEntries(snapshot, s.store.read(snapshot), axis, group)
+	if r.PathValue("file") != "received.txt" {
+		entries = healthyNetworkEntries(entries, readStamp(snapshot))
+	}
 	done()
 	if e != nil {
 		failure(w, e)
@@ -200,6 +223,9 @@ func (s *Server) networkRaw(w http.ResponseWriter, r *http.Request, axis, group 
 		return
 	}
 	current, e := networkEntries(ctx, tx, axis, group)
+	if r.PathValue("file") != "received.txt" {
+		current = healthyNetworkEntries(current, readStamp(ctx))
+	}
 	if e != nil {
 		failure(w, e)
 		return
@@ -354,4 +380,21 @@ func (s *Store) nextNetwork(ctx context.Context, axis, group string) (*rotatingC
 		}
 	}
 	return nil, errors.New("group changed repeatedly")
+}
+
+func networkExportFile(file string) bool {
+	switch file {
+	case "raw.txt", "received.txt", "next.json", "configs.json", "native.jsonl", "native-next.json":
+		return true
+	}
+	return false
+}
+func healthyNetworkEntries(entries []networkEntry, now int64) []networkEntry {
+	out := []networkEntry{}
+	for _, n := range entries {
+		if n.Healthy(now) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
