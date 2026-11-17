@@ -164,6 +164,17 @@ func networkSnapshotCurrent(before, current []networkEntry) bool {
 }
 
 func (s *Server) networkRaw(w http.ResponseWriter, r *http.Request, axis, group string) {
+	for range 2 {
+		if s.tryNetworkRaw(w, r, axis, group) || r.Context().Err() != nil {
+			return
+		}
+	}
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, "group changed; retry", http.StatusServiceUnavailable)
+}
+
+func (s *Server) tryNetworkRaw(w http.ResponseWriter, r *http.Request, axis, group string) (complete bool) {
+	complete = true
 	ctx := r.Context()
 	snapshot, done, e := s.store.readSnapshot(ctx)
 	if e != nil {
@@ -231,8 +242,7 @@ func (s *Server) networkRaw(w http.ResponseWriter, r *http.Request, axis, group 
 		return
 	}
 	if !networkSnapshotCurrent(entries, current) {
-		http.Error(w, "group changed; retry", 503)
-		return
+		return false
 	}
 	if e = tx.Commit(); e != nil {
 		failure(w, e)
@@ -245,6 +255,7 @@ func (s *Server) networkRaw(w http.ResponseWriter, r *http.Request, axis, group 
 	w.Header().Set("X-Config-Count", strconv.Itoa(len(entries)))
 	w.Header().Set("X-Content-SHA256", spool.Hash())
 	spool.WriteTo(w)
+	return
 }
 
 // Network rotations have their own tables and locks; global and per-source

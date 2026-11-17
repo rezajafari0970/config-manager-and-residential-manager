@@ -171,7 +171,9 @@ func (s *Store) RenewEgress(ctx context.Context, j egress.Job) error {
 		return e
 	}
 	now := egress.Now()
-	r, e := tx.ExecContext(ctx, "UPDATE egress_jobs SET lease_until=? WHERE hash=? AND token=? AND revision=? AND lease_until>? AND paused=0 AND state!='DELETED' AND hash IN(SELECT hash FROM egress_inventory)", now+120000, j.Hash, j.Token, j.Revision, now)
+	// Check this lease's identity through the authoritative view. Enumerating
+	// the full historical inventory on every heartbeat monopolizes the writer.
+	r, e := tx.ExecContext(ctx, "UPDATE egress_jobs SET lease_until=? WHERE hash=? AND token=? AND revision=? AND lease_until>? AND paused=0 AND state!='DELETED' AND EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash)", now+120000, j.Hash, j.Token, j.Revision, now)
 	if e != nil {
 		return e
 	}
@@ -250,7 +252,7 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	var accepted bool
 	var failures, streak, firstCompleted int
 	var last, claimed int64
-	e = tx.QueryRowContext(ctx, "SELECT ever_accepted,failures,last_failure,claimed_at,retry_streak,first_completed FROM egress_jobs WHERE hash=? AND revision=? AND token=? AND lease_until>? AND paused=0 AND state!='DELETED' AND hash IN(SELECT hash FROM egress_inventory)", j.Hash, j.Revision, j.Token, now).Scan(&accepted, &failures, &last, &claimed, &streak, &firstCompleted)
+	e = tx.QueryRowContext(ctx, "SELECT ever_accepted,failures,last_failure,claimed_at,retry_streak,first_completed FROM egress_jobs WHERE hash=? AND revision=? AND token=? AND lease_until>? AND paused=0 AND state!='DELETED' AND EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash)", j.Hash, j.Revision, j.Token, now).Scan(&accepted, &failures, &last, &claimed, &streak, &firstCompleted)
 	if errors.Is(e, sql.ErrNoRows) {
 		return ErrConflict
 	}

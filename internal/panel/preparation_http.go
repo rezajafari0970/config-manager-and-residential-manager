@@ -46,6 +46,19 @@ func preparedEntries(ctx context.Context, q conversionQuerier, source, engine st
 }
 
 func (s *Server) preparedExport(w http.ResponseWriter, r *http.Request) {
+	for range 2 {
+		if s.tryPreparedExport(w, r) || r.Context().Err() != nil {
+			return
+		}
+	}
+	w.Header().Set("Retry-After", "1")
+	failure(w, ErrConflict)
+}
+
+// Rebuild a concurrently revoked snapshot once, before any response bytes or
+// rotation cursor are committed. Each attempt closes its spool and transaction.
+func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (complete bool) {
+	complete = true
 	source, engine := r.URL.Query().Get("source"), r.URL.Query().Get("engine")
 	if engine == "" {
 		engine = "xray"
@@ -163,8 +176,7 @@ func (s *Server) preparedExport(w http.ResponseWriter, r *http.Request) {
 	for _, v := range written {
 		n, ok := live[v.ID]
 		if !ok || n.Hash != v.Hash || n.Candidate != v.Candidate || (healthy && !n.Healthy) {
-			failure(w, ErrConflict)
-			return
+			return false
 		}
 	}
 	if single {
@@ -198,6 +210,7 @@ func (s *Server) preparedExport(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Verification-Scope", "exact-core; https-dns-payload-verified; android-not-run")
 	}
 	_, _ = out.WriteTo(w)
+	return
 }
 
 func scopedPreparedEntries(ctx context.Context, q readQuerier, source, engine, axis, group string) ([]preparedEntry, error) {

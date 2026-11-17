@@ -1,5 +1,22 @@
 # Validation
 
+P77 follow-up: an eight-second live CPU sample attributed 40.46% of panel CPU
+samples to Residential lease renewal and 29.30% to completion. Both paths built
+the full historical inventory for a single claimed hash. They now use indexed
+correlated lookups through the same authoritative view, without changing policy
+or data. A read-only comparison of 20 live/historical hashes returned identical
+scope decisions: median lookup time was 153.938 ms before and 0.009 ms after
+(total 3167.787 ms versus 0.245 ms). This measures that SQL predicate with the
+host SQLite interpreter, not end-to-end probe speed; caches and host load were
+not independently controlled.
+
+Concurrent revocation during raw/template export now triggers one fresh snapshot
+attempt before any response bytes or rotation advance. Regression tests force
+revocation while the export waits for the writer, then verify only the remaining
+healthy input is returned. Lease-scope tests cover current, unowned, retained,
+quarantined, blocked, excluded, nonrepresentative and paused identities for both
+renewal and completion. Existing expired-writer lease fences remain enforced.
+
 P77 recovery and scheduling (17 November 2026): the complete normal Go suite,
 vet, focused race checks for admission/renewal/accounting/compatibility, Python
 probe/payload/Residential suites and JavaScript source/API/polling checks passed.

@@ -126,3 +126,10 @@ hosts and immutable raw data. The fixed-destination compatibility driver preserv
 TCP Fragment on supported TCP transports, including its original settings. Unknown
 masks, UDP carrier masks and destination overrides still require a suitable driver.
 Core/app import checks and real connectivity decide whether the result is usable.
+
+Residential lease renewal and completion look up the claimed hash directly in
+the authoritative inventory view. They do not materialize the historical set on
+each heartbeat; ownership, exclusions, Iran guards, revision and lease expiry are
+still checked under the writer reservation. Public raw/template downloads rebuild
+a concurrently revoked snapshot once before publishing any bytes. Repeated churn
+returns a retryable error instead of stale proof or a partially written response.
