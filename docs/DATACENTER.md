@@ -110,7 +110,11 @@ Literal families are immutable properties of the raw hash and do not expire with
 ASN/CDN metadata. Domain families reuse the same five-minute A/AAAA cache and
 become unknown on expiry; this is a server-side DNS snapshot, not proof that a
 client selected IPv6 or that the VPN carries IPv6 traffic. Classification needs
-no extra proxy tests, core processes or service. The existing bounded network
-workers refresh a versioned JSON evidence envelope; legacy array records initially
-show unknown family and are refreshed automatically. Database schema44, health
+no extra proxy tests, core processes or service. Two bounded DNS-only workers
+refresh families independently of the two ASN/CDN workers, sharing their cache.
+Family jobs have a five-second I/O budget, batches of 64, and automatic retries;
+stable literals are not rescheduled. Legacy array evidence is upgraded in place,
+preserving provider evidence and its schedule, without waiting for external ASN
+services. Missing or corrupt raw blobs stay unknown and retry after one minute.
+Database schema44, health
 proofs, source controls and Residential policy remain unchanged.

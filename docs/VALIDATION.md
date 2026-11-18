@@ -17,6 +17,16 @@ evidence becomes unknown. These are entry-address labels, not proof of the
 client's selected address family or IPv6 traffic through the tunnel. Live rollout
 and measurements are separate from these pre-deployment tests.
 
+The first live acceptance passed 118 export/rotation requests across all 22 groups,
+coverage/count partitions and Residential publication parity. Input, Output,
+Datacenter and Residential pages passed browser checks at 390 and 1440 pixels.
+Live backfill exposed an avoidable wait behind ASN lookups. The family path now
+runs two bounded DNS-only workers independently, retaining the shared cache and
+existing provider records. The full panel suite, panel vet and focused network
+race tests passed after this refinement; its regression test confirms legacy
+evidence/schedules survive, literal families leave the queue, and probe/result
+and Residential job tables remain unchanged.
+
 P77 follow-up: an eight-second live CPU sample attributed 40.46% of panel CPU
 samples to Residential lease renewal and 29.30% to completion. Both paths built
 the full historical inventory for a single claimed hash. They now use indexed

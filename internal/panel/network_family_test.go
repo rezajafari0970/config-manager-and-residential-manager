@@ -132,3 +132,53 @@ func TestIPFamilyExportsReuseProofAndKeepGroupsIsolated(t *testing.T) {
 		t.Fatal("diagnostic inventory omitted unverified input")
 	}
 }
+
+func TestIPFamilyBackfillPreservesLegacyProviderAndProbeState(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	newExportSource(t, s, "family-backfill", strings.Replace(sourceURI(214), "192.0.2.214", "[2001:db8::14]", 1), sourceURI(215))
+	prepareAll(t, s)
+	rows, err := s.Conversions(ctx, 0, true)
+	if err != nil || len(rows) != 2 {
+		t.Fatal(err, len(rows))
+	}
+	legacyHash := rows[0].Hash
+	legacy := `[{"ip":"192.0.2.1","asn":"fixture"}]`
+	next := time.Now().Add(time.Hour).UnixMilli()
+	if _, err = s.db.Exec(`INSERT INTO network_classifications VALUES(?,'amazon','none','fixture',?,123,?,?)`, legacyHash, legacy, next, next); err != nil {
+		t.Fatal(err)
+	}
+	before := retainedSnapshot(t, s)
+	classifier := networkclass.New(networkCache{s})
+	if count, err := s.networkFamilyBatch(ctx, classifier); err != nil || count != 2 {
+		t.Fatal("backfill failed", count, err)
+	}
+	var dc, cdn, reason, evidence string
+	var checked, expires, due int64
+	if err = s.db.QueryRow(`SELECT datacenter,cdn,reason,checked,expires,next_run,evidence FROM network_classifications WHERE raw_hash=?`, legacyHash).Scan(&dc, &cdn, &reason, &checked, &expires, &due, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if dc != "amazon" || cdn != "none" || reason != "fixture" || checked != 123 || expires != next || due != next {
+		t.Fatal("family migration changed provider proof or schedule")
+	}
+	var upgraded struct {
+		Version   int             `json:"version"`
+		Addresses json.RawMessage `json:"addresses"`
+	}
+	if json.Unmarshal([]byte(evidence), &upgraded) != nil || upgraded.Version != 1 || string(upgraded.Addresses) != legacy {
+		t.Fatal("legacy evidence was lost", evidence)
+	}
+	entries, err := networkEntries(ctx, s.reader(), "ip-family", "ipv6")
+	if err != nil || len(entries) != 1 {
+		t.Fatal("IPv6 backfill omitted input", len(entries), err)
+	}
+	if count, err := s.networkFamilyBatch(ctx, classifier); err != nil || count != 0 {
+		t.Fatal("stable literals were scheduled again", count, err)
+	}
+	after := retainedSnapshot(t, s)
+	for _, name := range []string{"conversion_jobs", "conversion_results", "conversion_evidence", "conversion_schedule", "egress_jobs"} {
+		if !reflect.DeepEqual(before[name], after[name]) {
+			t.Fatal("family backfill changed test state", name)
+		}
+	}
+}

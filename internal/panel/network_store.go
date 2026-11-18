@@ -82,6 +82,13 @@ const networkLive = `SELECT DISTINCT m.raw_hash FROM memberships m JOIN artifact
 // retried; startup and ordinary output delivery never depend on remote feeds.
 func (s *Store) RunNetworkClassifier(ctx context.Context) {
 	classifier := networkclass.New(networkCache{s})
+	familyCtx, stopFamilies := context.WithCancel(ctx)
+	familiesDone := make(chan struct{})
+	go func() {
+		defer close(familiesDone)
+		s.runNetworkFamilies(familyCtx, classifier)
+	}()
+	defer func() { stopFamilies(); <-familiesDone }()
 	jobs := make(chan string)
 	var wg sync.WaitGroup
 	for i := 0; i < 2; i++ {
@@ -114,7 +121,7 @@ func (s *Store) RunNetworkClassifier(ctx context.Context) {
 	lastCleanup := time.Time{}
 	for ctx.Err() == nil {
 		classifier.Refresh(ctx)
-		rows, e := s.workerReader().QueryContext(ctx, `SELECT live.raw_hash FROM (`+networkLive+`) live LEFT JOIN network_classifications n ON n.raw_hash=live.raw_hash WHERE coalesce(n.next_run,0)<=? OR coalesce(json_extract(n.evidence,'$.version'),0)!=1 ORDER BY coalesce(n.next_run,0),live.raw_hash LIMIT 32`, time.Now().UnixMilli())
+		rows, e := s.workerReader().QueryContext(ctx, `SELECT live.raw_hash FROM (`+networkLive+`) live LEFT JOIN network_classifications n ON n.raw_hash=live.raw_hash WHERE coalesce(n.next_run,0)<=? ORDER BY coalesce(n.next_run,0),live.raw_hash LIMIT 32`, time.Now().UnixMilli())
 		hashes := []string{}
 		if e == nil {
 			for rows.Next() {
