@@ -59,10 +59,7 @@ func (s *Server) networkSummary(w http.ResponseWriter, r *http.Request) {
 			v.NativeSingleURL = s.networkURL(axis, g.ID, "native-next.json")
 			v.ReceivedURL = s.networkURL(axis, g.ID, "received.txt")
 			for _, n := range entries {
-				id := n.Datacenter
-				if axis == "cdn" {
-					id = n.CDN
-				}
+				id := n.group(axis)
 				if id != g.ID {
 					continue
 				}
@@ -94,7 +91,7 @@ func (s *Server) networkSummary(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.read(ctx).QueryRowContext(ctx, "SELECT expires,refresh FROM network_cache WHERE key=?", "feed/"+f.ID).Scan(&expires, &refresh)
 		feeds[f.ID] = map[string]int64{"expires": expires, "refresh": refresh}
 	}
-	respond(w, 200, map[string]any{"datacenters": groups("datacenter", networkclass.Datacenters), "cdns": groups("cdn", networkclass.CDNs), "total": len(entries), "pending": pending, "feeds": feeds, "now": readStamp(ctx)})
+	respond(w, 200, map[string]any{"datacenters": groups("datacenter", networkclass.Datacenters), "cdns": groups("cdn", networkclass.CDNs), "ip_families": groups("ip-family", networkclass.IPFamilies), "total": len(entries), "pending": pending, "feeds": feeds, "now": readStamp(ctx)})
 }
 func (s *Server) networkExport(w http.ResponseWriter, r *http.Request) {
 	axis, group, file := r.PathValue("axis"), r.PathValue("group"), r.PathValue("file")

@@ -1,5 +1,22 @@
 # Validation
 
+P78 IP-family groups (18 November 2026): the full normal Go suite, `go vet ./...`,
+focused race tests for address-family/network exports, and the two-phase isolated
+Chromium acceptance harness passed on the target host. The browser fixture covers
+all 22 cards, mobile/desktop layout and persistence across restart. The production
+panel binary was built from this source after those code checks.
+
+New regression cases cover IPv6 literals, IPv4-mapped IPv6, fresh A/AAAA answers,
+DNS expiry/failure, mixed destinations, JSON envelopes, Hysteria and WireGuard
+entry addresses, and exclusion of DNS/SNI/interface addresses. Family-only
+classification makes no ASN HTTP requests. Group export tests verify exact raw
+and template counts, native sing-box parity, isolated rotations, scoped tokens,
+health revocation, and unchanged probe/result/Residential job tables after reads.
+Literal families remain valid when provider evidence expires; expired DNS family
+evidence becomes unknown. These are entry-address labels, not proof of the
+client's selected address family or IPv6 traffic through the tunnel. Live rollout
+and measurements are separate from these pre-deployment tests.
+
 P77 follow-up: an eight-second live CPU sample attributed 40.46% of panel CPU
 samples to Residential lease renewal and 29.30% to completion. Both paths built
 the full historical inventory for a single claimed hash. They now use indexed

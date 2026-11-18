@@ -1,6 +1,6 @@
-# Datacenter and CDN exports
+# Datacenter, CDN and IP-family exports
 
-The Datacenter navigation page exposes two independent dimensions for the current
+The Datacenter navigation page exposes three independent dimensions for the current
 ordinary Output inventory. Residential acceptance, retention, country guards,
 source controls and conversion proof are unchanged. This feature neither creates
 configurations nor changes their existing template.
@@ -60,16 +60,18 @@ DNS resolver. Background errors retry without blocking collector startup or HTTP
 
 ## API and outputs
 
-`GET /api/datacenter` returns all 11 datacenter and 7 CDN groups, raw and ready
+`GET /api/datacenter` returns all 11 datacenter, 7 CDN and 4 IP-family groups, raw and ready
 counts, token-scoped links, pending count and feed validity. The existing panel's
 access policy applies. See `openapi-network.json` for the additive API contract.
 
 `GET /subscription/network/{axis}/{group}/{token}/raw.txt` preserves original
-configuration bodies and separates them with a newline. This is not a health
-certificate. `next.json` returns exactly one current, healthy stored template
-candidate; it never regenerates the template. Each axis/group has its own round
-and deduplicates identical candidate hashes. New arrivals join the next round.
-The raw and ready counts can therefore differ legitimately.
+healthy configuration bodies and separates them with a newline. `received.txt`
+is explicitly unverified diagnostic inventory. `next.json` returns one current,
+healthy stored Xray template; native sing-box uses `native-next.json`.
+`configs.json` and `native.jsonl` expose all verified templates for their engine.
+Each axis/group has an independent round over canonical identities, and usable
+raw count equals Xray plus native template count. No new proxy test is scheduled
+by membership in another group or by downloading an export.
 
 Tokens bind the axis, group and format. HEAD and prefetch do not consume turns.
 Empty groups return 204; missing/corrupt bodies and concurrent eligibility changes
@@ -93,3 +95,22 @@ never restore an old database after services have resumed writes.
 - https://api.fastly.com/public-ip-list
 - https://api.bunny.net/system/edgeserverlist and its `/ipv6` endpoint
 - https://www.arvancloud.ir/fa/ips.txt
+
+## IPv6 and address families
+
+`ip-family` has four mutually exclusive groups: `ipv6`, `dual`, `ipv4`, `unknown`.
+The classifier reads only supported transport entry destinations. IPv6-only
+means all resolved destinations are IPv6; any mixture of IPv4 and IPv6 is dual.
+IPv4-mapped IPv6 literals are normalized to IPv4. Tunnel interface addresses,
+inbounds, DNS servers, SNI, HTTP Host and display names never determine the family.
+Xray WireGuard peer endpoints and native sing-box WireGuard endpoints are supported.
+Unsupported chains, incomplete DNS resolution and ambiguous structures stay unknown.
+
+Literal families are immutable properties of the raw hash and do not expire with
+ASN/CDN metadata. Domain families reuse the same five-minute A/AAAA cache and
+become unknown on expiry; this is a server-side DNS snapshot, not proof that a
+client selected IPv6 or that the VPN carries IPv6 traffic. Classification needs
+no extra proxy tests, core processes or service. The existing bounded network
+workers refresh a versioned JSON evidence envelope; legacy array records initially
+show unknown family and are refreshed automatically. Database schema44, health
+proofs, source controls and Residential policy remain unchanged.

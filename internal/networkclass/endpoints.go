@@ -62,6 +62,10 @@ func Endpoints(raw []byte) ([]string, error) {
 		endpoints[strings.Trim(h, "[]")] = true
 	}
 	obs, ok := root["outbounds"].([]any)
+	if native, yes := root["endpoints"].([]any); yes {
+		obs = append(append([]any{}, obs...), native...)
+		ok = true
+	}
 	if !ok {
 		if _, ok := root["server"].(string); ok {
 			obs = []any{root}
@@ -108,9 +112,20 @@ func Endpoints(raw []byte) ([]string, error) {
 			add(server)
 			continue
 		}
+		if proto == "wireguard" && ob["type"] == "wireguard" {
+			peers, ok := ob["peers"].([]any)
+			if !ok || len(peers) == 0 {
+				bad = true
+			}
+			for _, peer := range peers {
+				p, _ := peer.(map[string]any)
+				add(p["server"])
+			}
+			continue
+		}
 		settings, _ := ob["settings"].(map[string]any)
 		found := false
-		if address, ok := settings["address"]; ok {
+		if address, ok := settings["address"]; ok && proto != "wireguard" {
 			add(address)
 			found = true
 		}

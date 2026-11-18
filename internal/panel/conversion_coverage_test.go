@@ -93,15 +93,17 @@ func TestMixedNativeNetworkIdentityCoverage(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, c := range rows {
-		if e = s.saveNetwork(ctx, c.Hash, networkclass.Result{Datacenter: "amazon", CDN: "none", Reason: "fixture", Checked: time.Now().UnixMilli(), Expires: time.Now().Add(time.Hour).UnixMilli()}); e != nil {
+		if e = s.saveNetwork(ctx, c.Hash, networkclass.Result{Datacenter: "amazon", CDN: "none", Reason: "fixture", Family: networkclass.AddressFamily{ID: "ipv4", Reason: "literal_endpoints"}, Checked: time.Now().UnixMilli(), Expires: time.Now().Add(time.Hour).UnixMilli()}); e != nil {
 			t.Fatal(e)
 		}
 	}
 	app, _ := NewServer(s, "http://127.0.0.1:18191")
 	for file, want := range map[string]string{"raw.txt": "2", "configs.json": "1", "native.jsonl": "1", "native-next.json": "1"} {
-		rr := exportRequest(t, app.Handler(), "GET", app.networkURL("datacenter", "amazon", file))
-		if rr.Code != 200 || rr.Header().Get("X-Config-Count") != want {
-			t.Fatal(file, rr.Code, rr.Header())
+		for _, scope := range [][2]string{{"datacenter", "amazon"}, {"ip-family", "ipv4"}} {
+			rr := exportRequest(t, app.Handler(), "GET", app.networkURL(scope[0], scope[1], file))
+			if rr.Code != 200 || rr.Header().Get("X-Config-Count") != want {
+				t.Fatal(scope, file, rr.Code, rr.Header())
+			}
 		}
 	}
 }

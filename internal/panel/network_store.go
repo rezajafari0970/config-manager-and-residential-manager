@@ -38,6 +38,14 @@ func (s *Store) migrateV42() error {
 
 type networkCache struct{ s *Store }
 
+// Versioned derived metadata. Existing array evidence is still readable by old
+// binaries and is refreshed once in the background; no health receipt changes.
+type networkEvidence struct {
+	Version   int                        `json:"version"`
+	Addresses []networkclass.Evidence    `json:"addresses"`
+	Family    networkclass.AddressFamily `json:"ip_family"`
+}
+
 func (c networkCache) Get(ctx context.Context, key string) (networkclass.Record, error) {
 	var r networkclass.Record
 	e := c.s.reader().QueryRowContext(ctx, "SELECT data,expires,refresh FROM network_cache WHERE key=?", key).Scan(&r.Data, &r.Expires, &r.Refresh)
@@ -53,13 +61,17 @@ func (c networkCache) Put(ctx context.Context, key string, r networkclass.Record
 	return e
 }
 func (s *Store) saveNetwork(ctx context.Context, hash string, r networkclass.Result) error {
-	b, _ := json.Marshal(r.Evidence)
+	b, _ := json.Marshal(networkEvidence{Version: 1, Addresses: r.Evidence, Family: r.Family})
+	refresh := r.Expires
+	if r.Family.Expires > 0 {
+		refresh = min(refresh, r.Family.Expires)
+	}
 	release, e := s.operations.acquire(ctx, false)
 	if e != nil {
 		return e
 	}
 	defer release()
-	_, e = s.db.ExecContext(ctx, `INSERT INTO network_classifications VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(raw_hash) DO UPDATE SET datacenter=excluded.datacenter,cdn=excluded.cdn,reason=excluded.reason,evidence=excluded.evidence,checked=excluded.checked,expires=excluded.expires,next_run=excluded.next_run`, hash, r.Datacenter, r.CDN, r.Reason, string(b), r.Checked, r.Expires, max(time.Now().Add(30*time.Second).UnixMilli(), r.Expires-15000))
+	_, e = s.db.ExecContext(ctx, `INSERT INTO network_classifications VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(raw_hash) DO UPDATE SET datacenter=excluded.datacenter,cdn=excluded.cdn,reason=excluded.reason,evidence=excluded.evidence,checked=excluded.checked,expires=excluded.expires,next_run=excluded.next_run`, hash, r.Datacenter, r.CDN, r.Reason, string(b), r.Checked, r.Expires, max(time.Now().Add(30*time.Second).UnixMilli(), refresh-15000))
 	return e
 }
 
@@ -84,7 +96,12 @@ func (s *Store) RunNetworkClassifier(ctx context.Context) {
 					body.Close()
 					if err == nil && repair.Digest(b) == hash && len(b) <= repair.MaxBytes {
 						result := classifier.Classify(sub, b)
-						if err = s.saveNetwork(sub, hash, result); err != nil && ctx.Err() == nil {
+						// A slow ASN lookup must not discard an already determined
+						// literal family just because the I/O deadline elapsed.
+						persist, stop := context.WithTimeout(ctx, 5*time.Second)
+						err = s.saveNetwork(persist, hash, result)
+						stop()
+						if err != nil && ctx.Err() == nil {
 							log.Print("network classification persistence will retry")
 						}
 					}
@@ -97,7 +114,7 @@ func (s *Store) RunNetworkClassifier(ctx context.Context) {
 	lastCleanup := time.Time{}
 	for ctx.Err() == nil {
 		classifier.Refresh(ctx)
-		rows, e := s.workerReader().QueryContext(ctx, `SELECT live.raw_hash FROM (`+networkLive+`) live LEFT JOIN network_classifications n ON n.raw_hash=live.raw_hash WHERE coalesce(n.next_run,0)<=? ORDER BY coalesce(n.next_run,0),live.raw_hash LIMIT 32`, time.Now().UnixMilli())
+		rows, e := s.workerReader().QueryContext(ctx, `SELECT live.raw_hash FROM (`+networkLive+`) live LEFT JOIN network_classifications n ON n.raw_hash=live.raw_hash WHERE coalesce(n.next_run,0)<=? OR coalesce(json_extract(n.evidence,'$.version'),0)!=1 ORDER BY coalesce(n.next_run,0),live.raw_hash LIMIT 32`, time.Now().UnixMilli())
 		hashes := []string{}
 		if e == nil {
 			for rows.Next() {
@@ -144,6 +161,7 @@ func (s *Store) RunNetworkClassifier(ctx context.Context) {
 
 type networkEntry struct {
 	Conversion
+	IPFamily     string `json:"ip_family"`
 	Datacenter   string `json:"datacenter"`
 	CDN          string `json:"cdn"`
 	Reason       string `json:"reason"`
@@ -156,17 +174,24 @@ func networkEntries(ctx context.Context, q readQuerier, axis, group string) ([]n
 	if e != nil {
 		return nil, e
 	}
-	rows, e := q.QueryContext(ctx, "SELECT raw_hash,datacenter,cdn,reason,checked,expires FROM network_classifications")
+	rows, e := q.QueryContext(ctx, "SELECT raw_hash,datacenter,cdn,reason,checked,expires,evidence FROM network_classifications")
 	if e != nil {
 		return nil, e
 	}
 	classes := map[string]networkEntry{}
+	now := readStamp(ctx)
 	for rows.Next() {
 		var h string
+		var evidence string
 		var n networkEntry
-		if e = rows.Scan(&h, &n.Datacenter, &n.CDN, &n.Reason, &n.Checked, &n.ClassExpires); e != nil {
+		if e = rows.Scan(&h, &n.Datacenter, &n.CDN, &n.Reason, &n.Checked, &n.ClassExpires, &evidence); e != nil {
 			rows.Close()
 			return nil, e
+		}
+		var record networkEvidence
+		n.IPFamily = "unknown"
+		if json.Unmarshal([]byte(evidence), &record) == nil && record.Version == 1 {
+			n.IPFamily = record.Family.Current(now)
 		}
 		classes[h] = n
 	}
@@ -175,19 +200,34 @@ func networkEntries(ctx context.Context, q readQuerier, axis, group string) ([]n
 	if e != nil {
 		return nil, e
 	}
-	now := time.Now().UnixMilli()
 	out := []networkEntry{}
 	for _, c := range cs {
 		n, ok := classes[c.Hash]
+		if !ok {
+			n.IPFamily = "unknown"
+		}
 		if !ok || n.ClassExpires <= now {
 			n.Datacenter = "unknown"
 			n.CDN = "unknown"
 			n.Reason = "pending_or_expired"
 		}
 		n.Conversion = c
-		if axis == "" || (axis == "datacenter" && n.Datacenter == group) || (axis == "cdn" && n.CDN == group) {
+		if axis == "" || n.group(axis) == group {
 			out = append(out, n)
 		}
 	}
 	return out, nil
+}
+
+func (n networkEntry) group(axis string) string {
+	switch axis {
+	case "datacenter":
+		return n.Datacenter
+	case "cdn":
+		return n.CDN
+	case "ip-family":
+		return n.IPFamily
+	default:
+		return ""
+	}
 }

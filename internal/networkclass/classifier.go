@@ -34,6 +34,8 @@ func ValidGroup(axis, id string) bool {
 	list := Datacenters
 	if axis == "cdn" {
 		list = CDNs
+	} else if axis == "ip-family" {
+		list = IPFamilies
 	} else if axis != "datacenter" {
 		return false
 	}
@@ -46,12 +48,13 @@ func ValidGroup(axis, id string) bool {
 }
 
 type Result struct {
-	Datacenter string     `json:"datacenter"`
-	CDN        string     `json:"cdn"`
-	Reason     string     `json:"reason"`
-	Evidence   []Evidence `json:"evidence"`
-	Checked    int64      `json:"checked"`
-	Expires    int64      `json:"expires"`
+	Family     AddressFamily `json:"ip_family"`
+	Datacenter string        `json:"datacenter"`
+	CDN        string        `json:"cdn"`
+	Reason     string        `json:"reason"`
+	Evidence   []Evidence    `json:"evidence"`
+	Checked    int64         `json:"checked"`
+	Expires    int64         `json:"expires"`
 }
 type Evidence struct {
 	IP     string `json:"ip"`
@@ -361,8 +364,12 @@ func (c *Classifier) Classify(ctx context.Context, raw []byte) Result {
 	r := Result{Datacenter: "unknown", CDN: "unknown", Reason: "endpoint_unresolved", Checked: now.UnixMilli(), Expires: now.Add(time.Minute).UnixMilli(), Evidence: []Evidence{}}
 	hosts, e := Endpoints(raw)
 	if e != nil {
+		r.Family = AddressFamily{ID: "unknown", Reason: "endpoint_unresolved", Expires: r.Expires}
 		return r
 	}
+	// Address family uses the same cached DNS answers, independently of ASN/CDN
+	// feed availability. Literal families do not expire with provider metadata.
+	r.Family = c.classifyFamilyHosts(ctx, hosts)
 	r.Expires = now.Add(time.Hour).UnixMilli()
 	allFeeds := true
 	prefixes := map[string][]netip.Prefix{}
