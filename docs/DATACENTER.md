@@ -1,6 +1,6 @@
-# Datacenter, CDN and IP-family exports
+# Datacenter, CDN and literal IPv6 exports
 
-The Datacenter navigation page exposes three independent dimensions for the current
+The Datacenter navigation page exposes two independent dimensions for the current
 ordinary Output inventory. Residential acceptance, retention, country guards,
 source controls and conversion proof are unchanged. This feature neither creates
 configurations nor changes their existing template.
@@ -60,18 +60,17 @@ DNS resolver. Background errors retry without blocking collector startup or HTTP
 
 ## API and outputs
 
-`GET /api/datacenter` returns all 11 datacenter, 7 CDN and 4 IP-family groups, raw and ready
+`GET /api/datacenter` returns all 11 datacenter and 7 CDN groups plus one literal IPv6 card, raw and ready
 counts, token-scoped links, pending count and feed validity. The existing panel's
 access policy applies. See `openapi-network.json` for the additive API contract.
 
 `GET /subscription/network/{axis}/{group}/{token}/raw.txt` preserves original
 healthy configuration bodies and separates them with a newline. `received.txt`
-is explicitly unverified diagnostic inventory. `next.json` returns one current,
-healthy stored Xray template; native sing-box uses `native-next.json`.
+is the explicitly unverified diagnostic inventory. `next.json` returns one current,
+healthy stored Xray template; `native-next.json` returns one native sing-box template.
 `configs.json` and `native.jsonl` expose all verified templates for their engine.
-Each axis/group has an independent round over canonical identities, and usable
-raw count equals Xray plus native template count. No new proxy test is scheduled
-by membership in another group or by downloading an export.
+Usable raw count equals Xray plus native template count. The scopes have independent
+rounds over canonical identities and reuse the existing exact-byte health proof.
 
 Tokens bind the axis, group and format. HEAD and prefetch do not consume turns.
 Empty groups return 204; missing/corrupt bodies and concurrent eligibility changes
@@ -96,25 +95,22 @@ never restore an old database after services have resumed writes.
 - https://api.bunny.net/system/edgeserverlist and its `/ipv6` endpoint
 - https://www.arvancloud.ir/fa/ips.txt
 
-## IPv6 and address families
+## Literal IPv6 addresses
 
-`ip-family` has four mutually exclusive groups: `ipv6`, `dual`, `ipv4`, `unknown`.
-The classifier reads only supported transport entry destinations. IPv6-only
-means all resolved destinations are IPv6; any mixture of IPv4 and IPv6 is dual.
-IPv4-mapped IPv6 literals are normalized to IPv4. Tunnel interface addresses,
-inbounds, DNS servers, SNI, HTTP Host and display names never determine the family.
-Xray WireGuard peer endpoints and native sing-box WireGuard endpoints are supported.
-Unsupported chains, incomplete DNS resolution and ambiguous structures stay unknown.
+The page includes one IPv6 card, exposed as `ipv6` in `/api/datacenter` and
+`address/ipv6` in signed network exports. Membership requires explicit, valid
+IPv6 in the configured server address. Domains are excluded even if they resolve
+to AAAA-only addresses. IPv4, mapped IPv4, names such as `ipv6`, DNS servers, SNI,
+inbound/interface addresses and mixed-address profiles do not qualify. Supported
+JSON/json://, VMess and native protocol formats use their actual entry fields.
 
-Literal families are immutable properties of the raw hash and do not expire with
-ASN/CDN metadata. Domain families reuse the same five-minute A/AAAA cache and
-become unknown on expiry; this is a server-side DNS snapshot, not proof that a
-client selected IPv6 or that the VPN carries IPv6 traffic. Classification needs
-no extra proxy tests, core processes or service. Two bounded DNS-only workers
-refresh families independently of the two ASN/CDN workers, sharing their cache.
-Family jobs have a five-second I/O budget, batches of 64, and automatic retries;
-stable literals are not rescheduled. Legacy array evidence is upgraded in place,
-preserving provider evidence and its schedule, without waiting for external ASN
-services. Missing or corrupt raw blobs stay unknown and retry after one minute.
-Database schema44, health
-proofs, source controls and Residential policy remain unchanged.
+This is a local syntax predicate cached by immutable raw hash (at most 8192
+booleans). It has no DNS queries, provider requests, queue, background workers,
+expiry or persistent classification records. Existing health results are reused
+for raw, all-template and rotating exports; received.txt remains diagnostic.
+Counts and final writer checks use the same canonical input selection.
+
+The former four-family UI/API/routes and DNS-family workers are removed. Startup
+unwraps their metadata back to the original provider evidence array and deletes
+only their rotation scopes. Database schema, ordinary/Residential health proofs,
+provider evidence, raw blobs and other export scopes remain unchanged.

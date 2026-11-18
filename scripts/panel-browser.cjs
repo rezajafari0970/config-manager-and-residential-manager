@@ -81,13 +81,12 @@ const dir=process.env.PANEL_TEST_DIR,origin=process.env.PANEL_TEST_ORIGIN||'http
   assert.equal((await state()).stats.configs,2);await noOverflow();await page.screenshot({path:dir+'/restored-source.png',fullPage:true});
  }
  await page.goto(origin+'/datacenter');
- await page.waitForFunction(()=>document.querySelectorAll('.network-card').length===22);
+ await page.waitForFunction(()=>document.querySelectorAll('.network-card').length===19);
  assert.equal(await page.locator('#datacenter-groups .network-card').count(),11);
  assert.equal(await page.locator('#cdn-groups .network-card').count(),7);
- assert.equal(await page.locator('#ip-family-groups .network-card').count(),4);
- assert.equal(await page.locator('[data-network-copy]').count(),66);
+ assert.equal(await page.locator('[data-network-copy]').count(),57);
  const network=(await(await context.request.get(origin+'/api/datacenter')).json());
- assert.equal(network.ip_families.reduce((n,g)=>n+g.raw_count,0),2);assert.equal(network.ip_families.reduce((n,g)=>n+g.inventory_count,0),2);assert.equal(network.total,2);assert.equal(network.datacenters.reduce((n,g)=>n+g.raw_count,0),2);assert.equal(network.cdns.reduce((n,g)=>n+g.raw_count,0),2);
+ assert.equal(network.ipv6.inventory_count,0);assert.equal('ip_families' in network,false);assert.equal(await page.locator('#ipv6-group .network-card').count(),1);assert.equal(network.total,2);assert.equal(network.datacenters.reduce((n,g)=>n+g.raw_count,0),2);assert.equal(network.cdns.reduce((n,g)=>n+g.raw_count,0),2);
  for(const width of [390,1440]){await page.setViewportSize({width,height:900});await noOverflow();await page.screenshot({path:dir+'/datacenter-'+width+'.png',fullPage:true})}
  const unknown=network.datacenters.find(g=>g.id==='unknown');assert.equal((await context.request.get(unknown.raw_url)).status(),200);assert.equal((await context.request.get(unknown.single_url)).status(),200);
  await page.setViewportSize({width:390,height:844});await page.locator('#menu-button').click();assert.equal(await page.locator('#nav-drawer a[href="/datacenter"]').count(),1);await page.locator('#nav-drawer [data-close]').click();

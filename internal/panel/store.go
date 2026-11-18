@@ -23,6 +23,7 @@ import (
 )
 
 type Store struct {
+	literalIPv6   literalIPv6Cache
 	db            *sql.DB
 	readDB        *sql.DB
 	workerReadDB  *sql.DB
@@ -233,6 +234,9 @@ PRAGMA user_version=1;`)
 		return nil, err
 	}
 	if err = s.migrateV44(); err != nil {
+		return nil, err
+	}
+	if err = s.removeRetiredIPFamilies(); err != nil {
 		return nil, err
 	}
 	if err = s.ensureEgressIndexes(); err != nil {

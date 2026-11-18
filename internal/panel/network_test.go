@@ -114,7 +114,7 @@ func TestNetworkConcurrentRoundAndRawBytes(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	entries, e := networkEntries(ctx, s.read(ctx), "datacenter", "amazon")
+	entries, e := s.networkEntries(ctx, s.read(ctx), "datacenter", "amazon")
 	done()
 	if e != nil {
 		t.Fatal(e)

@@ -31,11 +31,12 @@ var providers = map[int]string{16509: "amazon", 14618: "amazon", 8987: "amazon",
 var cdnASNs = map[int]bool{13335: true, 54113: true, 20940: true, 16625: true, 199524: true, 202306: true, 205718: true, 203020: true, 60068: true, 209242: true}
 
 func ValidGroup(axis, id string) bool {
+	if axis == "address" {
+		return id == IPv6.ID
+	}
 	list := Datacenters
 	if axis == "cdn" {
 		list = CDNs
-	} else if axis == "ip-family" {
-		list = IPFamilies
 	} else if axis != "datacenter" {
 		return false
 	}
@@ -48,13 +49,12 @@ func ValidGroup(axis, id string) bool {
 }
 
 type Result struct {
-	Family     AddressFamily `json:"ip_family"`
-	Datacenter string        `json:"datacenter"`
-	CDN        string        `json:"cdn"`
-	Reason     string        `json:"reason"`
-	Evidence   []Evidence    `json:"evidence"`
-	Checked    int64         `json:"checked"`
-	Expires    int64         `json:"expires"`
+	Datacenter string     `json:"datacenter"`
+	CDN        string     `json:"cdn"`
+	Reason     string     `json:"reason"`
+	Evidence   []Evidence `json:"evidence"`
+	Checked    int64      `json:"checked"`
+	Expires    int64      `json:"expires"`
 }
 type Evidence struct {
 	IP     string `json:"ip"`
@@ -364,12 +364,8 @@ func (c *Classifier) Classify(ctx context.Context, raw []byte) Result {
 	r := Result{Datacenter: "unknown", CDN: "unknown", Reason: "endpoint_unresolved", Checked: now.UnixMilli(), Expires: now.Add(time.Minute).UnixMilli(), Evidence: []Evidence{}}
 	hosts, e := Endpoints(raw)
 	if e != nil {
-		r.Family = AddressFamily{ID: "unknown", Reason: "endpoint_unresolved", Expires: r.Expires}
 		return r
 	}
-	// Address family uses the same cached DNS answers, independently of ASN/CDN
-	// feed availability. Literal families do not expire with provider metadata.
-	r.Family = c.classifyFamilyHosts(ctx, hosts)
 	r.Expires = now.Add(time.Hour).UnixMilli()
 	allFeeds := true
 	prefixes := map[string][]netip.Prefix{}

@@ -24,7 +24,7 @@ func testExportRefresh(t *testing.T, raw bool) {
 	defer cancel()
 	source, _ := newExportSource(t, s, "refresh", sourceURI(751), sourceURI(752))
 	classifyFixture(t, s)
-	rows, err := scopedPreparedEntries(ctx, s.reader(), source, "xray", "", "")
+	rows, err := s.scopedPreparedEntries(ctx, s.reader(), source, "xray", "", "")
 	if err != nil || len(rows) != 2 {
 		t.Fatal(rows, err)
 	}

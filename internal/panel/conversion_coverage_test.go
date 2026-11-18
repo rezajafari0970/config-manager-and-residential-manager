@@ -10,6 +10,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,8 +78,8 @@ func TestCoverageSeventeenInputsAndVerifiedExportsAgree(t *testing.T) {
 func TestMixedNativeNetworkIdentityCoverage(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	newExportSource(t, s, "xray", sourceURI(33))
-	_, j := addConversion(t, s, "hy2://synthetic@192.0.2.55:443?sni=example.com")
+	newExportSource(t, s, "xray", strings.Replace(sourceURI(33), "192.0.2.33", "[2001:db8::33]", 1))
+	_, j := addConversion(t, s, "hy2://synthetic@[2001:db8::55]:443?sni=example.com")
 	c := convert.Prepare(j.Raw).Candidates[0]
 	evidence := syntheticCompatibilityEvidence()
 	evidence["native_core"] = "passed"
@@ -93,16 +94,16 @@ func TestMixedNativeNetworkIdentityCoverage(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, c := range rows {
-		if e = s.saveNetwork(ctx, c.Hash, networkclass.Result{Datacenter: "amazon", CDN: "none", Reason: "fixture", Family: networkclass.AddressFamily{ID: "ipv4", Reason: "literal_endpoints"}, Checked: time.Now().UnixMilli(), Expires: time.Now().Add(time.Hour).UnixMilli()}); e != nil {
+		if e = s.saveNetwork(ctx, c.Hash, networkclass.Result{Datacenter: "amazon", CDN: "none", Reason: "fixture", Checked: time.Now().UnixMilli(), Expires: time.Now().Add(time.Hour).UnixMilli()}); e != nil {
 			t.Fatal(e)
 		}
 	}
 	app, _ := NewServer(s, "http://127.0.0.1:18191")
-	for file, want := range map[string]string{"raw.txt": "2", "configs.json": "1", "native.jsonl": "1", "native-next.json": "1"} {
-		for _, scope := range [][2]string{{"datacenter", "amazon"}, {"ip-family", "ipv4"}} {
+	for _, scope := range [][2]string{{"datacenter", "amazon"}, {"address", "ipv6"}} {
+		for file, want := range map[string]string{"raw.txt": "2", "configs.json": "1", "native.jsonl": "1", "native-next.json": "1"} {
 			rr := exportRequest(t, app.Handler(), "GET", app.networkURL(scope[0], scope[1], file))
 			if rr.Code != 200 || rr.Header().Get("X-Config-Count") != want {
-				t.Fatal(scope, file, rr.Code, rr.Header())
+				t.Fatal(file, rr.Code, rr.Header())
 			}
 		}
 	}

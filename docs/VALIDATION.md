@@ -1,31 +1,20 @@
 # Validation
 
-P78 IP-family groups (18 November 2026): the full normal Go suite, `go vet ./...`,
-focused race tests for address-family/network exports, and the two-phase isolated
-Chromium acceptance harness passed on the target host. The browser fixture covers
-all 22 cards, mobile/desktop layout and persistence across restart. The production
-panel binary was built from this source after those code checks.
+P79 literal IPv6 correction (18 November 2026): the full Go suite, vet, focused
+network/literal-IPv6 race tests and the two-phase isolated Chromium acceptance
+passed on the target host. The page has 19 cards: the existing 18 datacenter/CDN
+groups and one literal-IPv6 card. Mobile/desktop layout and restart persistence
+were checked. The former four-family classifiers, background workers, API field
+and routes are removed.
 
-New regression cases cover IPv6 literals, IPv4-mapped IPv6, fresh A/AAAA answers,
-DNS expiry/failure, mixed destinations, JSON envelopes, Hysteria and WireGuard
-entry addresses, and exclusion of DNS/SNI/interface addresses. Family-only
-classification makes no ASN HTTP requests. Group export tests verify exact raw
-and template counts, native sing-box parity, isolated rotations, scoped tokens,
-health revocation, and unchanged probe/result/Residential job tables after reads.
-Literal families remain valid when provider evidence expires; expired DNS family
-evidence becomes unknown. These are entry-address labels, not proof of the
-client's selected address family or IPv6 traffic through the tunnel. Live rollout
-and measurements are separate from these pre-deployment tests.
-
-The first live acceptance passed 118 export/rotation requests across all 22 groups,
-coverage/count partitions and Residential publication parity. Input, Output,
-Datacenter and Residential pages passed browser checks at 390 and 1440 pixels.
-Live backfill exposed an avoidable wait behind ASN lookups. The family path now
-runs two bounded DNS-only workers independently, retaining the shared cache and
-existing provider records. The full panel suite, panel vet and focused network
-race tests passed after this refinement; its regression test confirms legacy
-evidence/schedules survive, literal families leave the queue, and probe/result
-and Residential job tables remain unchanged.
+Regression coverage includes explicit IPv6 URI/JSON/json:// and native endpoints,
+exclusion of domains (including AAAA-capable names), IPv4, the placeholder `ipv6`,
+mapped IPv4, mixed profiles and IPv6 in DNS/SNI/interface fields. Export checks
+verify raw/template identity parity, Xray/sing-box handling, independent rotation,
+revocation and shared proof without changing probe or Residential job tables.
+Retirement is idempotent: legacy family evidence is unwrapped without changing
+provider proof, and only retired rotation scopes are deleted. Synthetic tests
+establish grouping and publication behavior, not real remote endpoint health.
 
 P77 follow-up: an eight-second live CPU sample attributed 40.46% of panel CPU
 samples to Residential lease renewal and 29.30% to completion. Both paths built

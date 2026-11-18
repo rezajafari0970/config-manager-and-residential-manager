@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Config preparation exports",
-    "version": "44"
+    "version": "2.2.0"
   },
   "paths": {
     "/api/prepared/export": {
@@ -68,7 +68,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Optional datacenter, cdn or ip-family axis"
+            "description": "Optional datacenter or cdn axis"
           },
           {
             "name": "network_group",

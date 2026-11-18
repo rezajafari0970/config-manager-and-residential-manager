@@ -45,7 +45,7 @@ func (s *Server) networkSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer done()
-	entries, e := networkEntries(ctx, s.store.read(ctx), "", "")
+	entries, e := s.store.networkEntries(ctx, s.store.read(ctx), "", "")
 	if e != nil {
 		failure(w, e)
 		return
@@ -91,7 +91,7 @@ func (s *Server) networkSummary(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.read(ctx).QueryRowContext(ctx, "SELECT expires,refresh FROM network_cache WHERE key=?", "feed/"+f.ID).Scan(&expires, &refresh)
 		feeds[f.ID] = map[string]int64{"expires": expires, "refresh": refresh}
 	}
-	respond(w, 200, map[string]any{"datacenters": groups("datacenter", networkclass.Datacenters), "cdns": groups("cdn", networkclass.CDNs), "ip_families": groups("ip-family", networkclass.IPFamilies), "total": len(entries), "pending": pending, "feeds": feeds, "now": readStamp(ctx)})
+	respond(w, 200, map[string]any{"datacenters": groups("datacenter", networkclass.Datacenters), "cdns": groups("cdn", networkclass.CDNs), "ipv6": groups("address", []networkclass.Group{networkclass.IPv6})[0], "total": len(entries), "pending": pending, "feeds": feeds, "now": readStamp(ctx)})
 }
 func (s *Server) networkExport(w http.ResponseWriter, r *http.Request) {
 	axis, group, file := r.PathValue("axis"), r.PathValue("group"), r.PathValue("file")
@@ -178,7 +178,7 @@ func (s *Server) tryNetworkRaw(w http.ResponseWriter, r *http.Request, axis, gro
 		failure(w, e)
 		return
 	}
-	entries, e := networkEntries(snapshot, s.store.read(snapshot), axis, group)
+	entries, e := s.store.networkEntries(snapshot, s.store.read(snapshot), axis, group)
 	if r.PathValue("file") != "received.txt" {
 		entries = healthyNetworkEntries(entries, readStamp(snapshot))
 	}
@@ -230,7 +230,7 @@ func (s *Server) tryNetworkRaw(w http.ResponseWriter, r *http.Request, axis, gro
 		failure(w, e)
 		return
 	}
-	current, e := networkEntries(ctx, tx, axis, group)
+	current, e := s.store.networkEntries(ctx, tx, axis, group)
 	if r.PathValue("file") != "received.txt" {
 		current = healthyNetworkEntries(current, readStamp(ctx))
 	}
@@ -267,7 +267,7 @@ func (s *Store) prepareNetwork(ctx context.Context, axis, group string) (*rotati
 	if _, e = tx.ExecContext(ctx, "INSERT INTO network_rotation_state(scope) VALUES(?) ON CONFLICT DO NOTHING", scope); e != nil {
 		return nil, e
 	}
-	entries, e := networkEntries(ctx, tx, axis, group)
+	entries, e := s.networkEntries(ctx, tx, axis, group)
 	if e != nil {
 		return nil, e
 	}
@@ -342,7 +342,7 @@ func (s *Store) claimNetwork(ctx context.Context, axis, group string, item *rota
 	if cycle != item.Cycle || next != item.Conversion.CandidateHash {
 		return false, nil
 	}
-	entries, e := networkEntries(ctx, tx, axis, group)
+	entries, e := s.networkEntries(ctx, tx, axis, group)
 	if e != nil {
 		return false, e
 	}

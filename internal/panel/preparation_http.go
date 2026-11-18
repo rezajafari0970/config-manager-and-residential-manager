@@ -84,7 +84,7 @@ func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (comp
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	entries, e := scopedPreparedEntries(r.Context(), s.store.reader(), source, engine, axis, group)
+	entries, e := s.store.scopedPreparedEntries(r.Context(), s.store.reader(), source, engine, axis, group)
 	if e != nil {
 		failure(w, e)
 		return
@@ -164,7 +164,7 @@ func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (comp
 		failure(w, e)
 		return
 	}
-	current, e := scopedPreparedEntries(r.Context(), tx, source, engine, axis, group)
+	current, e := s.store.scopedPreparedEntries(r.Context(), tx, source, engine, axis, group)
 	if e != nil {
 		failure(w, e)
 		return
@@ -213,12 +213,12 @@ func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (comp
 	return
 }
 
-func scopedPreparedEntries(ctx context.Context, q readQuerier, source, engine, axis, group string) ([]preparedEntry, error) {
+func (s *Store) scopedPreparedEntries(ctx context.Context, q readQuerier, source, engine, axis, group string) ([]preparedEntry, error) {
 	var rows []Conversion
 	if axis != "" && source == "" {
 		// Network entries already contain the same canonical conversion winners.
 		// Reuse them instead of reading and ranking every input a second time.
-		network, e := networkEntries(ctx, q, axis, group)
+		network, e := s.networkEntries(ctx, q, axis, group)
 		if e != nil {
 			return nil, e
 		}
@@ -241,7 +241,7 @@ func scopedPreparedEntries(ctx context.Context, q readQuerier, source, engine, a
 	if axis == "" || source == "" {
 		return entries, nil
 	}
-	network, e := networkEntries(ctx, q, axis, group)
+	network, e := s.networkEntries(ctx, q, axis, group)
 	if e != nil {
 		return nil, e
 	}
