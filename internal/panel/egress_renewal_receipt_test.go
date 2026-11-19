@@ -75,3 +75,60 @@ func TestRenewalDriverOutagePreservesOnlyOriginalUnexpiredReceipt(t *testing.T) 
 		t.Fatal("fresh measurement did not restore publication", exports, err)
 	}
 }
+
+func TestRenewalDeadlinesAheadOfOrdinaryReviews(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	newExportSource(t, s, "renewal-deadlines", sourceURI(1201), sourceURI(1202), sourceURI(1203))
+	var hashes []string
+	for range 3 {
+		job, err := s.ClaimEgress(ctx)
+		if err != nil || job == nil {
+			t.Fatal("missing initial job", err)
+		}
+		if err = s.CompleteEgress(ctx, egress.Completion{Job: *job, Report: syntheticEgress(*job)}); err != nil {
+			t.Fatal(err)
+		}
+		hashes = append(hashes, job.Hash)
+	}
+	review, first, second := hashes[0], hashes[1], hashes[2]
+	if _, err := s.db.Exec(`INSERT INTO egress_network_review(identity,attempts) SELECT identity,1 FROM egress_unique WHERE hash=?`, review); err != nil {
+		t.Fatal(err)
+	}
+	type schedule struct{ expiresIn, dueIn, retryStreak int64 }
+	later := schedule{360000, 300000, 0}
+	for _, tc := range []struct {
+		name          string
+		first, second schedule
+		turn          uint64
+		want          string
+	}{
+		{"slow probe due three minutes before expiry", schedule{180000, -1000, 0}, later, 1, first},
+		{"slow probe still scheduled", schedule{180000, 30000, 0}, later, 1, review},
+		{"due retry with preserved proof", schedule{20000, -1000, 1}, later, 1, first},
+		{"future retry respects backoff", schedule{20000, 10000, 1}, later, 1, review},
+		{"reserved FIFO safety turn", schedule{20000, -1000, 1}, later, 4, review},
+		{"earliest expiry at equal due time", schedule{90000, -1000, 0}, schedule{30000, -1000, 0}, 1, second},
+		{"earliest expiry ahead of older due time", schedule{90000, -30000, 0}, schedule{30000, -1000, 0}, 1, second},
+		{"urgent before ordinary due maintenance", schedule{300000, -30000, 0}, schedule{30000, -1000, 0}, 1, second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := egress.Now()
+			if _, err := s.db.Exec("UPDATE egress_jobs SET token='',lease_until=0,next_run=0,valid_until=0 WHERE hash=?", review); err != nil {
+				t.Fatal(err)
+			}
+			// With equal due times, ordinary FIFO would choose the first job.
+			for i, job := range []schedule{tc.first, tc.second} {
+				if _, err := s.db.Exec(`UPDATE egress_jobs SET token='',lease_until=0,valid_until=?,next_run=?,retry_streak=?,first_seen=? WHERE hash=?`,
+					now+job.expiresIn, now+job.dueIn, job.retryStreak, i+1, hashes[i+1]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.renewalTurn.Store(tc.turn - 1)
+			job, err := s.ClaimEgressLane(ctx, "followup")
+			if err != nil || job == nil || job.Hash != tc.want {
+				t.Fatal("unexpected follow-up selection", job, err)
+			}
+		})
+	}
+}

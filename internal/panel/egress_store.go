@@ -29,34 +29,41 @@ const egressClaimCandidates = `WITH claim_scope(hash) AS MATERIALIZED (
  UNION SELECT u.hash FROM egress_iran_guard g JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'
 ) `
 
-const egressUrgentExpiry = `(ever_accepted=1 AND tested>0 AND retry_streak=0 AND valid_until>CAST(unixepoch('subsec')*1000 AS INTEGER) AND valid_until<=CAST(unixepoch('subsec')*1000 AS INTEGER)+120000)`
+const egressLiveProof = `ever_accepted=1 AND tested>0 AND valid_until>:claim_now`
+const egressUrgentExpiry = egressLiveProof + ` AND valid_until<=:claim_now+120000`
 
-const egressClaimDue = `paused=0 AND (next_run<=? OR ` + egressUrgentExpiry + `) AND (token='' OR lease_until<=?)`
+const egressClaimDue = `paused=0 AND (next_run<=:claim_now OR (retry_streak=0 AND ` + egressUrgentExpiry + `)) AND (token='' OR lease_until<=:claim_now)`
 
 // A veto follows the identity across raw representatives. Its ordinary safety
 // check stays due, but the expiry of an unpublished proof is not a deadline
 // for residential publication.
 const egressRenewableNetwork = `NOT EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_results n ON n.identity=u.identity WHERE u.hash=egress_jobs.hash AND n.held=1) AND NOT EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_review v ON v.identity=u.identity WHERE u.hash=egress_jobs.hash)`
 
-func egressClaimOrder(lane string, turn uint64) string {
-	order := ` ORDER BY CASE WHEN reason='ads_iran_quarantined' THEN 0
+func egressClaimPriority(lane string, turn uint64) string {
+	order := `CASE WHEN reason='ads_iran_quarantined' THEN 0
  WHEN EXISTS(SELECT 1 FROM egress_retirements r WHERE r.hash=egress_jobs.hash) THEN 1 `
 	if lane == "initial" && turn%3 == 0 {
 		order += "WHEN tested=0 AND first_completed=0 THEN 2 "
 	}
 	if lane == "followup" && turn%3 == 0 {
-		order += "WHEN ever_accepted=1 AND valid_until<=CAST(unixepoch('subsec')*1000 AS INTEGER) AND " + egressRenewableNetwork + " THEN 2 "
+		order += "WHEN ever_accepted=1 AND valid_until<=:claim_now AND " + egressRenewableNetwork + " THEN 2 "
 	}
 	// Keep a FIFO turn for due safety checks of withheld routes.
 	if lane == "followup" && turn%4 == 0 {
 		order += "WHEN tested>0 THEN 3 "
 	}
-	order += "WHEN " + egressUrgentExpiry + " AND " + egressRenewableNetwork + " THEN 4 "
+	// Only already-admitted work reaches this ranking. Honor a slower probe's
+	// scheduled lead on follow-up slots, including a retry whose backoff ended.
+	deadline := egressUrgentExpiry
+	if lane == "followup" {
+		deadline = egressLiveProof + ` AND valid_until<=:claim_now+240000`
+	}
+	order += "WHEN " + deadline + " AND " + egressRenewableNetwork + " THEN 4 "
 	if lane == "followup" {
 		order += "WHEN ever_accepted=1 OR tested>0 THEN 5 "
 	}
 	return order + `WHEN tested=0 AND ever_accepted=1 THEN 6
- WHEN tested=0 THEN 7 WHEN ever_accepted=1 THEN 8 ELSE 9 END,next_run,first_seen,egress_jobs.hash LIMIT 1`
+ WHEN tested=0 THEN 7 WHEN ever_accepted=1 THEN 8 ELSE 9 END`
 }
 
 // Independent first-assessment and follow-up lanes share revision-fenced leases.
@@ -85,12 +92,17 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	now := egress.Now()
 	var cleanup bool
 	var candidate string
-	ranked := `SELECT egress_jobs.hash FROM claim_scope c CROSS JOIN egress_work AS egress_jobs ON egress_jobs.hash=c.hash WHERE ` + egressClaimDue + egressClaimOrder(lane, turn)
+	// Compute the priority once per claimable job. Only the live-proof class
+	// is ordered by expiry; reserved safety and fairness turns keep their FIFO.
+	ranked := `WITH due AS MATERIALIZED (
+ SELECT egress_jobs.hash,next_run,first_seen,valid_until,` + egressClaimPriority(lane, turn) + ` AS priority
+ FROM claim_scope c CROSS JOIN egress_work AS egress_jobs ON egress_jobs.hash=c.hash WHERE ` + egressClaimDue + `)
+ SELECT hash FROM due ORDER BY priority,CASE WHEN priority=4 THEN valid_until END,next_run,first_seen,hash LIMIT 1`
 	e := s.workerReader().QueryRowContext(ctx, egressClaimCandidates+`SELECT
  EXISTS(SELECT 1 FROM egress_jobs WHERE token!='' AND NOT EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash))
  OR EXISTS(SELECT 1 FROM egress_run_members WHERE run=(SELECT max(id) FROM egress_runs) AND status='pending' AND NOT EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_run_members.hash)),
- CASE WHEN (SELECT enabled FROM egress_settings WHERE id=1)!=0 AND (SELECT count(*) FROM egress_jobs WHERE token!='' AND lease_until>?)<?
- THEN coalesce((`+ranked+`),'') ELSE '' END`, now, egress.MaxWorkers, now, now).Scan(&cleanup, &candidate)
+ CASE WHEN (SELECT enabled FROM egress_settings WHERE id=1)!=0 AND (SELECT count(*) FROM egress_jobs WHERE token!='' AND lease_until>:claim_now)<:worker_limit
+ THEN coalesce((`+ranked+`),'') ELSE '' END`, sql.Named("claim_now", now), sql.Named("worker_limit", egress.MaxWorkers)).Scan(&cleanup, &candidate)
 	if e != nil || !cleanup && candidate == "" {
 		return nil, e
 	}
@@ -122,7 +134,7 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	var size int64
 	var state, previousToken string
 	var first, retryStreak int
-	e = tx.QueryRowContext(ctx, `SELECT hash,kind,size,revision,ever_accepted,attempts,state,token,first_completed,retry_streak FROM egress_work WHERE hash=? AND `+egressClaimDue, candidate, now, now).
+	e = tx.QueryRowContext(ctx, `SELECT hash,kind,size,revision,ever_accepted,attempts,state,token,first_completed,retry_streak FROM egress_work WHERE hash=:job_hash AND `+egressClaimDue, sql.Named("job_hash", candidate), sql.Named("claim_now", now)).
 		Scan(&j.Hash, &j.Kind, &size, &j.Revision, &j.Deep, &j.Attempt, &state, &previousToken, &first, &retryStreak)
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil, tx.Commit()
