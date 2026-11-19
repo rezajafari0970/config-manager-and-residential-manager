@@ -203,7 +203,7 @@ func (s *Server) tryNetworkRaw(w http.ResponseWriter, r *http.Request, axis, gro
 		if ctx.Err() != nil {
 			return
 		}
-		body, err := s.store.vault.Open(n.Hash)
+		body, err := s.store.openExportBlob(n.Hash)
 		if err != nil {
 			http.Error(w, "raw body unavailable; retry", 503)
 			return

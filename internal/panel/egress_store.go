@@ -148,7 +148,7 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 		j.Issue = "input_size_limit"
 		return j, nil
 	}
-	b, e := s.vault.Open(j.Hash)
+	b, e := s.openExportBlob(j.Hash)
 	if e != nil {
 		j.Issue = "input_unavailable"
 		return j, nil
@@ -193,7 +193,7 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 			return ErrInvalid
 		}
 	}
-	b, e := s.vault.Open(j.Hash)
+	b, e := s.openExportBlob(j.Hash)
 	var raw []byte
 	if e == nil {
 		raw, e = io.ReadAll(io.LimitReader(b, repair.MaxBytes+1))

@@ -105,6 +105,15 @@ func TestPreparationPreservesProtocolAndSecrets(t *testing.T) {
 	}
 }
 
+func TestDisabledProtocolsDoNotFallBackToResidentialNativeDriver(t *testing.T) {
+	for _, raw := range []string{"hy://secret@example.com:443", "hy2://secret@example.com:443", `{"outbounds":[{"type":"hysteria2","tag":"proxy"}]}`} {
+		p := Prepare([]byte(raw))
+		if p.Code != "protocol_disabled" || len(p.Variants) > 0 || p.Complete || p.Driver != "none" {
+			t.Fatalf("disabled Residential profile reached a driver: %+v", p)
+		}
+	}
+}
+
 func TestDNSDialerIsNotSecondEgress(t *testing.T) {
 	raw := []byte(`{"outbounds":[{"tag":"proxy","protocol":"vless","settings":{"vnext":[{"address":"8.8.8.8","port":443,"users":[{"id":"00000000-0000-4000-8000-000000000001","encryption":"none"}]}]},"streamSettings":{"security":"tls","tlsSettings":{"serverName":"example.com"}}},{"tag":"dns-out","protocol":"dns","streamSettings":{"sockopt":{"dialerProxy":"proxy"}}},{"tag":"direct","protocol":"freedom"}],"routing":{"rules":[{"outboundTag":"dns-out","port":"53"},{"outboundTag":"proxy","network":"tcp,udp"}]}}`)
 	before := string(raw)

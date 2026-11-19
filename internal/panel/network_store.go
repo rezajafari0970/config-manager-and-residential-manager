@@ -78,7 +78,7 @@ func (s *Store) RunNetworkClassifier(ctx context.Context) {
 			defer wg.Done()
 			for hash := range jobs {
 				sub, cancel := context.WithTimeout(ctx, 30*time.Second)
-				body, e := s.vault.Open(hash)
+				body, e := s.openExportBlob(hash)
 				if e == nil {
 					b, err := io.ReadAll(io.LimitReader(body, repair.MaxBytes+1))
 					body.Close()

@@ -140,9 +140,9 @@ func spans(b []byte, offset int, path string, all *[]span) {
 	}
 }
 
-// stripTrailingCommas never touches quoted text and only removes a comma
+// StripTrailingCommas never touches quoted text and only removes a comma
 // immediately preceding an array/object close. Strict parsing still gates it.
-func stripTrailingCommas(b []byte) []byte {
+func StripTrailingCommas(b []byte) []byte {
 	out := make([]byte, 0, len(b))
 	quoted, escaped := false, false
 	for i, c := range b {
@@ -187,7 +187,7 @@ func (JSONDriver) Propose(raw []byte) Diagnostic {
 		return d
 	}
 	if !json.Valid(work) {
-		clean := stripTrailingCommas(work)
+		clean := StripTrailingCommas(work)
 		if bytes.HasPrefix(clean, []byte{0xef, 0xbb, 0xbf}) {
 			clean = clean[3:]
 		}

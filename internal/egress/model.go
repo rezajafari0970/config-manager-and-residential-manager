@@ -9,6 +9,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/compat"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/convert"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 
 	"time"
 )
@@ -43,6 +44,9 @@ type Plan struct {
 
 func Prepare(raw []byte) Plan {
 	p := probe.Prepare(raw)
+	if p.Code == protocolpolicy.Code {
+		return Plan{Driver: "none", Code: p.Code, Variants: []Variant{}}
+	}
 	for _, c := range p.Candidates {
 		common, e := convert.Apply(c.Config)
 		if e != nil {

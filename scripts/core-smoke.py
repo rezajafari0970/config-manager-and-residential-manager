@@ -34,12 +34,6 @@ for protocol in ["vless", "vmess"]:
 cases += [("trojan_flat", config("trojan", {"address": endpoint, "port": 443, "password": "synthetic-test-password"}), True)]
 cases += [("trojan_legacy_servers", config("trojan", {"servers": [{"address": endpoint, "port": 443, "password": "synthetic-test-password"}]}), True)]
 cases += [("ss_flat", config("shadowsocks", {"address": endpoint, "port": 8388, "method": "aes-128-gcm", "password": "synthetic-test-password"}), True)]
-hy = config("hysteria", {"version": 2, "address": endpoint, "port": 443})
-hy["outbounds"][0]["streamSettings"] = {"network": "hysteria", "security": "tls", "tlsSettings": {"serverName": "example.com", "alpn": ["h3"]}, "hysteriaSettings": {"version": 2, "auth": "synthetic-test-password"}}
-cases += [("hysteria2", hy, True)]
-hy1 = copy.deepcopy(hy)
-hy1["outbounds"][0]["settings"]["version"] = 1
-cases += [("hysteria1_rejected", hy1, False)]
 key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
 wg = config("wireguard", {"secretKey": key, "address": ["10.0.0.2/32"], "peers": [{"publicKey": key, "endpoint": "192.0.2.1:51820"}], "reserved": [0, 0, 0], "mtu": 1280})
 cases += [("wireguard", wg, True)]

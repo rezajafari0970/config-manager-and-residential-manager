@@ -23,7 +23,7 @@ func (s *Store) hasLiteralIPv6(ctx context.Context, hash string) bool {
 	if ok || ctx.Err() != nil {
 		return value
 	}
-	body, err := s.vault.Open(hash)
+	body, err := s.openExportBlob(hash)
 	if err != nil {
 		return false
 	}

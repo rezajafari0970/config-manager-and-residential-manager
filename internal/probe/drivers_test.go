@@ -25,7 +25,7 @@ func TestAdditionalProtocolDrivers(t *testing.T) {
 	}
 }
 func TestUnsupportedAndAmbiguousVariantsStayExplicit(t *testing.T) {
-	for raw, code := range map[string]string{"hysteria://secret@192.0.2.1:443": "hysteria1_unsupported_by_target_core", "socks5://secret@192.0.2.1:1080": "socks_auth_invalid", "wireguard://key@192.0.2.1:10?publickey=x&wnoise=1": "wireguard_extension_unsupported", "[Interface]\nPrivateKey=x\nPrivateKey=y": "wireguard_duplicate_key"} {
+	for raw, code := range map[string]string{"hysteria://secret@192.0.2.1:443": "protocol_disabled", "socks5://secret@192.0.2.1:1080": "socks_auth_invalid", "wireguard://key@192.0.2.1:10?publickey=x&wnoise=1": "wireguard_extension_unsupported", "[Interface]\nPrivateKey=x\nPrivateKey=y": "wireguard_duplicate_key"} {
 		p := Prepare([]byte(raw))
 		if p.Code != code || len(p.Candidates) > 0 {
 			t.Fatal(raw, p.Code)
@@ -40,13 +40,10 @@ func TestCustomEnvelope(t *testing.T) {
 	}
 }
 
-func TestWireguardDNSAndHysteriaHoppingPreserved(t *testing.T) {
+func TestWireguardDNSPreserved(t *testing.T) {
 	p := Prepare([]byte("[Interface]\nPrivateKey=synthetic\nAddress=10.0.0.2/32\nDNS=1.1.1.1,8.8.8.8\n[Peer]\nPublicKey=synthetic\nEndpoint=192.0.2.1:51820"))
 	if p.Code != "prepared" || !bytes.Contains(p.Candidates[0].Config, []byte(`"servers":["1.1.1.1","8.8.8.8"]`)) || bytes.Contains(p.Candidates[0].Config, []byte("__dns")) {
 		t.Fatal("DNS lost", p.Code)
 	}
-	p = Prepare([]byte("hy2://synthetic@example.com:443?mport=443,8443-8444&pinSHA256=synthetic"))
-	if p.Code != "prepared" || !bytes.Contains(p.Candidates[0].Config, []byte(`"udpHop":{"interval":"30","ports":"443,8443-8444"}`)) || !bytes.Contains(p.Candidates[0].Config, []byte(`"pinnedPeerCertSha256":"synthetic"`)) {
-		t.Fatal("hopping or certificate pin lost", p.Code)
-	}
+
 }

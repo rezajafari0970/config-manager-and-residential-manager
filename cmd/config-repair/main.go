@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/target"
 )
@@ -38,6 +39,10 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "input_read_failed")
 		return 2
 	}
+	if protocolpolicy.Disabled("", b) {
+		fmt.Fprintln(os.Stderr, protocolpolicy.Code)
+		return 1
+	}
 	if args[0] == "inspect" {
 		r := repair.Analyze(b)
 		_ = json.NewEncoder(os.Stdout).Encode(r)
@@ -62,6 +67,10 @@ func run(args []string) int {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "repair_rejected")
+		return 1
+	}
+	if protocolpolicy.Disabled("", out) {
+		fmt.Fprintln(os.Stderr, protocolpolicy.Code)
 		return 1
 	}
 	d, err := os.OpenFile(args[2], os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)

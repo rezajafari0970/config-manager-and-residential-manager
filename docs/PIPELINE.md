@@ -24,7 +24,11 @@ public key, UUID, short ID or SNI. Missing credentials, rejected server credenti
 unsupported extensions and inaccessible servers cannot be repaired by guessing.
 TLS certificate verification is never disabled to obtain a passing result.
 
-Ordinary Hysteria 1/2, TUIC and supported WireGuard inputs use the pinned
+Hysteria 1 and 2 are disabled globally. Collection excludes these inputs before
+testing and publication, including JSON profiles containing a Hysteria outbound
+or transport. Independent entries in the same subscription remain eligible.
+
+Ordinary TUIC and supported WireGuard inputs use the pinned
 sing-box 1.14.4 driver. Native schemas have separate exports; they are not sent to
 V2RayNG's Xray import. WireGuard uses the userspace endpoint schema. An Xray
 WireGuard FinalMask that sing-box cannot represent retains its Xray path. Arbitrary

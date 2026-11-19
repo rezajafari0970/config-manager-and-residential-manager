@@ -98,14 +98,21 @@ class ProbeTests(unittest.TestCase):
  def test_unsupported_does_not_guess(self):
   with self.assertRaisesRegex(ValueError,'outbound_driver_pending'):
    p.endpoints({'outbounds':[{'protocol':'future-protocol','settings':{'address':'example.com','port':443}}]})
+ def test_hysteria_blocked_before_core_validation_and_dial(self):
+  for member in [{'protocol':'hysteria'}, {'type':'HyStErIa2'}, {'protocol':'vless','streamSettings':{'network':'hysteria'}}, {'protocol':'vless','streamSettings':{'network':'xhttp','xhttpSettings':{'extra':{'downloadSettings':{'method':'hy2'}}}}}]:
+   config={'outbounds':[{'protocol':'trojan'},member]}
+   with self.assertRaisesRegex(ValueError,'protocol_disabled'):
+    p.Sandbox.launch(None,json.dumps(config).encode(),True)
+  p.preflight.require_enabled_config({'outbounds':[{'type':'tuic','tag':'hysteria','transport':{'type':'quic'}}]})
+
  def test_same_host_multiple_ports_and_hopping_preserved(self):
   class R:stdout=b'["1.1.1.1"]'
   with patch.object(p,'cmd',return_value=R()):
-   r=p.endpoints({'outbounds':[{'protocol':'hysteria','settings':{'address':'example.com','port':443},'streamSettings':{'finalmask':{'quicParams':{'udpHop':{'ports':'8443,9000-9010'}}}}},{'protocol':'trojan','settings':{'address':'example.com','port':444}}]})
+   r=p.endpoints({'outbounds':[{'protocol':'trojan','settings':{'address':'example.com','port':443},'streamSettings':{'finalmask':{'quicParams':{'udpHop':{'ports':'8443,9000-9010'}}}}},{'protocol':'trojan','settings':{'address':'example.com','port':444}}]})
    self.assertEqual(set(r['example.com']['ports']),{'443','444','8443','9000-9010'})
  def test_hopping_cannot_inject_firewall_syntax(self):
   with self.assertRaisesRegex(ValueError,'port_hopping_invalid'):
-   p.endpoints({'outbounds':[{'protocol':'hysteria','settings':{'address':'example.com','port':443},'streamSettings':{'finalmask':{'quicParams':{'udpHop':{'ports':'443;accept'}}}}}]})
+   p.endpoints({'outbounds':[{'protocol':'trojan','settings':{'address':'example.com','port':443},'streamSettings':{'finalmask':{'quicParams':{'udpHop':{'ports':'443;accept'}}}}}]})
  def test_exact_candidate_hash_before_execution(self):
   with self.assertRaisesRegex(ValueError,'candidate_hash_mismatch'):
    p.test_candidate(None,{'sha256':'wrong','config':base64.b64encode(b'{}').decode()},1)

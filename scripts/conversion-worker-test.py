@@ -17,7 +17,7 @@ def main():
  with tempfile.TemporaryDirectory(prefix='p7-worker-',dir=ROOT/'.local') as tmp:
   work=pathlib.Path(tmp);os.chmod(work,0o700)
   key=base64.b64encode(bytes([1])*32).decode();pub=base64.b64encode(bytes([2])*32).decode()
-  samples=[b'socks5://user:synthetic@192.0.2.1:1080',b'hysteria://synthetic@192.0.2.1:443',f'wireguard://{key}@192.0.2.1:51820?publickey={pub}&address=10.0.0.2%2F32'.encode(),b'hy2://synthetic@192.0.2.1:443?sni=example.com',b'vless://00000000-0000-4000-8000-000000000001@192.0.2.1:443?security=tls&sni=example.com']
+  samples=[b'socks5://user:synthetic@192.0.2.1:1080',f'wireguard://{key}@192.0.2.1:51820?publickey={pub}&address=10.0.0.2%2F32'.encode(),b'tuic://11111111-1111-4111-8111-111111111111:synthetic@192.0.2.1:443?sni=example.com',b'vless://00000000-0000-4000-8000-000000000001@192.0.2.1:443?security=tls&sni=example.com']
   samples.append(('vless://00000000-0000-4000-8000-000000000002@192.0.2.1:443?security=reality&sni=example.com&fp=chrome&pbk='+base64.urlsafe_b64encode(bytes([2])*32).decode().rstrip('=')+'&sid=ab&support-x25519mlkem768=true').encode())
   samples.append(b'vless://00000000-0000-4000-8000-000000000003@vpn.example.com:443?security=none&type=tcp&headerType=http&host=example.com')
   if args.live_canary:

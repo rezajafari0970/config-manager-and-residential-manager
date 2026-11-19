@@ -3,6 +3,7 @@ module github.com/rezajafari0970/config-manager-and-residential-manager
 go 1.26.0
 
 require (
+	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/sys v0.49.0
 	modernc.org/sqlite v1.61.0
 )

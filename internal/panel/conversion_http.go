@@ -120,7 +120,7 @@ func (s *Store) conversionBytes(c Conversion) ([]byte, error) {
 	if !c.Available || !validDigest(c.CandidateHash) {
 		return nil, ErrNotFound
 	}
-	body, e := s.vault.Open(c.CandidateHash)
+	body, e := s.openExportBlob(c.CandidateHash)
 	if e != nil {
 		return nil, e
 	}

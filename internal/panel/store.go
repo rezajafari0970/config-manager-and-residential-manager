@@ -23,20 +23,22 @@ import (
 )
 
 type Store struct {
-	literalIPv6   literalIPv6Cache
-	db            *sql.DB
-	readDB        *sql.DB
-	workerReadDB  *sql.DB
-	claimOnce     sync.Once
-	claimSlot     chan struct{}
-	operations    operationAdmission
-	aead          cipher.AEAD
-	key           []byte
-	vault         *blob.Vault
-	probeTurn     atomic.Uint64
-	renewalTurn   atomic.Uint64
-	rotationMu    sync.Mutex
-	rotationLocks map[string]*rotationLock
+	unknownProtocolHashes sync.Map // immutable blobs unavailable when the service opened
+	protocolRetirements   sync.Map // in-flight retirement of a restored forbidden blob
+	literalIPv6           literalIPv6Cache
+	db                    *sql.DB
+	readDB                *sql.DB
+	workerReadDB          *sql.DB
+	claimOnce             sync.Once
+	claimSlot             chan struct{}
+	operations            operationAdmission
+	aead                  cipher.AEAD
+	key                   []byte
+	vault                 *blob.Vault
+	probeTurn             atomic.Uint64
+	renewalTurn           atomic.Uint64
+	rotationMu            sync.Mutex
+	rotationLocks         map[string]*rotationLock
 }
 
 func Open(path string, key []byte) (*Store, error) {
@@ -261,6 +263,9 @@ PRAGMA user_version=1;`)
 	}
 	s.vault, err = blob.New(filepath.Join(filepath.Dir(path), "blobs"), key)
 	if err != nil {
+		return nil, err
+	}
+	if err = s.reconcileDisabledProtocols(); err != nil {
 		return nil, err
 	}
 	// WAL readers see committed data without waiting for the serialized writer.

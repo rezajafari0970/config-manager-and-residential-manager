@@ -379,7 +379,7 @@ func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, atte
 		if format == "raw.txt" {
 			hash = x.Hash
 		}
-		b, e := m.s.store.vault.Open(hash)
+		b, e := m.s.store.openExportBlob(hash)
 		if e != nil {
 			http.Error(w, "publication bytes unavailable", 503)
 			return

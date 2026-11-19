@@ -178,7 +178,7 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 		j.Issue = "inspection_size_limit"
 		return j, nil
 	}
-	body, e := s.vault.Open(j.Hash)
+	body, e := s.openExportBlob(j.Hash)
 	if e != nil {
 		j.Issue = "original_blob_unavailable"
 		return j, nil
@@ -233,7 +233,7 @@ func (s *Store) CompleteProbe(ctx context.Context, r probe.Result) error {
 			return ErrInvalid
 		}
 		// Only this version's deterministic template candidates may be completed.
-		original, e := s.vault.Open(r.Hash)
+		original, e := s.openExportBlob(r.Hash)
 		if e != nil {
 			return ErrInvalid
 		}

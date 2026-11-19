@@ -17,7 +17,7 @@ def run():
    core='/opt/config-repair/core-'+version+'/xray'
    for protocol,network,security in ([('wireguard','native','native')] if '--wireguard' in sys.argv else
     [(p,n,s) for p in ('vless','vmess','trojan') for n in ('tcp','tcp-http','ws','xhttp','grpc','httpupgrade','kcp') for s in (('none','tls') if p!='trojan' else ('tls',))]
-    + [('shadowsocks','tcp','none'),('hysteria','hysteria','tls')]):
+    + [('shadowsocks','tcp','none')]):
     if '--case' in sys.argv and ','.join((protocol,network,security)) != sys.argv[sys.argv.index('--case')+1]:continue
     item={'core':version,'protocol':protocol,'transport':network,'security':security,'tcp':'failed','udp':'not_run','udp443':'not_run'}
     ob=matrix.outbound(protocol,network,security);ob['settings']['port']=24443
@@ -35,7 +35,6 @@ def run():
     elif protocol=='vmess':settings={'clients':[{'id':matrix.UUID,'alterId':0}]}
     elif protocol=='trojan':settings={'clients':[{'password':'synthetic-test-only'}]}
     elif protocol=='shadowsocks':settings={'method':ob['settings']['method'],'password':ob['settings']['password'],'network':'tcp,udp'}
-    else:settings={'version':2,'clients':[{'auth':'synthetic-test-only'}]}
     if protocol=='wireguard':
      def pair(seed):
       encoded=base64.urlsafe_b64encode(seed).decode().rstrip('=')

@@ -11,8 +11,6 @@ def outbound(protocol,network,security):
     elif protocol=='vmess':settings={'vnext':[common|{'users':[{'id':UUID,'alterId':0,'security':'auto'}]}]}
     elif protocol=='trojan':settings=common|{'password':'synthetic-test-only'}
     elif protocol=='shadowsocks':settings=common|{'method':'aes-128-gcm','password':'synthetic-test-only'}
-    elif protocol=='hysteria':settings=common|{'version':2}
-    elif protocol=='hysteria1':settings=common|{'version':1};protocol='hysteria'
     elif protocol=='wireguard':settings={'secretKey':base64.b64encode(bytes(range(32))).decode(),'address':['10.23.0.2/32'],'noKernelTun':True,'peers':[{'endpoint':'203.0.113.81:443','publicKey':base64.b64encode(bytes(range(1,33))).decode()}]}
     elif protocol in ('socks','http'):settings={'servers':[common]}
     else:settings=common
@@ -22,13 +20,12 @@ def outbound(protocol,network,security):
     if network=='tcp-http':stream['network']='tcp';stream['tcpSettings']={'header':{'type':'http','request':{'headers':{'Host':['fixture.invalid']},'method':'GET','path':['/'],'version':'1.1'}}}
     if network in ('xhttp','splithttp'):stream['xhttpSettings']={'path':'/fixture','mode':'auto'}
     if network=='grpc':stream['grpcSettings']={'serviceName':'fixture'}
-    if network=='hysteria':stream['hysteriaSettings']={'version':2,'auth':'synthetic-test-only'}
     return {'tag':'proxy','protocol':protocol,'settings':settings,**({'streamSettings':stream} if protocol!='wireguard' else {})}
 def cases():
     for p in ('vless','vmess','trojan','shadowsocks'):
-        for n in ('tcp','raw','tcp-http','ws','xhttp','grpc','httpupgrade','kcp','hysteria'):
+        for n in ('tcp','raw','tcp-http','ws','xhttp','grpc','httpupgrade','kcp'):
             for s in ('none','tls','reality'):yield p,n,s,outbound(p,n,s)
-    for p,n,s in [('hysteria','hysteria','tls'),('hysteria1','hysteria','tls'),('wireguard','native','native'),('socks','tcp','none'),('http','tcp','tls'),('tuic','quic','tls'),('vless','http','tls'),('vless','quic','tls')]:yield p,n,s,outbound(p,n,s)
+    for p,n,s in [('wireguard','native','native'),('socks','tcp','none'),('http','tcp','tls'),('tuic','quic','tls'),('vless','http','tls'),('vless','quic','tls')]:yield p,n,s,outbound(p,n,s)
 def run():
     parser=argparse.ArgumentParser();parser.add_argument('--template',action='store_true');parser.add_argument('--compiler',default=str(HERE.parent/'.local/config-probe-plan'));args=parser.parse_args()
     rows=[]

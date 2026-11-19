@@ -8,6 +8,7 @@ import (
 	"errors"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/compat"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/native"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"net"
 	"strconv"
 
@@ -115,6 +116,9 @@ func object(b []byte) (M, error) {
 // Apply is deterministic and idempotent. Custom chains are preserved under
 // stable tags; ambiguous entry selection or broken/cyclic dependencies fail.
 func Apply(b []byte) ([]byte, error) {
+	if protocolpolicy.Disabled("", b) {
+		return nil, errors.New(protocolpolicy.Code)
+	}
 	source, e := object(b)
 	if e != nil {
 		return nil, e

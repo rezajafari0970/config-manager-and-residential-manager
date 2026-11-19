@@ -15,7 +15,7 @@ IP = '/usr/sbin/ip' if pathlib.Path('/usr/sbin/ip').exists() else '/usr/bin/ip'
 NFT = '/usr/sbin/nft'
 TARGET = 'v2rayng-2.3.15-lib40-xray-26.10.31-and-26.11.9'
 TESTS = [('https://www.gstatic.com/generate_204', 204), ('https://www.cloudflare.com/cdn-cgi/trace', 200)]
-ALLOWED_PROTOCOLS = {'vless','vmess','trojan','shadowsocks','hysteria','wireguard','socks','http'}
+ALLOWED_PROTOCOLS = {'vless','vmess','trojan','shadowsocks','wireguard','socks','http'}
 lock = threading.Lock()
 STOP = threading.Event()
 spec=importlib.util.spec_from_file_location("config_preflight",pathlib.Path(__file__).with_name("config-preflight.py"))
@@ -54,6 +54,7 @@ def download_endpoints(stream, depth=0):
 
 def endpoints(config):
     """Never infer dial targets by recursively trusting arbitrary address keys."""
+    preflight.require_enabled_config(config)
     config=preflight.logical_for_inspection(config)
     result=[];hopping={}
     for ob in config.get('outbounds',[]):
@@ -198,6 +199,7 @@ class Sandbox:
     def core_command(self,test):
         return ['/xray','run']+(['-test'] if test else [])+['-c','/config.json']
     def launch(self,b,test=False):
+        preflight.require_enabled_config(json.loads(b))
         (self.work/'config.json').write_bytes(b);os.chmod(self.work/'config.json',0o444)
         (self.work/'hosts').write_text('127.0.0.1 localhost\n'+''.join(ip+' '+host+'\n' for host,entry in getattr(self,'resolved',{}).items() for ip in entry['ips']))
         (self.work/'resolv.conf').write_text('nameserver 1.1.1.1\noptions timeout:2 attempts:1\n')

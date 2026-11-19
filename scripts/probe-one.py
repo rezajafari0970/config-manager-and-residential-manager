@@ -113,7 +113,7 @@ class NativeBox(lab.Sandbox):
     def inspect(self,config):
         mapped=[]
         for ob in config.get('outbounds',[]):
-            if ob.get('type') not in ('hysteria','hysteria2','tuic'):raise ValueError('outbound_driver_pending')
+            if ob.get('type') != 'tuic':raise ValueError('outbound_driver_pending')
             settings={'address':ob.get('server'),'port':ob.get('server_port',443)}
             item={'protocol':'socks','settings':settings}
             if ob.get('server_ports'):
@@ -210,7 +210,9 @@ def main():
                                 r=latest_failure
                             else:
                                 r=run_target(box,candidate,timeout,args.client_core)
-                except Exception:r={'core':'blocked','connection':'not_run','code':'probe_infrastructure_error','runtime_sha256':'','endpoints_passed':0}
+                except Exception as error:
+                    code = 'protocol_disabled' if isinstance(error,ValueError) and str(error)=='protocol_disabled' else 'probe_infrastructure_error'
+                    r={'core':'blocked','connection':'not_run','code':code,'runtime_sha256':'','endpoints_passed':0}
                 if native:
                     r['engine']='sing-box'
                     r.setdefault('evidence',{})['native_core']=r['core']

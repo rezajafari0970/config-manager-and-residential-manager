@@ -15,9 +15,7 @@ import (
 func samples() []string {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
 	return []string{
-		"hy://secret@192.0.2.1:443?sni=example.com&upmbps=20&downmbps=50",
-		"hysteria://192.0.2.1:443?auth=secret&peer=example.com&obfs=mask",
-		"hysteria2://user:pass@192.0.2.1:443?security=tls&sni=example.com&obfs=salamander&obfs-password=secret&mport=443,8443-8444&insecure=1",
+		"tuic://11111111-1111-4111-8111-111111111111:secret@192.0.2.1:443?sni=example.com",
 		"wireguard://" + key + "@192.0.2.1:51820?publickey=" + key + "&address=10.0.0.2%2F32&reserved=1,2,3&keepalive=25&dns=1.1.1.1",
 	}
 }

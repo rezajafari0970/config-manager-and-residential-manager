@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/driver"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"golang.org/x/sys/unix"
 	"io"
 	"net/url"
@@ -20,7 +21,10 @@ import (
 )
 
 // Format drivers only extract. Raw files are never re-serialized or repaired.
-type Registry struct{ drivers driver.Registry[FormatDriver] }
+type Registry struct {
+	drivers         driver.Registry[FormatDriver]
+	inspectDocument func([]byte) error
+}
 
 func NewRegistry() *Registry {
 	r := &Registry{}
@@ -97,7 +101,7 @@ func kindOf(raw []byte) string {
 	}
 	scheme = strings.ToLower(scheme)
 	switch scheme {
-	case "vless", "vmess", "trojan", "ss", "ssr", "hysteria", "hysteria2", "hy2", "hy", "tuic", "wireguard", "wg", "json", "custom", "socks", "socks5", "httpcustom", "napsternet":
+	case "vless", "vmess", "trojan", "ss", "ssr", "hysteria", "hysteria1", "hysteria2", "hy1", "hy2", "hy", "tuic", "wireguard", "wg", "json", "custom", "socks", "socks5", "httpcustom", "napsternet":
 		return scheme
 	}
 	return ""
@@ -149,6 +153,11 @@ func (d textFormat) Extract(ctx context.Context, path string, emit Emitter) erro
 		return e
 	}
 	defer unix.Munmap(data)
+	if d.registry != nil && d.registry.inspectDocument != nil {
+		if err := d.registry.inspectDocument(data); err != nil {
+			return err
+		}
+	}
 	_ = unix.Madvise(data, unix.MADV_SEQUENTIAL)
 	trim := bytes.TrimSpace(bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf}))
 	if len(trim) > 1 && trim[0] == '"' && json.Valid(trim) {
@@ -156,14 +165,11 @@ func (d textFormat) Extract(ctx context.Context, path string, emit Emitter) erro
 	}
 	if len(trim) > 0 && (trim[0] == '{' || trim[0] == '[') && json.Valid(trim) {
 		if trim[0] == '{' {
-			keys, e := documentKeys(trim)
-			if e != nil {
-				return e
-			}
-			if configKeys(keys) {
+			keys, err := documentKeys(trim)
+			if (err == nil && configKeys(keys)) || protocolpolicy.Disabled("json", trim) {
 				return emit(ctx, &contextReader{ctx, bytes.NewReader(data)}, "json")
 			}
-			return nil
+			return err
 		}
 		return emitJSON(ctx, trim, emit)
 	}
@@ -294,7 +300,7 @@ func valueEnd(ctx context.Context, b []byte, start int) (int, error) {
 func emitJSON(ctx context.Context, raw []byte, emit Emitter) error {
 	b := bytes.TrimSpace(raw)
 	if !json.Valid(b) {
-		if looksLikeJSONConfig(b) {
+		if looksLikeJSONConfig(b) || protocolpolicy.Disabled("json", b) {
 			return emit(ctx, &contextReader{ctx, bytes.NewReader(raw)}, "json")
 		}
 		return errors.New("invalid_json")
@@ -303,14 +309,11 @@ func emitJSON(ctx context.Context, raw []byte, emit Emitter) error {
 		return ctx.Err()
 	}
 	if b[0] == '{' {
-		keys, e := documentKeys(b)
-		if e != nil {
-			return e
-		}
-		if configKeys(keys) {
+		keys, err := documentKeys(b)
+		if (err == nil && configKeys(keys)) || protocolpolicy.Disabled("json", b) {
 			return emit(ctx, &contextReader{ctx, bytes.NewReader(raw)}, "json")
 		}
-		return nil
+		return err
 	}
 	if b[0] != '[' {
 		return nil

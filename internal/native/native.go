@@ -3,6 +3,7 @@ package native
 import (
 	"encoding/json"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"net/url"
 	"strconv"
@@ -16,10 +17,14 @@ func Prepare(raw []byte) (probe.Plan, bool) {
 	if decoded, e := probe.DecodeEnvelope(raw); e == nil {
 		raw = decoded
 	}
-	if p, ok := wireguard(raw); ok {
+	p := probe.Plan{Target: NativeID, Version: "native.v1", OriginalSHA256: repair.Digest(raw), Code: "native_import_unsupported", AndroidImport: "not_applicable", Candidates: []probe.Candidate{}}
+	if protocolpolicy.Disabled("", raw) {
+		p.Code = protocolpolicy.Code
 		return p, true
 	}
-	p := probe.Plan{Target: NativeID, Version: "native.v1", OriginalSHA256: repair.Digest(raw), Code: "native_import_unsupported", AndroidImport: "not_applicable", Candidates: []probe.Candidate{}}
+	if wg, ok := wireguard(raw); ok {
+		return wg, true
+	}
 	var original map[string]any
 	if json.Unmarshal(raw, &original) == nil {
 		os, ok := original["outbounds"].([]any)

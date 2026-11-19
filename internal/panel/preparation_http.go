@@ -131,7 +131,7 @@ func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (comp
 	out.array = !single && engine == "xray"
 	written := []preparedEntry{}
 	for _, v := range eligible {
-		body, err := s.store.vault.Open(v.Candidate)
+		body, err := s.store.openExportBlob(v.Candidate)
 		if err != nil {
 			http.Error(w, "verified template unavailable; retry", 503)
 			return

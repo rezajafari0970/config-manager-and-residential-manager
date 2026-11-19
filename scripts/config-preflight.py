@@ -2,6 +2,30 @@
 import copy,ipaddress
 VERSION='exact-runtime-preflight.v2'
 def fail(code):raise ValueError(code)
+DISABLED_PROTOCOLS = {'hy', 'hy1', 'hy2', 'hysteria', 'hysteria1', 'hysteria2'}
+
+def require_enabled_config(config):
+    """Enforce the manager protocol policy before a standalone helper starts a core."""
+    def walk(value, section=None):
+        if isinstance(value, list):
+            for item in value:
+                walk(item, section)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                key = key.casefold()
+                if section is not None and isinstance(item, str):
+                    selector = key in {'protocol', 'type', 'network', 'net', 'transport'}
+                    if (selector or key == 'method' and section == 'stream') and item.strip().casefold() in DISABLED_PROTOCOLS:
+                        fail('protocol_disabled')
+                child = None
+                if key in {'inbound', 'inbounds', 'outbound', 'outbounds', 'endpoints', 'proxies'}:
+                    child = 'proxy'
+                elif key in {'streamsettings', 'transport', 'downloadsettings'}:
+                    child = 'stream'
+                if isinstance(item, (list, dict)):
+                    walk(item, child)
+    walk(config, 'proxy')
+
 def relay_tcp_mask(value,network):
     # Same narrow driver as internal/compat: only a TCP Fragment wrapper;
     # nothing here may add another dial destination or UDP camouflage.

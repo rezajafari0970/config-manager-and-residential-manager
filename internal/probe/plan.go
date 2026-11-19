@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"net"
 	"net/url"
 	"sort"
@@ -61,6 +62,10 @@ func Prepare(raw []byte) (p Plan) {
 		p.Code = "invalid_utf8"
 		return
 	}
+	if protocolpolicy.Disabled("", raw) {
+		p.Code = protocolpolicy.Code
+		return
+	}
 	s := strings.TrimSpace(string(raw))
 	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "\ufeff{") {
 		p.Kind = "json"
@@ -74,6 +79,10 @@ func Prepare(raw []byte) (p Plan) {
 		if len(d.Candidate) > 0 {
 			b = d.Candidate
 			rule = repair.RulesVersion
+		}
+		if len(d.Candidate) > 0 && protocolpolicy.Disabled("", b) {
+			p.Code = protocolpolicy.Code
+			return
 		}
 		if m, err := strictObject(b); err == nil && len(compat.NormalizeEndpointLiterals(m)) > 0 {
 			b, _ = json.Marshal(m)

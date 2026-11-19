@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/resources"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/transient"
@@ -308,18 +309,46 @@ func (e *Engine) runJobWithBudgets(parent context.Context, job Job, fetchTimeout
 		return
 	}
 	unique := 0
+	var skippedDisabled bool
 	batch := newStageBuffer(e.repo, e.vault, job)
 	defer batch.release()
 	result.Staged = true
 	err = e.formats.Extract(ctx, spoolPath, func(ctx context.Context, r io.Reader, kind string) error {
+		if protocolpolicy.DisabledKind(kind) {
+			skippedDisabled = true
+			return nil
+		}
 		sample := &sampleWriter{}
 		ref, err := e.vault.Put(ctx, io.TeeReader(r, sample))
 		if err != nil {
 			return err
 		}
+		complete := ref.Size <= int64(len(sample.data))
+		var disabled bool
+		if complete {
+			disabled = protocolpolicy.Disabled(kind, sample.data)
+		} else {
+			var whole io.ReadCloser
+			whole, err = e.vault.Open(ref.Hash)
+			if err == nil {
+				disabled, err = protocolpolicy.DisabledReader(kind, &contextReader{ctx, whole})
+				whole.Close()
+			}
+		}
+		if disabled || err != nil {
+			e.vault.Release(ref.Hash)
+			skippedDisabled = skippedDisabled || disabled
+			return err
+		}
+		quality := e.inspectors.Inspect(sample.data, complete, kind)
+		diagnostic := e.repairs.Propose(sample.data, complete, kind, quality)
+		if len(diagnostic.Candidate) > 0 && protocolpolicy.Disabled(kind, diagnostic.Candidate) {
+			e.vault.Release(ref.Hash)
+			skippedDisabled = true
+			return nil
+		}
 		batch.pin(ref.Hash)
-		identity := Fingerprint(sample.data, ref.Size <= int64(len(sample.data)), kind, ref.Hash)
-		quality := e.inspectors.Inspect(sample.data, ref.Size <= int64(len(sample.data)), kind)
+		identity := Fingerprint(sample.data, complete, kind, ref.Hash)
 		switch quality {
 		case "valid":
 			result.ValidCount++
@@ -329,7 +358,6 @@ func (e *Engine) runJobWithBudgets(parent context.Context, job Job, fetchTimeout
 			result.UnknownCount++
 		}
 		result.Extracted++
-		diagnostic := e.repairs.Propose(sample.data, ref.Size <= int64(len(sample.data)), kind, quality)
 		var candidate blob.Ref
 		if len(diagnostic.Candidate) > 0 {
 			if e.inspectors.Inspect(diagnostic.Candidate, true, kind) != "valid" {
@@ -372,6 +400,9 @@ func (e *Engine) runJobWithBudgets(parent context.Context, job Job, fetchTimeout
 		}
 	}
 	result.ContentState = ContentState(spoolPath, result.ValidCount, result.InvalidCount, result.UnknownCount)
+	if skippedDisabled && result.Extracted == 0 && err == nil {
+		result.ContentState = "empty"
+	}
 	result.State = "updated"
 	if unique == 0 {
 		result.State = "empty"

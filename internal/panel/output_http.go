@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/collect"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/transient"
 	"io"
 	"net/http"
 	"strconv"
@@ -23,12 +25,15 @@ func (m outputModule) Register(mux *http.ServeMux) {
 	})
 }
 func (s *Server) stream(w http.ResponseWriter, r *http.Request, hash string, size int64, filename string) {
-	body, e := s.store.vault.Open(hash)
+	body, e := s.store.openExportBlob(hash)
 	if e != nil {
 		failure(w, ErrNotFound)
 		return
 	}
 	defer body.Close()
+	writeOriginal(w, r, body, hash, size, filename)
+}
+func writeOriginal(w http.ResponseWriter, r *http.Request, body io.Reader, hash string, size int64, filename string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.Header().Set("X-Content-SHA256", hash)
@@ -59,7 +64,43 @@ func (s *Server) response(w http.ResponseWriter, r *http.Request) {
 		failure(w, e)
 		return
 	}
-	s.stream(w, r, ref.Hash, ref.Size, "original-response.txt")
+	// The encrypted source response is independent of current memberships.
+	// Inspect it before setting download headers, including on old source
+	// snapshots. Subscriptions can contain nested base64 or JSON envelopes.
+	body, e := s.store.vault.Open(ref.Hash)
+	if e != nil {
+		failure(w, ErrNotFound)
+		return
+	}
+	defer body.Close()
+	spool, path, e := transient.NewFile()
+	if e != nil {
+		failure(w, e)
+		return
+	}
+	defer spool.Close()
+	n, e := io.Copy(spool, body)
+	if e != nil || n != ref.Size {
+		http.Error(w, "source response unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	blocked, e := collect.SourceResponseDisabled(r.Context(), path)
+	if blocked {
+		respond(w, http.StatusConflict, map[string]string{
+			"error":      "این پاسخ شامل کانفیگ غیرفعال است. کانفیگ‌های قابل انتشار در خروجی همین منبع در دسترس‌اند.",
+			"export_url": s.exportURL(r.PathValue("id"), false),
+		})
+		return
+	}
+	if e != nil && !collect.IsContentError(e) {
+		failure(w, e)
+		return
+	}
+	if _, e = spool.Seek(0, io.SeekStart); e != nil {
+		failure(w, e)
+		return
+	}
+	writeOriginal(w, r, spool, ref.Hash, ref.Size, "original-response.txt")
 }
 
 // rawAll prints immutable original bodies; no ZIP, wrapper or JSON rewriting.
@@ -111,7 +152,7 @@ func (s *Server) rawAll(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "raw output size limit", 503)
 			return
 		}
-		body, err := s.store.vault.Open(a.Hash)
+		body, err := s.store.openExportBlob(a.Hash)
 		if err != nil {
 			http.Error(w, "raw body unavailable; retry", 503)
 			return

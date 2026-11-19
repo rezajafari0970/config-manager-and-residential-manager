@@ -33,8 +33,6 @@ func fixtures() map[string]string {
 		"vmess":                    "vmess://" + base64.RawStdEncoding.EncodeToString([]byte(vm)),
 		"trojan":                   "trojan://synthetic%3Asecret@192.0.2.1:443?security=tls&sni=example.com",
 		"ss":                       "ss://" + base64.RawStdEncoding.EncodeToString([]byte("aes-128-gcm:synthetic")) + "@192.0.2.1:443",
-		"hy2":                      "hy2://synthetic@192.0.2.1:443?sni=example.com",
-		"hysteria2":                "hysteria2://synthetic@192.0.2.1:443?sni=example.com&obfs=salamander&obfs-password=test&mport=443,8443-8444",
 		"socks5":                   "socks5://user:synthetic@192.0.2.1:1080",
 		"wireguard":                "wireguard://" + key + "@192.0.2.1:51820?publickey=" + pub + "&address=10.0.0.2%2F32&reserved=1,2,3",
 		"wireguard-ini":            "[Interface]\nPrivateKey=" + key + "\nAddress=10.0.0.2/32\n[Peer]\nPublicKey=" + pub + "\nEndpoint=192.0.2.1:51820\nAllowedIPs=0.0.0.0/0",
@@ -44,6 +42,24 @@ func fixtures() map[string]string {
 		"domain-bootstrap":         "trojan://synthetic@proxy.example:443?security=tls&sni=example.com",
 	}
 }
+func TestDisabledProtocolsHaveNoPreparedTemplate(t *testing.T) {
+	blocked := []string{
+		"hysteria://synthetic@192.0.2.1:443",
+		"hy2://synthetic@192.0.2.1:443",
+		`{"outbounds":[{"type":"hysteria2","server":"192.0.2.1"}]}`,
+		`{"outbounds":[{"protocol":"vless","streamSettings":{"network":"hysteria"}}]}`,
+	}
+	for _, raw := range blocked {
+		p := Prepare([]byte(raw))
+		if p.Code != "protocol_disabled" || len(p.Candidates) != 0 {
+			t.Fatalf("unexpected plan for disabled protocol: %s, %d candidates", p.Code, len(p.Candidates))
+		}
+	}
+	if _, err := Apply([]byte(blocked[3])); err == nil || err.Error() != "protocol_disabled" {
+		t.Fatalf("direct template application allowed disabled transport: %v", err)
+	}
+}
+
 func TestTemplateProtocolMatrix(t *testing.T) {
 	for name, raw := range fixtures() {
 		t.Run(name, func(t *testing.T) {

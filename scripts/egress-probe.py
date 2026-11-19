@@ -76,6 +76,7 @@ class ResourcePool:
 def runtime(config,driver):
  if driver=='xray':
   return scope.runtime(config,lab)
+ lab.preflight.require_enabled_config(config)
  out=config['outbounds']
  if len(out)!=1 or out[0].get('detour') or out[0].get('server_ports') or out[0].get('domain_resolver'):raise ValueError('native_path_unsupported')
  ob=out[0];host=ob['server'];port=ob['server_port']
@@ -116,7 +117,7 @@ def error_code(error):
 def core_independent_failure(code):
  # Changing Xray cannot repair host DNS resolution or the IPv6-only sandbox.
  # Preserve UNKNOWN and the queue's independent retry; do not try four cores.
- return code in ('endpoint_dns_failed','ipv6_only_probe_pending')
+ return code in ('protocol_disabled','endpoint_dns_failed','ipv6_only_probe_pending')
 def resource_failures(prefix):
  try:
   fields=dict(line.split() for line in (pathlib.Path('/sys/fs/cgroup')/(prefix+'-sandboxes')/'memory.events').read_text().splitlines())

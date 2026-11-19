@@ -76,7 +76,7 @@ func (s *Store) PrepareBatch(ctx context.Context) (int, error) {
 			return 0, e
 		}
 		var raw []byte
-		body, err := s.vault.Open(h)
+		body, err := s.openExportBlob(h)
 		if err == nil {
 			raw, err = io.ReadAll(io.LimitReader(body, repair.MaxBytes+1))
 			body.Close()
