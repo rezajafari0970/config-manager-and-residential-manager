@@ -3,7 +3,7 @@
 import base64, contextlib, fcntl, hashlib, importlib.util, ipaddress, json, os, pathlib, pwd, re, secrets, shutil, socket, subprocess, sys, tarfile, tempfile, time, urllib.request, zipfile
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 OPT=pathlib.Path('/opt/config-repair'); ETC=pathlib.Path('/etc/config-repair'); DATA=pathlib.Path('/var/lib/config-repair')
-SERVICES=['config-repair','config-repair-prober','config-repair-egress']
+SERVICES=['config-repair','config-repair-prober','config-repair-egress','config-repair-side']
 DATA_UPDATERS=['config-repair-country-update','config-repair-network-update']
 MARKER=OPT/'installer.json'
 
@@ -142,7 +142,15 @@ def main():
         backup.mkdir(mode=0o700)
         if pathlib.Path('/etc/systemd/system/config-repair-network-update.timer').exists():
             run('systemctl','stop','config-repair-network-update.timer','config-repair-network-update.service')
-        run('systemctl','stop',*SERVICES)
+        # Older releases have no Side unit. Keep the mandatory writers in the
+        # stop transaction even when an administrator moved their unit files.
+        installed_services=SERVICES.copy()
+        side_load=subprocess.run(['systemctl','show','--property=LoadState','--value','config-repair-side.service'],capture_output=True,text=True)
+        if side_load.stdout.strip()=='not-found':
+            installed_services.remove('config-repair-side')
+        else:
+            side_load.check_returncode()
+        run('systemctl','stop',*installed_services)
         # A stopped SQLite file, WAL, blobs, key and configuration form one snapshot.
         shutil.copytree(ETC,backup/'etc');shutil.copytree(DATA,backup/'data',copy_function=shutil.copy2,ignore=shutil.ignore_patterns('probe.sock'))
         (backup/'release').write_text(str((OPT/'current').resolve()))

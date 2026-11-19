@@ -85,7 +85,7 @@ func sharedHeadroom() (available, budget int64, err error) {
 	// Count non-reclaimable manager memory, not file cache which MemAvailable
 	// already considers reclaimable. Cores are siblings of their trusted helpers.
 	roots := []string{}
-	for _, s := range []string{"config-repair", "config-repair-prober", "config-repair-egress"} {
+	for _, s := range []string{"config-repair", "config-repair-prober", "config-repair-egress", "config-repair-side"} {
 		roots = append(roots, "/sys/fs/cgroup/system.slice/"+s+".service")
 	}
 	entries, e := os.ReadDir("/sys/fs/cgroup")
@@ -94,7 +94,7 @@ func sharedHeadroom() (available, budget int64, err error) {
 	}
 	for _, p := range entries {
 		n := p.Name()
-		if n == "cge-sandboxes" || (strings.HasPrefix(n, "crw") && len(n) == 13) {
+		if n == "cge-sandboxes" || (len(n) == 13 && (strings.HasPrefix(n, "crw") || strings.HasPrefix(n, "csi"))) {
 			roots = append(roots, "/sys/fs/cgroup/"+n)
 		}
 	}

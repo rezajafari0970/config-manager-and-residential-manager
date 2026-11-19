@@ -47,8 +47,8 @@ export CMRM_HOST=panel.example.com CMRM_PORT=18443
 اجرای دوبارهٔ همان دستور، نصب متعلق به این پروژه را شناسایی می‌کند؛ کلید، رمز و دیتابیس را نگه می‌دارد. تغییر نسخه با پشتیبانِ متوقف‌شدهٔ داده و تنظیمات انجام می‌شود. نصب‌های قدیمیِ فاقد نشان مالکیت به‌صورت خودکار بازنویسی نمی‌شوند؛ [راهنمای عملیات](docs/OPERATIONS.md) را بخوانید.
 
 ```bash
-systemctl status config-repair config-repair-prober config-repair-egress
-journalctl -u config-repair -u config-repair-prober -u config-repair-egress --since '10 minutes ago'
+systemctl status config-repair config-repair-prober config-repair-egress config-repair-side
+journalctl -u config-repair -u config-repair-prober -u config-repair-egress -u config-repair-side --since '10 minutes ago'
 cat /etc/config-repair/access.txt
 ```
 

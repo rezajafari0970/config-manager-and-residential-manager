@@ -1,0 +1,24 @@
+[Unit]
+Description=Side service connectivity and stability worker
+After=config-repair.service network-online.target
+Wants=config-repair.service network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/config-repair/current
+Environment=CONFIG_REPAIR_RESOURCE_DIR=/var/lib/config-repair/resource-budget
+Environment=GOMEMLIMIT=128MiB
+ExecStart=/opt/config-repair/current/config-probe-worker -lane side
+Restart=always
+RestartSec=5
+TimeoutStopSec=40
+KillMode=control-group
+UMask=0077
+MemoryMax=1G
+TasksMax=512
+LimitNOFILE=2048
+
+[Install]
+WantedBy=multi-user.target
