@@ -45,7 +45,7 @@ type rotatingConfig struct {
 
 // Acquire the SQLite write lock before reading state. This also serializes
 // claims made through different Store instances/processes, not just goroutines.
-func (s *Store) rotationTransaction(ctx context.Context, scope string) (*outputTx, error) {
+func (s *Store) rotationTransaction(ctx context.Context, scope string) (*admittedTx, error) {
 	tx, e := s.outputTransaction(ctx)
 	if e != nil {
 		return nil, e

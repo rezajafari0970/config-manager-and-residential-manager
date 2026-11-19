@@ -130,7 +130,7 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 		return nil, err
 	}
 	defer release()
-	tx, e := s.db.BeginTx(ctx, nil)
+	tx, e := s.admittedTransaction(ctx, false)
 	if e != nil {
 		return nil, e
 	}
@@ -151,7 +151,7 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 	if !settings.Enabled || active >= min(8, settings.Concurrency) {
 		return nil, tx.Commit()
 	}
-	if e = syncConversions(ctx, tx); e != nil {
+	if e = syncConversions(ctx, tx.Tx); e != nil {
 		return nil, e
 	}
 	j := &probe.Job{Settings: settings}

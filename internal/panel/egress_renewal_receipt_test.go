@@ -133,3 +133,45 @@ func TestRenewalDeadlinesAheadOfOrdinaryReviews(t *testing.T) {
 		})
 	}
 }
+
+func TestExpiredTurnRestoresProvenReceiptsBeforeInconclusive(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	newExportSource(t, s, "expired-renewal", sourceURI(1211), sourceURI(1212), sourceURI(1213), sourceURI(1214))
+	var hashes []string
+	for range 4 {
+		job, err := s.ClaimEgress(ctx)
+		if err != nil || job == nil {
+			t.Fatal("missing initial job", err)
+		}
+		if err = s.CompleteEgress(ctx, egress.Completion{Job: *job, Report: syntheticEgress(*job)}); err != nil {
+			t.Fatal(err)
+		}
+		hashes = append(hashes, job.Hash)
+	}
+	unknown, noHistory, older, newer := hashes[0], hashes[1], hashes[2], hashes[3]
+	// An incomplete latest receipt may have past history. Conversely, a
+	// positive route deadline by itself does not prove residential eligibility.
+	if _, err := s.db.Exec("DELETE FROM egress_residential_history WHERE hash=?", noHistory); err != nil {
+		t.Fatal(err)
+	}
+	now := egress.Now()
+	for i, hash := range hashes {
+		until := now - 1000
+		if hash == unknown {
+			until = 0
+		}
+		if _, err := s.db.Exec("UPDATE egress_jobs SET state='QUARANTINED',valid_until=?,next_run=? WHERE hash=?", until, i+1, hash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each claim consumes the next due identity. Once both proven receipts
+	// have leases, the same reserved turn resumes the other work in FIFO order.
+	for _, want := range []string{older, newer, unknown, noHistory} {
+		s.renewalTurn.Store(2)
+		job, err := s.ClaimEgressLane(ctx, "followup")
+		if err != nil || job == nil || job.Hash != want {
+			t.Fatal("unexpected reserved expired-proof claim", job, err)
+		}
+	}
+}

@@ -424,7 +424,18 @@ func (s *Store) PrivateProbeHandler() http.Handler {
 		}
 		respond(w, 200, true)
 	})
-	return s.admitWorker(mux)
+	// Claims acquire the shared claim slot before writer admission, and egress
+	// ranks on its WAL reader first. Dispatch by the matched pattern so an
+	// equivalent escaped route cannot acquire the writer admission twice.
+	other := s.admitWorker(mux)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, pattern := mux.Handler(r)
+		if pattern == "POST /claim" || pattern == "POST /egress/claim" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		other.ServeHTTP(w, r)
+	})
 }
 
 // A source/expiry/GC change between list and blob open must not break every

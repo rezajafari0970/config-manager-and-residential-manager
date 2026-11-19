@@ -84,15 +84,19 @@ func (a *operationAdmission) advance() {
 }
 
 // The gate ends with the transaction, before blob I/O or response streaming.
-type outputTx struct {
+type admittedTx struct {
 	*sql.Tx
 	release func()
 }
 
-func (t *outputTx) Commit() error   { defer t.release(); return t.Tx.Commit() }
-func (t *outputTx) Rollback() error { defer t.release(); return t.Tx.Rollback() }
-func (s *Store) outputTransaction(ctx context.Context) (*outputTx, error) {
-	release, err := s.operations.acquire(ctx, true)
+func (t *admittedTx) Commit() error   { defer t.release(); return t.Tx.Commit() }
+func (t *admittedTx) Rollback() error { defer t.release(); return t.Tx.Rollback() }
+func (s *Store) outputTransaction(ctx context.Context) (*admittedTx, error) {
+	return s.admittedTransaction(ctx, true)
+}
+
+func (s *Store) admittedTransaction(ctx context.Context, foreground bool) (*admittedTx, error) {
+	release, err := s.operations.acquire(ctx, foreground)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +105,7 @@ func (s *Store) outputTransaction(ctx context.Context) (*outputTx, error) {
 		release()
 		return nil, err
 	}
-	return &outputTx{Tx: tx, release: release}, nil
+	return &admittedTx{Tx: tx, release: release}, nil
 }
 
 type admittedResponse struct {
