@@ -384,6 +384,16 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	if d.Eligible {
 		delay = min(delay, max(int64(0), d.Until-max(lead, int64(120000))-now))
 	}
+	confirmNetwork, err := saveEgressNetwork(ctx, tx, r, d, candidateHash, now)
+	if err != nil {
+		return err
+	}
+	if confirmNetwork {
+		delay = min(delay, int64(60000))
+	}
+	if d.Eligible && d.Network.Eligible {
+		delay = min(delay, max(int64(60000), d.Network.Until-lead-now))
+	}
 	_, e = tx.ExecContext(ctx, `UPDATE egress_jobs SET state=?,reason=?,ever_accepted=?,tested=?,valid_until=?,candidate_hash=?,candidate_size=?,format=?,decision=?,report=?,token='',lease_until=0,next_run=?,failures=?,last_failure=?,retry_streak=?,first_completed=1 WHERE hash=?`, state, d.Reason, accepted, now, d.Until, candidateHash, candidateSize, plan.Format, string(decision), string(report), now+delay, failures, last, streak, j.Hash)
 	if e != nil {
 		return e

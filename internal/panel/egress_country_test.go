@@ -29,6 +29,7 @@ func TestEgressCountriesAllOutputsAndPolicy(t *testing.T) {
 					sample.Geo.Providers[k].Country = "MO"
 				}
 				sample.Source = egress.Hash([]byte("second-fixture-source"))
+				sample.Network.Source = sample.Source
 			}
 		}
 		if e = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); e != nil {

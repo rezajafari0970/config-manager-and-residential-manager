@@ -46,7 +46,7 @@ func (r egressSnapshotReader) query(q string) string {
 
 func freezeEgress(ctx context.Context, q databaseQuery) (databaseQuery, error) {
 	parts := []string{}
-	for _, name := range []string{"egress_eligible", "egress_geo_eligible", "egress_export_eligible"} {
+	for _, name := range []string{"egress_eligible", "egress_network_eligible", "egress_geo_eligible", "egress_export_eligible"} {
 		var definition string
 		if err := q.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='view' AND name=?", name).Scan(&definition); err != nil {
 			return nil, err

@@ -198,11 +198,11 @@ func countryState(ctx context.Context, q databaseQuery) (map[string]any, error) 
 	if e != nil {
 		return nil, e
 	}
-	var known, shared, published, route int
-	if e = q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM egress_geo_eligible),(SELECT count(*) FROM egress_export_eligible),(SELECT count(*) FROM egress_eligible),(SELECT count(*) FROM (SELECT c.hash FROM egress_countries c JOIN egress_geo_eligible g ON g.hash=c.hash WHERE c.last_seen>? GROUP BY c.hash HAVING count(*)>1))`, readStamp(ctx)-egress.CountryWindow).Scan(&known, &published, &route, &shared); e != nil {
+	var known, shared, published, access int
+	if e = q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM egress_geo_eligible),(SELECT count(*) FROM egress_export_eligible),(SELECT count(*) FROM egress_network_eligible),(SELECT count(*) FROM (SELECT c.hash FROM egress_countries c JOIN egress_geo_eligible g ON g.hash=c.hash WHERE c.last_seen>? GROUP BY c.hash HAVING count(*)>1))`, readStamp(ctx)-egress.CountryWindow).Scan(&known, &published, &access, &shared); e != nil {
 		return nil, e
 	}
-	return map[string]any{"policy": p, "match_mode": "any", "codes": egress.CountryCodes(), "counts": counts, "known": known, "shared": shared, "published": published, "unknown": route - known, "window_ms": egress.CountryWindow}, nil
+	return map[string]any{"policy": p, "match_mode": "any", "codes": egress.CountryCodes(), "counts": counts, "known": known, "shared": shared, "published": published, "unknown": access - known, "window_ms": egress.CountryWindow}, nil
 }
 
 func entryCountries(ctx context.Context, q databaseQuery, hash string) ([]string, error) {

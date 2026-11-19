@@ -24,7 +24,7 @@ func dropEgressForMigration(t *testing.T, s *Store) {
 			t.Fatal(e)
 		}
 	}
-	for _, q := range []string{"DROP INDEX egress_membership_identity", "DROP TRIGGER egress_metric_unique", "DROP VIEW egress_work", "DROP VIEW egress_inventory", "DROP TABLE egress_retirements", "DROP TABLE egress_unique", "DROP TRIGGER egress_excluded_alias_insert", "DROP TRIGGER egress_excluded_alias_update", "DROP TRIGGER egress_run_deleted", "DROP TABLE egress_run_members", "DROP TABLE egress_runs", "DROP TABLE IF EXISTS egress_iran_policy", "DROP TABLE IF EXISTS egress_iran_guard", "DROP TRIGGER IF EXISTS egress_metric_ingest", "DROP TRIGGER egress_metric_delete", "DROP TRIGGER egress_retry_revived", "DROP TABLE egress_metrics", "DROP TRIGGER egress_stage", "DROP TABLE egress_health", "DROP TABLE egress_lifecycle", "DROP VIEW egress_export_eligible", "DROP VIEW egress_geo_eligible", "DROP TABLE egress_geo_results", "DROP TABLE egress_countries", "DROP TABLE egress_country_policy", "DROP TRIGGER egress_ingest", "DROP VIEW input_blocked_identities", "DROP VIEW input_blocked", "DROP VIEW egress_eligible", "DROP TABLE egress_owners", "DROP TABLE egress_jobs", "DROP TABLE egress_turns", "DROP TABLE egress_events", "DROP TABLE egress_settings", "DROP TABLE egress_worker"} {
+	for _, q := range []string{"DROP TRIGGER egress_network_representative_removed", "DROP VIEW egress_network_eligible", "DROP TABLE egress_network_results", "DROP INDEX egress_membership_identity", "DROP TRIGGER egress_metric_unique", "DROP VIEW egress_work", "DROP VIEW egress_inventory", "DROP TABLE egress_retirements", "DROP TABLE egress_unique", "DROP TRIGGER egress_excluded_alias_insert", "DROP TRIGGER egress_excluded_alias_update", "DROP TRIGGER egress_run_deleted", "DROP TABLE egress_run_members", "DROP TABLE egress_runs", "DROP TABLE IF EXISTS egress_iran_policy", "DROP TABLE IF EXISTS egress_iran_guard", "DROP TRIGGER IF EXISTS egress_metric_ingest", "DROP TRIGGER egress_metric_delete", "DROP TRIGGER egress_retry_revived", "DROP TABLE egress_metrics", "DROP TRIGGER egress_stage", "DROP TABLE egress_health", "DROP TABLE egress_lifecycle", "DROP VIEW egress_export_eligible", "DROP VIEW egress_geo_eligible", "DROP TABLE egress_geo_results", "DROP TABLE egress_countries", "DROP TABLE egress_country_policy", "DROP TRIGGER egress_ingest", "DROP VIEW input_blocked_identities", "DROP VIEW input_blocked", "DROP VIEW egress_eligible", "DROP TABLE egress_owners", "DROP TABLE egress_jobs", "DROP TABLE egress_turns", "DROP TABLE egress_events", "DROP TABLE egress_settings", "DROP TABLE egress_worker"} {
 		if _, e := s.db.Exec(q); e != nil {
 			t.Fatal(e)
 		}
@@ -53,6 +53,19 @@ func syntheticEgress(j egress.Job) egress.Report {
 			}
 		}
 	}
+	for i := range r.Samples {
+		sample := &r.Samples[i]
+		if sample.ActualAds {
+			sample.FirstStatus = 200
+			sample.Code = "ads_peer_reported"
+			sample.Network = &egress.NetworkFact{
+				Version: egress.NetworkVersion, Kind: "access", Provider: "fixture-isp", ASN: 23456,
+				PrefixLen: 24, Family: sample.Family, Source: sample.Source, UsageSource: "access-feed",
+				OriginSource: "route-table", Dataset: egress.Hash([]byte("dataset")), CheckedAt: now, ValidUntil: now + egress.EvidenceTTL,
+			}
+		}
+	}
+
 	for _, v := range []string{"raw", "template"} {
 		tr := egress.Transfer{Bytes: egress.HealthBytes, CurlExit: 0, HTTPStatus: 200, TLSVerified: true}
 		r.Health = append(r.Health, egress.HealthSample{Version: egress.HealthVersion, Variant: v, At: now, Providers: []egress.HealthProvider{{Provider: "cloudflare", Download: tr, Upload: tr}, {Provider: "httpbingo", Download: tr, Upload: tr}}})

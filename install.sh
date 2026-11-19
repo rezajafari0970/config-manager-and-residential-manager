@@ -80,6 +80,9 @@ export DEBIAN_FRONTEND=noninteractive
 printf '[install] Installing system prerequisites\n'
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl python3 python3-venv openssl nginx nftables iproute2 bubblewrap util-linux tar gzip unzip gcc libc6-dev
+if [[ -f /etc/config-repair/egress-access-mmdb.json ]]; then
+    apt-get install -y --no-install-recommends python3-maxminddb
+fi
 SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ ! -f "$SOURCE_DIR/deploy/install.py" ]]; then
     WORK_DIR=$(mktemp -d /var/tmp/cmrm-source.XXXXXX)

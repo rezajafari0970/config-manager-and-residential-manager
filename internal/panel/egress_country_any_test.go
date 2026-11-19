@@ -29,6 +29,7 @@ func TestEgressAnyCountrySharedOutputsAndMigration(t *testing.T) {
 		if country := countryByDomain[sample.Domain]; sample.ActualAds && country != "" {
 			sample.Geo.Country = country
 			sample.Source = egress.Hash([]byte("fixture-exit-" + country))
+			sample.Network.Source = sample.Source
 			for k := range sample.Geo.Providers {
 				sample.Geo.Providers[k].Country = country
 			}

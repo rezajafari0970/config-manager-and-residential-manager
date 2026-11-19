@@ -1,0 +1,31 @@
+[Unit]
+Description=Refresh local network evidence for observed Ads exit addresses
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=config-repair
+ExecStart=/usr/bin/python3 -B /opt/config-repair/current/scripts/egress-network-update.py
+UMask=0077
+Nice=15
+CPUWeight=20
+CPUQuota=50%
+IOWeight=20
+MemoryMax=512M
+TasksMax=16
+TimeoutStartSec=15min
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+TemporaryFileSystem=/var/lib/config-repair:ro
+BindPaths=/var/lib/config-repair/network
+InaccessiblePaths=-/etc/config-repair/panel.json -/etc/config-repair/access.txt -/etc/config-repair/htpasswd -/etc/config-repair/tls.key
+ReadWritePaths=/var/lib/config-repair/network

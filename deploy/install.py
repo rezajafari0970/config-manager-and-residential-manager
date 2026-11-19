@@ -4,6 +4,7 @@ import base64, contextlib, fcntl, hashlib, importlib.util, ipaddress, json, os, 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 OPT=pathlib.Path('/opt/config-repair'); ETC=pathlib.Path('/etc/config-repair'); DATA=pathlib.Path('/var/lib/config-repair')
 SERVICES=['config-repair','config-repair-prober','config-repair-egress']
+DATA_UPDATERS=['config-repair-country-update','config-repair-network-update']
 MARKER=OPT/'installer.json'
 
 def run(*args,**kw):
@@ -139,6 +140,8 @@ def main():
     if existing and old.get('release')!=release_id:
         backup=DATA.parent/('config-repair-backup-'+str(int(time.time())))
         backup.mkdir(mode=0o700)
+        if pathlib.Path('/etc/systemd/system/config-repair-network-update.timer').exists():
+            run('systemctl','stop','config-repair-network-update.timer','config-repair-network-update.service')
         run('systemctl','stop',*SERVICES)
         # A stopped SQLite file, WAL, blobs, key and configuration form one snapshot.
         shutil.copytree(ETC,backup/'etc');shutil.copytree(DATA,backup/'data',copy_function=shutil.copy2,ignore=shutil.ignore_patterns('probe.sock'))
@@ -169,17 +172,23 @@ def main():
     write(conf,nginx,0o644);run('nginx','-t')
     write('/etc/sysctl.d/90-config-manager-residential.conf','net.ipv4.ip_forward=1\n',0o644)
     run('sysctl','-w','net.ipv4.ip_forward=1')
-    for name in SERVICES+['config-repair-country-update']:
+    for name in SERVICES+DATA_UPDATERS:
         shutil.copy2(ROOT/'deploy'/(name+'.service'),pathlib.Path('/etc/systemd/system')/(name+'.service'))
-    shutil.copy2(ROOT/'deploy/config-repair-country-update.timer','/etc/systemd/system/config-repair-country-update.timer')
+    timers=[name+'.timer' for name in DATA_UPDATERS]
+    for timer in timers:
+        shutil.copy2(ROOT/'deploy'/timer,pathlib.Path('/etc/systemd/system')/timer)
     (DATA/'country').mkdir(exist_ok=True,mode=0o700)
+    network=DATA/'network'
+    network.mkdir(exist_ok=True,mode=0o700)
+    os.chown(network,user.pw_uid,user.pw_gid)
     link=OPT/'current.install-new';link.unlink(missing_ok=True);link.symlink_to(release);os.replace(link,OPT/'current')
     write(MARKER,json.dumps(dict(product='cmrm',release=release_id,port=port,host=host),indent=2)+'\n')
     print('[install] Starting application services...',flush=True)
     run('systemctl','daemon-reload')
-    run('systemctl','enable',*SERVICES,'config-repair-country-update.timer','nginx')
+    run('systemctl','enable',*SERVICES,*timers,'nginx')
     run('systemctl','restart',*SERVICES)
-    run('systemctl','start','config-repair-country-update.timer','nginx')
+    run('systemctl','start',*timers,'nginx')
+    run('systemctl','start','--no-block','config-repair-network-update.service')
     run('systemctl','reload','nginx')
     health(origin)
     run('systemctl','is-active',*SERVICES)

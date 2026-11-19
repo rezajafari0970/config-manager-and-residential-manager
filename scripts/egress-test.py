@@ -23,7 +23,7 @@ class DiscoveryContracts(unittest.TestCase):
        rows.append(dict(domain=t['domain'],variant=q['variant'],wave=wave,nonce=nonce,connection=nonce,ip='1.1.1.1',family=4,tls=True,same_stream=True,echo=True,actual_ads=t['role']=='ads'))
      return types.SimpleNamespace(stdout=json.dumps(rows).encode())
     return types.SimpleNamespace(stdout=b'0')
-  box=Box();pool=types.SimpleNamespace(verify=lambda *a:None,lease=lambda *a:contextlib.nullcontext(box),geo=types.SimpleNamespace(attach=lambda rows:None))
+  box=Box();pool=types.SimpleNamespace(verify=lambda *a:None,lease=lambda *a:contextlib.nullcontext(box),geo=types.SimpleNamespace(attach=lambda rows:None),network=types.SimpleNamespace(attach=lambda rows:None))
   args=types.SimpleNamespace(prefix='cgt',run_id='abcdef',slot=31)
   req=dict(hash='synthetic',started=int(time.time()*1000),deep=True,accepted=False,plan=dict(driver='xray',variants=[dict(name=v,hash=digest,config=base64.b64encode(config).decode()) for v in ('raw','template')]))
   with patch.object(driver,'runtime',lambda *a:({},{})),patch.object(driver,'resource_failures',lambda *a:0),patch.object(driver,'diagnostic_delivery',lambda *a:dict(assets=[dict(curl_exit=0,http_status=200,tls_verified=True,complete=True,content_match=True)])):

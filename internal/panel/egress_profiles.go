@@ -26,5 +26,5 @@ func egressProfileSummary(ctx context.Context, q databaseQuery) (map[string]any,
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-	return map[string]any{"complete_tested_ads": complete, "partial_tested_ads": partial, "published": published, "profiles": counts, "profile_counts_overlap": true}, nil
+	return map[string]any{"complete_tested_ads": complete, "partial_tested_ads": partial, "published": published, "profiles": counts, "profile_counts_overlap": true, "profile_count_scope": "qualifying_route_receipts"}, nil
 }

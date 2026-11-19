@@ -29,11 +29,22 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
-	var eligible, known, published, templates, identities int
+	var routeEligible, eligible, known, published, templates, identities int
 	err = q.QueryRowContext(ctx, `SELECT
- (SELECT count(*) FROM egress_eligible),(SELECT count(*) FROM egress_geo_eligible),
+ (SELECT count(*) FROM egress_eligible),(SELECT count(*) FROM egress_network_eligible),(SELECT count(*) FROM egress_geo_eligible),
  (SELECT count(*) FROM egress_export_eligible),(SELECT count(DISTINCT candidate_hash) FROM egress_export_eligible),
- (SELECT count(*) FROM egress_unique u JOIN egress_export_eligible e ON e.hash=u.hash)`).Scan(&eligible, &known, &published, &templates, &identities)
+ (SELECT count(*) FROM egress_unique u JOIN egress_export_eligible e ON e.hash=u.hash)`).Scan(&routeEligible, &eligible, &known, &published, &templates, &identities)
+	if err != nil {
+		return nil, err
+	}
+	// Count holds by the last credible adverse observation. A later incomplete
+	// receipt does not release a hold. Scope the partition to current split proofs.
+	var hosting, mixed int
+	err = q.QueryRowContext(ctx, `SELECT
+ coalesce(sum(json_extract(n.last_adverse,'$.state')='hosting'),0),
+ coalesce(sum(json_extract(n.last_adverse,'$.state')='mixed'),0)
+ FROM egress_eligible e JOIN egress_unique u ON u.hash=e.hash
+ JOIN egress_network_results n ON n.identity=u.identity WHERE n.held=1`).Scan(&hosting, &mixed)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +66,8 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 		"awaiting_first": first, "assessed_versions": assessed, "retained_outside_current": retainedOutside,
 		"queue":   map[string]int{"paused": paused, "running": running, "due": due, "scheduled": scheduled, "cached": cached},
 		"renewal": map[string]int{"paused": renewalPaused, "running": renewalRunning, "due": renewalDue, "scheduled": renewalScheduled, "cached": renewalCached},
-		"publication": map[string]int{"retained": retained, "awaiting_proof": retained - eligible, "eligible": eligible,
+		"publication": map[string]int{"retained": retained, "awaiting_proof": retained - routeEligible, "route_verified": routeEligible, "eligible": eligible,
+			"hosting": hosting, "mixed": mixed, "network_unverified": routeEligible - eligible - hosting - mixed,
 			"country_unknown": eligible - known, "country_filtered": known - published, "published": published, "raw_count": published, "template_count": published, "tested_template_count": published, "distinct_templates": templates, "identities": identities},
 	}, nil
 }

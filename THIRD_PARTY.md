@@ -12,4 +12,6 @@ Runtime downloads are fetched from their publishers and checked against `deploy/
 - [IPLocate IP address databases](https://github.com/iplocate/ip-address-databases): CC BY-SA 4.0. Credit: IPLocate.io. Locally transformed country tables retain the source attribution and share-alike terms.
 - [GeoJS](https://www.geojs.io/): external country information service; availability and service terms are independent of this project.
 
+The Ads exit network updater builds a local index from [RIPE RIS routing observations](https://www.ris.ripe.net/dumps/), provider-published cloud ranges, provider-maintained records in the [RIPE Database](https://www.ripe.net/manage-ips-and-asns/db/), and documented mobile service allocations from [NTT DOCOMO](https://www.docomo.ne.jp/service/developer/smart_phone/spmode/) and [KDDI au](https://www.au.com/mobile/charge/internet-connection/network/). The index records feed sources and is generated on the installed server. Licensed MaxMind databases are supplied separately by their operator under the applicable MaxMind terms.
+
 Distribution through GitHub does not change third-party licenses. This repository does not grant a new license for third-party components.

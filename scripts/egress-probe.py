@@ -8,6 +8,7 @@ HERE=pathlib.Path(__file__).resolve().parent
 def module(name,file):
  spec=importlib.util.spec_from_file_location(name,HERE/file);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
 lab=module('egress_lab','live-probe.py');scope=module('egress_scope','egress-preflight.py');country=module('egress_country','egress-country.py');sessions=module('egress_sessions','egress-session.py');scheduling=module('egress_scheduling','egress-scheduling.py')
+exit_network=module('egress_network','egress-network.py')
 CORES=[('xray-26.11.9','/opt/config-repair/core-26.11.9/xray','e87bce586acdb9136aa5b1f1d9c8db9f1ea1d145b6d86368c7f6f662f9f6a66d'),('xray-26.10.31','/opt/config-repair/core-26.10.31/xray','cc4b84d3069569f297a61f04b914f2bb37e9d202fd7b84cb50def1fc30fd40e1'),('xray-26.7.28','/opt/config-repair/core-26.7.28/xray','64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d'),('xray-26.5.9','/opt/config-repair/core-26.5.9/xray','b2c525e082cf2fef460499c88838d355f0b9bfb5a00bdb3eaa99b6af63825006')]
 NATIVE=('sing-box-1.14.4','/opt/config-repair/sing-box-1.14.4/sing-box','1264361b5f8868c8768f7555d3e77e20118bf503c41ac08bb290a0d99056aa3a')
 def cleanup(prefix,slot=None,run=None):
@@ -47,9 +48,11 @@ class SessionBox(EgressBox):
  def core_mounts(self):return NativeBox.core_mounts(self) if self.driver!='xray' else []
  def core_command(self,test):return NativeBox.core_command(self,test) if self.driver!='xray' else lab.Sandbox.core_command(self,test)
 class ResourcePool:
- def __init__(self,args):self.args=args;self.box=None;self.pins={};self.geo=country.Registry()
+ def __init__(self,args):
+  self.args=args;self.box=None;self.pins={};self.geo=country.Registry()
+  self.network=exit_network.NetworkRegistry()
  def __enter__(self):return self
- def __exit__(self,*exc):self.close();self.geo.close()
+ def __exit__(self,*exc):self.close();self.geo.close();self.network.close()
  def close(self):
   if self.box is not None:
    box=self.box;self.box=None;box.__exit__(None,None,None)
@@ -108,6 +111,8 @@ def private_sources(samples,key):
   try:value=ipaddress.ip_address(value).compressed
   except ValueError:value=''
   row['source']=hmac.new(key,value.encode(),hashlib.sha256).hexdigest() if value and row.get('echo') else ''
+  if 'network' in row:
+   row['network']={**row['network'],'source':row['source']}
  return samples
 
 def error_code(error):
@@ -236,8 +241,10 @@ def investigate(req,args,pool=None):
  # metadata; unrelated attempts under resource pressure cannot erase valid IR.
  r['evidence']=[dict(part,samples=[],selected_samples=True) if part['samples'] is r['samples'] else part for part in r['evidence']]
  unique={id(s):s for part in [r]+r['evidence'] for s in part.get('samples',[])}
- pool.geo.attach(list(unique.values()))
- private_sources(list(unique.values()),secrets.token_bytes(32))
+ observations=list(unique.values())
+ pool.geo.attach(observations)
+ pool.network.attach(observations)
+ private_sources(observations,secrets.token_bytes(32))
  r['resource_pressure']=resource_failures(args.prefix)>before_resource_failures
  r['finished']=int(time.time()*1000);r['wall_ms']=(time.monotonic()-begin)*1000
  for part in r['evidence']:part['finished']=r['finished']

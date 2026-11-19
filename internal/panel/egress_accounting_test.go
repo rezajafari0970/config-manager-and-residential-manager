@@ -37,6 +37,7 @@ func TestEgressAccountingPartitionsAndOutputUnits(t *testing.T) {
 		}
 	}
 	exec("UPDATE egress_jobs SET candidate_hash=(SELECT candidate_hash FROM egress_jobs WHERE hash=?) WHERE hash=?", hashes[0], hashes[1])
+	exec("UPDATE egress_network_results SET candidate_hash=(SELECT candidate_hash FROM egress_jobs WHERE hash=?) WHERE hash=?", hashes[1], hashes[1])
 	exec("UPDATE egress_jobs SET paused=1 WHERE hash=?", hashes[2])
 	exec("UPDATE egress_jobs SET token='',lease_until=0,next_run=0 WHERE hash=?", hashes[3])
 	exec("UPDATE egress_jobs SET token='',lease_until=0,next_run=?,tested=1 WHERE hash=?", now+60000, hashes[4])
@@ -69,7 +70,7 @@ func TestEgressAccountingPartitionsAndOutputUnits(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub = a["publication"].(map[string]int)
-	if pub["eligible"] != 1 || pub["awaiting_proof"] != 1 || pub["published"] != 1 {
+	if pub["route_verified"] != 1 || pub["eligible"] != 1 || pub["awaiting_proof"] != 1 || pub["published"] != 1 {
 		t.Fatal(pub)
 	}
 	renewal := a["renewal"].(map[string]int)

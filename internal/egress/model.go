@@ -181,6 +181,8 @@ type Sample struct {
 	FirstStatus         int         `json:"first_status"`
 	EchoStatus          int         `json:"echo_status"`
 	DiagnosticAuthority bool        `json:"diagnostic_authority"`
+
+	Network *NetworkFact `json:"network,omitempty"`
 }
 type Check struct {
 	Name        string `json:"name"`
@@ -221,6 +223,7 @@ type Completion struct {
 	Report Report `json:"report"`
 }
 type Decision struct {
+	Network           NetworkVerdict    `json:"network"`
 	FailureCodes      map[string]int    `json:"failure_codes,omitempty"`
 	Delivery          DeliveryDecision  `json:"delivery"`
 	Profiles          []ProfileDecision `json:"profiles,omitempty"`
@@ -268,6 +271,7 @@ func Evaluate(r Report, p Plan, hash string, now int64) Decision {
 	} else {
 		d = qualifyDelivery(evaluateProfiles(r, p, hash, now), r, p, now)
 	}
+	d.Network = evaluateExitNetwork(r, p, hash, now, d)
 	d.FailureCodes = map[string]int{}
 	add := func(code string) {
 		if len(code) > 0 && len(code) <= 64 {

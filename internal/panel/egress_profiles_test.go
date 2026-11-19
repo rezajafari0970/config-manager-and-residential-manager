@@ -38,7 +38,7 @@ func TestPartialProfileCountsAndFourExactExports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts["partial_tested_ads"] != 1 || counts["complete_tested_ads"] != 0 || counts["published"] != 1 || counts["profiles"].(map[string]int)["doubleclick.v1"] != 1 {
+	if counts["partial_tested_ads"] != 1 || counts["complete_tested_ads"] != 0 || counts["published"] != 0 || counts["profiles"].(map[string]int)["doubleclick.v1"] != 1 {
 		t.Fatal(counts)
 	}
 	app, err := NewServer(s, "http://127.0.0.1:18191")
@@ -50,6 +50,38 @@ func TestPartialProfileCountsAndFourExactExports(t *testing.T) {
 		t.Fatal("profile UI module unavailable", asset.Code)
 	}
 	base := app.origin + "/egress-subscription/" + s.digest("egress-export-v2", "all") + "/"
+	// The route receipt remains visible. No single complete profile can qualify
+	// for the strict residential output, even with an allowed country.
+	partial := exportRequest(t, app.Handler(), "GET", app.origin+"/api/egress?brief=1&view=diagnostics")
+	var state struct {
+		Eligible int
+		Counts   map[string]int
+		Entries  []struct {
+			State               string
+			ResidentialEligible bool `json:"residential_eligible"`
+			Published           bool
+		}
+	}
+	if partial.Code != 200 || json.Unmarshal(partial.Body.Bytes(), &state) != nil || len(state.Entries) != 1 ||
+		state.Eligible != 0 || state.Counts["RESIDENTIAL"] != 0 || state.Counts["ADS_SPLIT"] != 1 ||
+		state.Entries[0].State != "ADS_SPLIT" || state.Entries[0].ResidentialEligible || state.Entries[0].Published {
+		t.Fatal("partial split mislabelled residential", state, partial.Code)
+	}
+	for _, f := range []string{"configs.json", "configs.jsonl", "raw.txt", "next.json"} {
+		if rr := exportRequest(t, app.Handler(), "GET", base+f); rr.Code != 503 {
+			t.Fatal("partial split exported", f, rr.Code)
+		}
+	}
+	if _, err := s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", j.Hash); err != nil {
+		t.Fatal(err)
+	}
+	j, err = s.ClaimEgressLane(ctx, "followup")
+	if err != nil || j == nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: syntheticEgress(*j)}); err != nil {
+		t.Fatal(err)
+	}
 	var template []byte
 	for _, v := range egress.Prepare(j.Raw).Variants {
 		if v.Name == "template" {
@@ -58,7 +90,7 @@ func TestPartialProfileCountsAndFourExactExports(t *testing.T) {
 	}
 	for _, f := range []string{"configs.json", "configs.jsonl", "raw.txt", "next.json"} {
 		rr := exportRequest(t, app.Handler(), "GET", base+f)
-		if rr.Code != 200 || rr.Header().Get("X-Config-Count") != "1" || rr.Header().Get("X-Residential-Definition") != "verified-ads-profile-split" {
+		if rr.Code != 200 || rr.Header().Get("X-Config-Count") != "1" || rr.Header().Get("X-Residential-Definition") != "verified-ads-access-network" {
 			t.Fatal(f, rr.Code, rr.Body.String())
 		}
 		if f == "raw.txt" {
@@ -79,7 +111,7 @@ func TestPartialProfileCountsAndFourExactExports(t *testing.T) {
 			t.Fatal(f, "exact template changed")
 		}
 	}
-	// A country observed only on a shared Ads path cannot select this profile.
+	// Previously observed country from the partial profile cannot publish these bytes.
 	if _, err = s.db.Exec(`UPDATE egress_country_policy SET allowed='["IE"]',revision=revision+1`); err != nil {
 		t.Fatal(err)
 	}

@@ -128,8 +128,8 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	var total, pending, eligible int
-	if e = db.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(tested=0),0),(SELECT count(*) FROM egress_eligible) FROM egress_inventory WHERE state!='DELETED'").Scan(&total, &pending, &eligible); e != nil {
+	var total, pending int
+	if e = db.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(tested=0),0) FROM egress_inventory WHERE state!='DELETED'").Scan(&total, &pending); e != nil {
 		failure(w, e)
 		return
 	}
@@ -149,9 +149,11 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 	}
 	table := "egress_export_eligible"
 	filter := ""
+	publicationFlags := "1,1"
 	if r.URL.Query().Get("view") == "diagnostics" {
 		table = "egress_inventory"
-		filter = ""
+		publicationFlags = `EXISTS(SELECT 1 FROM egress_network_eligible e WHERE e.hash=j.hash),
+ EXISTS(SELECT 1 FROM egress_export_eligible e WHERE e.hash=j.hash)`
 	}
 	reportColumn := "report"
 	if r.URL.Query().Get("brief") == "1" {
@@ -168,21 +170,82 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	args = append(args, offset)
-	rows, e = db.QueryContext(ctx, "SELECT hash,kind,state,reason,revision,tested,valid_until,format,decision,"+reportColumn+" FROM "+table+" WHERE state!='DELETED'"+filter+" ORDER BY tested DESC,hash LIMIT 50 OFFSET ?", args...)
+	// Limit before joining private network receipts. A hold belongs to the
+	// identity, while the latest assessment belongs to the exact tested bytes.
+	query := `SELECT j.hash,j.kind,j.state,j.reason,j.revision,j.tested,j.valid_until,j.format,j.decision,j.proof,
+ CASE WHEN n.hash=j.hash AND n.candidate_hash=j.candidate_hash AND n.checked_at=j.tested THEN n.summary ELSE '{}' END,
+ coalesce(n.valid_until,0),coalesce(n.held,0),coalesce(n.clean_rounds,0),CASE WHEN n.held=1 THEN n.last_adverse ELSE '{}' END,` + publicationFlags + `
+ FROM (SELECT hash,candidate_hash,kind,state,reason,revision,tested,valid_until,format,decision,` + reportColumn + ` AS proof
+ FROM ` + table + ` WHERE state!='DELETED'` + filter + ` ORDER BY tested DESC,hash LIMIT 50 OFFSET ?) j
+ LEFT JOIN egress_unique u ON u.hash=j.hash LEFT JOIN egress_network_results n ON n.identity=u.identity ORDER BY j.tested DESC,j.hash`
+	rows, e = db.QueryContext(ctx, query, args...)
 	if e != nil {
 		failure(w, e)
 		return
 	}
 	entries := []map[string]any{}
 	for rows.Next() {
-		var h, kind, state, reason, format, decision, report string
-		var rev, tested, until int64
-		if e = rows.Scan(&h, &kind, &state, &reason, &rev, &tested, &until, &format, &decision, &report); e != nil {
+		var h, kind, state, reason, format, decision, report, network, adverse string
+		var held, certified, published bool
+		var cleanRounds int
+		var rev, tested, until, networkUntil int64
+		if e = rows.Scan(&h, &kind, &state, &reason, &rev, &tested, &until, &format, &decision, &report, &network, &networkUntil, &held, &cleanRounds, &adverse, &certified, &published); e != nil {
 			rows.Close()
 			failure(w, e)
 			return
 		}
-		entries = append(entries, map[string]any{"hash": h, "kind": kind, "state": state, "reason": reason, "revision": rev, "tested": tested, "valid_until": until, "format": format, "decision": json.RawMessage(decision), "report": json.RawMessage(report)})
+		var assessment map[string]json.RawMessage
+		var observation, lastAdverse egress.NetworkVerdict
+		if e = json.Unmarshal([]byte(decision), &assessment); e == nil {
+			e = json.Unmarshal([]byte(network), &observation)
+		}
+		if e == nil && held {
+			e = json.Unmarshal([]byte(adverse), &lastAdverse)
+		}
+		if e != nil || assessment == nil {
+			rows.Close()
+			failure(w, fmt.Errorf("invalid stored Ads assessment for %s", h))
+			return
+		}
+		// Save the route-only verdict that older workers called RESIDENTIAL.
+		// The projection retains all domain/transport details and unknown fields.
+		route := map[string]json.RawMessage{
+			"state": assessment["state"], "reason": assessment["reason"], "route": assessment["route"],
+			"qualified_at_test": assessment["eligible"], "valid_until": assessment["until"],
+		}
+		if string(route["state"]) == `"RESIDENTIAL"` {
+			route["state"] = json.RawMessage(`"ADS_SPLIT"`)
+		}
+		if state == "RESIDENTIAL" && !certified {
+			state = "ADS_SPLIT"
+			switch {
+			case held:
+				reason = "ads_hosting_exit"
+				if lastAdverse.State == "mixed" {
+					reason = "ads_mixed_exit"
+				}
+			case networkUntil > 0 && networkUntil <= readStamp(ctx) || until <= readStamp(ctx):
+				reason = "ads_proof_expired"
+			case observation.State == "unknown" && observation.Reason != "":
+				reason = observation.Reason
+			default:
+				reason = "ads_network_evidence_incomplete"
+			}
+		} else if certified {
+			reason = "ads_access_verified"
+		}
+		until = min(until, networkUntil)
+		if !certified {
+			until = 0
+		}
+		assessment["state"], _ = json.Marshal(state)
+		assessment["reason"], _ = json.Marshal(reason)
+		assessment["eligible"], _ = json.Marshal(certified)
+		assessment["until"], _ = json.Marshal(until)
+		assessment["published"], _ = json.Marshal(published)
+		entries = append(entries, map[string]any{"hash": h, "kind": kind, "state": state, "route_assessment": route,
+			"network": json.RawMessage(network), "network_held": held, "network_clean_rounds": cleanRounds, "last_adverse": json.RawMessage(adverse),
+			"residential_eligible": certified, "published": published, "reason": reason, "revision": rev, "tested": tested, "valid_until": until, "format": format, "decision": assessment, "report": json.RawMessage(report)})
 	}
 	if e = rows.Err(); e != nil {
 		rows.Close()
@@ -272,7 +335,10 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	missing := accounting["coverage_missing"]
-	retained := accounting["publication"].(map[string]int)["retained"]
+	pub := accounting["publication"].(map[string]int)
+	retained, eligible := pub["retained"], pub["eligible"]
+	counts["ADS_SPLIT"] += counts["RESIDENTIAL"] - eligible
+	counts["RESIDENTIAL"] = eligible
 	iran, err := iranState(ctx, db, readStamp(ctx))
 	if err != nil {
 		failure(w, err)
@@ -283,7 +349,7 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		failure(w, err)
 		return
 	}
-	respond(w, 200, map[string]any{"profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": recovery, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": total, "pending": pending, "partial": partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "Project label: at least one complete named Ads profile repeatedly separated in exact raw/template; other Ads can share controls; partial coverage explicit; no household or universal exclusivity claim", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
+	respond(w, 200, map[string]any{"profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": recovery, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": total, "pending": pending, "partial": partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "Residential publication requires every registered Ads profile separated and delivered in raw/template, with observed access-network exits and fresh network evidence", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
 }
 
 type egressExportEntry struct {
@@ -295,7 +361,11 @@ type egressExportEntry struct {
 }
 
 func egressSnapshot(ctx context.Context, q databaseQuery) ([]egressExportEntry, string, error) {
-	rows, e := q.QueryContext(ctx, "SELECT hash,candidate_hash,valid_until,format FROM egress_export_eligible ORDER BY hash")
+	// Read membership and country history in one statement. The final check runs
+	// under the writer reservation, so a query per config would delay renewals.
+	rows, e := q.QueryContext(ctx, `SELECT e.hash,e.candidate_hash,min(e.valid_until,e.network_valid_until,g.valid_until,c.last_seen+?),e.format,c.country
+ FROM egress_export_eligible e JOIN egress_geo_results g ON g.hash=e.hash
+ JOIN egress_countries c ON c.hash=e.hash AND c.last_seen>? ORDER BY e.hash,c.country`, egress.CountryWindow, readStamp(ctx)-egress.CountryWindow)
 	if e != nil {
 		return nil, "", e
 	}
@@ -303,21 +373,21 @@ func egressSnapshot(ctx context.Context, q databaseQuery) ([]egressExportEntry, 
 	out := []egressExportEntry{}
 	for rows.Next() {
 		var x egressExportEntry
-		if e = rows.Scan(&x.Hash, &x.Candidate, &x.Until, &x.Format); e != nil {
+		var country string
+		if e = rows.Scan(&x.Hash, &x.Candidate, &x.Until, &x.Format, &country); e != nil {
 			return nil, "", e
 		}
-		out = append(out, x)
+		if len(out) == 0 || out[len(out)-1].Hash != x.Hash {
+			out = append(out, x)
+		}
+		entry := &out[len(out)-1]
+		entry.Until = min(entry.Until, x.Until)
+		entry.Countries = append(entry.Countries, country)
 	}
 	if e = rows.Err(); e != nil {
 		return nil, "", e
 	}
 	rows.Close()
-	for i := range out {
-		out[i].Countries, e = entryCountries(ctx, q, out[i].Hash)
-		if e != nil {
-			return nil, "", e
-		}
-	}
 	var revision int64
 	if e = q.QueryRowContext(ctx, "SELECT revision FROM egress_country_policy WHERE id=1").Scan(&revision); e != nil {
 		return nil, "", e
@@ -330,6 +400,7 @@ func egressSnapshot(ctx context.Context, q databaseQuery) ([]egressExportEntry, 
 }
 func (m egressModule) export(w http.ResponseWriter, r *http.Request) { m.exportAttempt(w, r, 0) }
 func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, attempt int) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Ads-Iran-Guard", egress.IranVersion+"; IR-veto; observed-only")
 	if !equal(r.PathValue("token"), m.s.store.digest("egress-export-v2", "all")) {
 		http.NotFound(w, r)
@@ -346,7 +417,7 @@ func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, atte
 		return
 	}
 	if len(entries) == 0 {
-		http.Error(w, "no fresh verified split Ads configuration", 503)
+		http.Error(w, "no fresh Ads configuration with verified access-network egress", 503)
 		return
 	}
 	if g := r.URL.Query().Get("generation"); g != "" && g != generation {
@@ -420,12 +491,18 @@ func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, atte
 		failure(w, e)
 		return
 	}
-	_, current, e := egressSnapshot(r.Context(), tx)
+	finalEntries, current, e := egressSnapshot(r.Context(), tx)
 	if e != nil {
 		failure(w, e)
 		return
 	}
-	if current != generation {
+	var deadline int64
+	for _, entry := range finalEntries {
+		if deadline == 0 || entry.Until < deadline {
+			deadline = entry.Until
+		}
+	}
+	if current != generation || deadline <= egress.Now() {
 		if attempt < 2 && r.URL.Query().Get("generation") == "" {
 			tx.Rollback()
 			spool.Close()
@@ -454,8 +531,17 @@ func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, atte
 			return
 		}
 	}
+	if deadline <= egress.Now() {
+		http.Error(w, "eligibility expired", http.StatusServiceUnavailable)
+		return
+	}
 	if e = tx.Commit(); e != nil {
 		failure(w, e)
+		return
+	}
+	// A delayed commit cannot extend a network proof to the start of delivery.
+	if deadline <= egress.Now() {
+		http.Error(w, "eligibility expired", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -466,12 +552,11 @@ func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, atte
 	w.Header().Set("X-Egress-Generation", generation)
 	w.Header().Set("X-Country-Policy", "any-observed-country-selected; 24h; GeoIP-estimate")
 	w.Header().Set("X-Config-Count", strconv.Itoa(count))
-	w.Header().Set("X-Residential-Definition", "verified-ads-profile-split")
-	w.Header().Set("X-Egress-Profile-Policy", "any-complete-profile; partial-Ads-coverage-explicit")
+	w.Header().Set("X-Residential-Definition", "verified-ads-access-network")
+	w.Header().Set("X-Egress-Profile-Policy", "all-registered-profiles; raw-and-template")
 	w.Header().Set("X-Egress-Evidence", "authenticated-Ads-peer-reported; finite TCP scope")
 	w.Header().Set("X-Config-Formats", fmt.Sprint(formats))
 	w.Header().Set("X-Content-SHA256", spool.Hash())
-	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodHead {
 		spool.WriteTo(w)
 	}

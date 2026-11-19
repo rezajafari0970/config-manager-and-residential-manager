@@ -62,3 +62,113 @@ func TestEgressBriefPollingAndTargetedEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestResidentialPageSeparatesHostedAndUnattributedSplit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	newExportSource(t, s, "exit-network-summary", sourceURI(241), sourceURI(242), sourceURI(243))
+	for _, kind := range []string{"hosting", "unknown", "access"} {
+		j, err := s.ClaimEgressLane(ctx, "initial")
+		if err != nil || j == nil {
+			t.Fatal(kind, err)
+		}
+		r := syntheticEgress(*j)
+		for i := range r.Samples {
+			sample := &r.Samples[i]
+			if !sample.ActualAds {
+				continue
+			}
+			switch kind {
+			case "hosting":
+				sample.Network.Kind = "hosting"
+				sample.Network.Provider = "vultr"
+				sample.Network.ASN = 20473
+			case "unknown":
+				sample.Network = nil
+			}
+		}
+		if err := s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app, err := NewServer(s, "http://127.0.0.1:18191")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type entry struct {
+		Decision struct {
+			State     string
+			Eligible  bool
+			Published bool
+			Reason    string
+			Until     int64
+			Qualified []string `json:"qualified_domains"`
+		}
+		Route struct {
+			State     string
+			Qualified bool  `json:"qualified_at_test"`
+			Until     int64 `json:"valid_until"`
+		} `json:"route_assessment"`
+		ValidUntil  int64 `json:"valid_until"`
+		State       string
+		NetworkHeld bool `json:"network_held"`
+		Published   bool
+		Network     egress.NetworkVerdict
+		LastAdverse egress.NetworkVerdict `json:"last_adverse"`
+	}
+	var state struct {
+		Eligible   int
+		Entries    []entry
+		Counts     map[string]int
+		Accounting struct{ Publication map[string]int }
+	}
+	read := func(path string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		egressModule{app}.state(rr, httptest.NewRequest("GET", path, nil))
+		if rr.Code != 200 || json.Unmarshal(rr.Body.Bytes(), &state) != nil {
+			t.Fatal(rr.Code, rr.Body.String())
+		}
+	}
+	read("/api/egress?brief=1&view=diagnostics")
+	p := state.Accounting.Publication
+	if len(state.Entries) != 3 || state.Eligible != 1 || state.Counts["ADS_SPLIT"] != 2 ||
+		p["route_verified"] != 3 || p["hosting"] != 1 || p["network_unverified"] != 1 ||
+		p["eligible"] != 1 || p["published"] != 1 || p["country_filtered"] != 0 {
+		t.Fatal("network and route accounting confused", state)
+	}
+	byNetwork := map[string]entry{}
+	for _, e := range state.Entries {
+		byNetwork[e.Network.State] = e
+	}
+	h := byNetwork["hosting"]
+	if !h.NetworkHeld || h.LastAdverse.Provider != "vultr" || h.LastAdverse.ASN != 20473 ||
+		h.LastAdverse.Domain == "" || h.State != "ADS_SPLIT" || h.Published || byNetwork["unknown"].Published ||
+		h.Decision.State != "ADS_SPLIT" || h.Decision.Eligible || h.Decision.Reason != "ads_hosting_exit" ||
+		h.Decision.Until != 0 || h.ValidUntil != 0 || len(h.Decision.Qualified) != 6 ||
+		h.Route.State != "ADS_SPLIT" || !h.Route.Qualified || h.Route.Until == 0 {
+		t.Fatal("missing hosting reason or false publication", byNetwork)
+	}
+	read("/api/egress?brief=1")
+	if len(state.Entries) != 1 || !state.Entries[0].Published || state.Entries[0].Network.State != "access" {
+		t.Fatal("public list diverged", state.Entries)
+	}
+	verified := state.Entries[0]
+	if !verified.Decision.Eligible || !verified.Decision.Published || verified.Decision.State != "RESIDENTIAL" ||
+		verified.Decision.Until != verified.ValidUntil || verified.ValidUntil <= 0 {
+		t.Fatal("access proof deadline or publication flags diverged", verified)
+	}
+	if _, err := s.db.Exec("UPDATE egress_country_policy SET allowed='[]'"); err != nil {
+		t.Fatal(err)
+	}
+	read("/api/egress?view=diagnostics")
+	for _, row := range state.Entries {
+		if row.Network.State == "access" && (!row.Decision.Eligible || row.Decision.Published || row.Published) {
+			t.Fatal("selected country must only alter publication", row)
+		}
+	}
+	var base string
+	if err := s.db.QueryRow("SELECT json_extract(j.decision,'$.state') FROM egress_jobs j JOIN egress_network_results n ON n.hash=j.hash WHERE n.state='hosting'").Scan(&base); err != nil || base != "RESIDENTIAL" {
+		t.Fatal("presentation changed the stored route decision", base, err)
+	}
+}
