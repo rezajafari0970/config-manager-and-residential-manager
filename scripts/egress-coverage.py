@@ -105,7 +105,8 @@ def collect(connection, source_id, timeout):
     stages = f"SELECT DISTINCT source_id,identity FROM staged {member_filter}"
     backlog = """
       SELECT b.source_id,u.identity FROM egress_first_backlog b JOIN egress_unique u USING(hash)
-      WHERE NOT EXISTS(SELECT 1 FROM memberships m WHERE m.source_id=b.source_id
+      WHERE EXISTS(SELECT 1 FROM egress_inventory j WHERE j.hash=b.hash AND j.first_completed=0 AND j.tested=0)
+      AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.source_id=b.source_id
                        AND m.artifact_id=u.identity)
     """ + (" AND b.source_id=:source" if source_id is not None else "")
     datasets = [("staged_unique", stages)]

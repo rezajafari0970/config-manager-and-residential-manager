@@ -25,6 +25,7 @@ class Coverage(unittest.TestCase):
                     CREATE TABLE memberships(source_id,artifact_id);
                     CREATE TABLE egress_unique(identity,hash);
                     CREATE TABLE egress_jobs(hash,state,token,lease_until,tested,paused,ever_accepted,first_completed);
+                    CREATE VIEW egress_inventory AS SELECT * FROM egress_jobs;
                     CREATE TABLE egress_network_results(identity,held);
                     CREATE TABLE egress_iran_guard(identity,state);
                     CREATE TABLE input_exclusions(identity);
