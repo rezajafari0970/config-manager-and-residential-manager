@@ -110,21 +110,22 @@ func (s *Store) recoverCompatibleReceipts(tx *sql.Tx) error {
 		}
 		var r egress.Report
 		var prior egress.Decision
-		if json.Unmarshal(b, &r) != nil || !egress.ValidReportShape(r, hash) || r.Code != "driver_unavailable" ||
-			r.Core != "" || r.CoreSHA != "" || r.Waves != 0 || r.Infrastructure || r.ResourcePressure ||
-			r.Started <= 0 || r.Finished <= 0 || r.Started < claimed-2000 || r.Finished < r.Started || r.Finished > tested+2000 ||
-			len(r.Attempts)+len(r.Checks)+len(r.Samples)+len(r.Health)+len(r.Delivery)+len(r.Evidence) != 0 ||
-			json.Unmarshal(d, &prior) != nil || prior.State != "UNSUPPORTED" || prior.Reason != "driver_unavailable" ||
-			prior.Eligible || prior.Negative || prior.CountryConflict || prior.Network.BlocksResidential() {
+		if json.Unmarshal(b, &r) != nil || !emptyCompatibilityReport(r, hash) ||
+			r.Started <= 0 || r.Started < claimed-2000 || r.Finished < r.Started || r.Finished > tested+2000 ||
+			json.Unmarshal(d, &prior) != nil || !emptyCompatibilityDecision(prior) {
 			continue
 		}
 		plan, ok := s.receiptPlan(hash)
-		if !ok || !plan.Complete || len(plan.Variants) != 2 {
+		ambiguous := ok && plan.Code == egress.AmbiguousVMessTransport && len(plan.Variants) == 0
+		if !ok || (!ambiguous && (!plan.Complete || len(plan.Variants) != 2)) {
 			continue
 		}
-		if _, err = tx.Exec("INSERT INTO egress_compatibility_receipts(hash,identity,tested,report,decision) SELECT hash,identity,?,?,? FROM egress_unique WHERE hash=?", tested, string(b), string(d), hash); err != nil {
+		if _, err = tx.Exec("INSERT INTO egress_compatibility_receipts(hash,identity,tested,report,decision,closed) SELECT hash,identity,?,?,?,? FROM egress_unique WHERE hash=?", tested, string(b), string(d), ambiguous, hash); err != nil {
 			return err
 		}
+		if ambiguous {
+			continue
+		} // Preserve the old proof for offline v55 correction; never enqueue.
 		if _, err = tx.Exec(`INSERT OR IGNORE INTO egress_compatibility_queue(hash,source_id)
  SELECT own.hash,own.source_id FROM (`+compatibilityOwners+`) own JOIN sources s ON s.id=own.source_id
  WHERE own.hash=? AND s.enabled=1`, hash); err != nil {
@@ -135,4 +136,12 @@ func (s *Store) recoverCompatibleReceipts(tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+func emptyCompatibilityReport(r egress.Report, hash string) bool {
+	return egress.ValidReportShape(r, hash) && r.Code == "driver_unavailable" && r.Core == "" && r.CoreSHA == "" && r.Waves == 0 &&
+		!r.Infrastructure && !r.ResourcePressure && len(r.Attempts)+len(r.Checks)+len(r.Samples)+len(r.Health)+len(r.Delivery)+len(r.Evidence) == 0
+}
+func emptyCompatibilityDecision(d egress.Decision) bool {
+	return d.State == "UNSUPPORTED" && d.Reason == "driver_unavailable" && !d.Eligible && !d.Negative && !d.CountryConflict && !d.Network.BlocksResidential()
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -114,5 +115,23 @@ func TestUnavailableInputDoesNotMasqueradeAsUnsupportedPlan(t *testing.T) {
 				t.Fatal("no completion")
 			}
 		})
+	}
+}
+
+func TestAmbiguousShareCompletesWithoutNetworkDriver(t *testing.T) {
+	raw := []byte("vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"add":"192.0.2.1","port":"443","id":"00000000-0000-4000-8000-000000000001","net":"ws","scy":"auto","tls":"auto"}`)))
+	j := egress.Job{Hash: egress.Hash(raw), Raw: raw, Token: "test"}
+	completed := false
+	c := client{&http.Client{Transport: receiptTransport(func(req *http.Request) (*http.Response, error) {
+		var c egress.Completion
+		if err := json.NewDecoder(req.Body).Decode(&c); err != nil || c.Report.Code != egress.AmbiguousVMessTransport || len(c.Report.Attempts)+len(c.Report.Samples) != 0 || !egress.ValidAssessment(c.Report, egress.Prepare(raw)) {
+			t.Fatal("ambiguous input reported as measured")
+		}
+		completed = true
+		return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
+	})}}
+	execute(context.Background(), c, nil, j)
+	if !completed {
+		t.Fatal("missing static outcome")
 	}
 }

@@ -175,3 +175,62 @@ func TestUnpairedAdsEchoCannotReportSeparateRoute(t *testing.T) {
 		t.Fatal(d.Route, d.Eligible)
 	}
 }
+
+func TestRepairHypothesesCannotSubstituteForRawVMessTransport(t *testing.T) {
+	for _, tc := range []struct {
+		tls       string
+		ambiguous bool
+	}{
+		{"auto", true}, {"aes-128-gcm", true}, {"chacha20-poly1305", true}, {"zero", true}, {"tls", false}, {"none", false}, {"", false},
+	} {
+		t.Run("tls_"+tc.tls, func(t *testing.T) {
+			payload, _ := json.Marshal(map[string]string{"add": "192.0.2.1", "port": "443", "id": "00000000-0000-4000-8000-000000000001", "scy": "aes-128-gcm", "net": "ws", "tls": tc.tls})
+			raw := []byte("vmess://" + base64.StdEncoding.EncodeToString(payload))
+			p := Prepare(raw)
+			if !tc.ambiguous {
+				if p.Driver != "xray" || !p.Complete || len(p.Variants) != 2 || ValidAssessment(Report{Code: AmbiguousVMessTransport}, p) {
+					t.Fatal("supported raw transport lost")
+				}
+				return
+			}
+			r := Report{Version: Version, Hash: Hash(raw), Code: AmbiguousVMessTransport}
+			d := Evaluate(r, p, r.Hash, Now())
+			if p.Driver != "none" || p.Complete || len(p.Variants) != 0 || p.Code != AmbiguousVMessTransport || !ValidAssessment(r, p) || d.Eligible || d.Negative || d.Network.BlocksResidential() || d.State != "UNSUPPORTED" || d.Reason != p.Code {
+				t.Fatal("ambiguous share not recognized", p.Code, d.State, d.Reason)
+			}
+			r.Samples = []Sample{{}}
+			if ValidAssessment(r, p) {
+				t.Fatal("ambiguous preflight claimed a sample")
+			}
+		})
+	}
+}
+
+func TestExactRawListenerFailureKeepsPreflightReason(t *testing.T) {
+	raw := []byte(`{"outbounds":[{"tag":"proxy","protocol":"vless","settings":{"address":"192.0.2.1","port":443,"id":"00000000-0000-4000-8000-000000000001","encryption":"none"}}],"routing":{}}`)
+	p := Prepare(raw)
+	if !p.Complete || string(p.Variants[0].Config) != string(raw) {
+		t.Fatal("literal raw changed")
+	}
+	r := Report{Hash: Hash(raw), Version: Version, Started: Now() - 100, Finished: Now(), Code: "probe_socks_contract_missing"}
+	for _, core := range []string{"xray-26.11.9", "xray-26.10.31", "xray-26.7.28", "xray-26.5.9"} {
+		r.Attempts = append(r.Attempts, Attempt{Core: core, Code: r.Code})
+	}
+	d := Evaluate(r, p, r.Hash, Now())
+	if d.Reason != r.Code || d.Eligible || d.Negative || d.Network.BlocksResidential() {
+		t.Fatal("missing listener misclassified", d.Reason)
+	}
+	for _, edit := range []func(*Report){
+		func(r *Report) { r.Attempts[0].Code = "core_rejected" },
+		func(r *Report) { r.Attempts[0].Core = NativeID },
+		func(r *Report) { r.Samples = []Sample{{}} },
+		func(r *Report) { r.Evidence = []Report{{Version: Version, Hash: r.Hash, Samples: []Sample{{}}}} },
+		func(r *Report) { r.ResourcePressure = true },
+	} {
+		bad := cloneReceipt(r)
+		edit(&bad)
+		if StructuralPreflightReason(bad) != "" {
+			t.Fatal("mixed or unbound evidence produced structural outcome")
+		}
+	}
+}

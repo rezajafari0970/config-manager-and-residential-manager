@@ -37,6 +37,7 @@ type Plan struct {
 	OriginalSHA256 string      `json:"original_sha256"`
 	Kind           string      `json:"kind"`
 	Code           string      `json:"code"`
+	RawIssue       string      `json:"raw_issue,omitempty"`
 	AndroidImport  string      `json:"android_import"`
 	Candidates     []Candidate `json:"candidates"`
 }
@@ -98,8 +99,9 @@ func Prepare(raw []byte) (p Plan) {
 	switch {
 	case strings.HasPrefix(strings.ToLower(s), "vmess://"):
 		p.Kind = "vmess"
-		if cs, ok := vmessSecurityHypotheses(s[len("vmess://"):]); ok {
+		if cs, ok := vmessSecurityHypotheses(s); ok {
 			p.Candidates = cs
+			p.RawIssue = AmbiguousVMessTransport
 			p.Code = "prepared"
 			return
 		}
@@ -152,11 +154,7 @@ func Prepare(raw []byte) (p Plan) {
 		uriRule += "." + rule
 		delete(ob, "__input_rule")
 	}
-	root := M{"remarks": label(raw, p.Kind), "log": M{"loglevel": "warning"}, "inbounds": []any{M{"tag": "socks", "listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": M{"auth": "noauth", "udp": true}}}, "outbounds": []any{ob}, "routing": M{}}
-	if dns, ok := ob["__dns"]; ok {
-		root["dns"] = dns
-		delete(ob, "__dns")
-	}
+	root := shareRuntime(label(raw, p.Kind), ob)
 	requires, _ := ob["__require_connection"].(bool)
 	delete(ob, "__require_connection")
 	p.Candidates = append(p.Candidates, candidate(root, uriRule, requires))
@@ -175,6 +173,18 @@ func Prepare(raw []byte) (p Plan) {
 	p.Code = "prepared"
 	return
 }
+
+// A share URI describes an outbound. Every generated runtime uses the same
+// private local listener, including separately tested repair hypotheses.
+func shareRuntime(name string, ob M) M {
+	root := M{"remarks": name, "log": M{"loglevel": "warning"}, "inbounds": []any{M{"tag": "socks", "listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": M{"auth": "noauth", "udp": true}}}, "outbounds": []any{ob}, "routing": M{}}
+	if dns, ok := ob["__dns"]; ok {
+		root["dns"] = dns
+		delete(ob, "__dns")
+	}
+	return root
+}
+
 func candidate(m M, rule string, connection bool) Candidate {
 	b, _ := json.Marshal(m)
 	return Candidate{Rule: rule, SHA256: repair.Digest(b), Config: b, RequiresConnection: connection}

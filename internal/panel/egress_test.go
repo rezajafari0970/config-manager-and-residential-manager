@@ -18,7 +18,7 @@ func dropEgressForMigration(t *testing.T, s *Store) {
  FROM sqlite_schema WHERE type='trigger' AND (name GLOB 'egress_first_history_*' OR name GLOB 'egress_compatibility_*')`).Scan(&historyTriggers); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(historyTriggers + `; DROP VIEW egress_compatibility_work; DROP TABLE egress_compatibility_queue; DROP TABLE egress_compatibility_receipts; DROP TRIGGER egress_retirement_fence_deleted; DROP TRIGGER egress_retirement_fence_source; DROP TRIGGER egress_retirement_source_replaced; DROP TRIGGER egress_retirement_spent; DROP TRIGGER egress_retirement_source_alias; DROP VIEW egress_retirement_work; DROP TABLE egress_retirement_sources; DROP TABLE egress_retirement_limits; DROP TRIGGER conversion_first_clock_assessed; DROP TRIGGER conversion_first_clock_pin; DROP TRIGGER conversion_first_clock_schedule;
+	if _, err := s.db.Exec(historyTriggers + `; DROP VIEW egress_compatibility_work; DROP TABLE egress_compatibility_queue; DROP TABLE egress_compatibility_preflight; DROP TABLE egress_compatibility_receipts; DROP TRIGGER egress_retirement_fence_deleted; DROP TRIGGER egress_retirement_fence_source; DROP TRIGGER egress_retirement_source_replaced; DROP TRIGGER egress_retirement_spent; DROP TRIGGER egress_retirement_source_alias; DROP VIEW egress_retirement_work; DROP TABLE egress_retirement_sources; DROP TABLE egress_retirement_limits; DROP TRIGGER conversion_first_clock_assessed; DROP TRIGGER conversion_first_clock_pin; DROP TRIGGER conversion_first_clock_schedule;
  DROP VIEW conversion_first_raw_clock; DROP TABLE conversion_first_clock;
  DROP TABLE egress_first_history; DROP TABLE egress_first_history_counts;
  DROP VIEW conversion_work_inputs; DROP VIEW conversion_first_inputs;

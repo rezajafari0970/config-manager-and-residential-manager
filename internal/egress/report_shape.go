@@ -51,6 +51,9 @@ func ValidAssessment(r Report, p Plan) bool {
 			}
 		}
 		return false
+	case AmbiguousVMessTransport:
+		return p.Code == AmbiguousVMessTransport && len(p.Variants) == 0 &&
+			len(r.Attempts)+len(r.Samples)+len(r.Health)+len(r.Delivery)+len(r.Evidence)+len(r.Checks) == 0 && !r.ResourcePressure && r.Core == "" && r.CoreSHA == "" && r.Waves == 0
 	case "driver_unavailable":
 		return len(p.Variants) != 2
 	case "measured":
@@ -108,4 +111,27 @@ func variantObserved(r Report, name string, routeOnly bool) bool {
 		}
 	}
 	return false
+}
+
+// StructuralPreflightReason recognizes a unanimous failure before a core could
+// make an observation. Other faults or partial evidence retain their own status.
+func StructuralPreflightReason(r Report) string {
+	switch r.Code {
+	case "probe_socks_contract_missing", "native_probe_listener_missing", "nonloopback_listener_not_qualified", "listener_port_conflict":
+	default:
+		return ""
+	}
+	if r.Hash == "" || !ValidReportShape(r, r.Hash) || r.ResourcePressure || len(r.Attempts) == 0 ||
+		len(r.Checks)+len(r.Evidence)+len(r.Samples)+len(r.Health)+len(r.Delivery) != 0 {
+		return ""
+	}
+	for _, a := range r.Attempts {
+		if a.Code != r.Code || Cores[a.Core] == "" || (a.Core == NativeID) != (r.Attempts[0].Core == NativeID) {
+			return ""
+		}
+		if r.Code != "nonloopback_listener_not_qualified" && (a.Core == NativeID) != (r.Code == "native_probe_listener_missing") {
+			return ""
+		}
+	}
+	return r.Code
 }

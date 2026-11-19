@@ -21,6 +21,10 @@ Back up the database, its WAL (if present), immutable blob directory, panel conf
 
 ## Upgrade and recovery
 
+Schema 55 identifies VMess shares that put a cipher name in the transport TLS field. Residential results for those original shares show an explicit unsupported reason. The ordinary diagnostics can exercise the proposed interpretations separately. The upgrade preserves the original receipt and any matching structural failure when it corrects a previously scheduled compatibility review. An incompatible local listener can be identified before trying another version of the same core.
+
+A due, source-owned retirement confirmation can take a maintenance turn after seven other maintenance grants while it remains overdue. The missed-grant count survives a worker or panel restart. This reservation uses the existing eligibility and confirmation limits.
+
 Schema 54 retains the source of a pending delivery-failure confirmation across natural withdrawals and restarts. A previously unaccepted config with proven ownership can receive up to three additional leases. Only independent, measured failures inside the confirmation window count toward retirement. Missing measurements retain the original deadline on an existing healthy receipt. The upgrade also checks actionable verdicts against the original input and assessment time. Conflicting country evidence or a mismatched runtime can withhold publication while a fresh measurement is pending. The source response cache tracks the identities in each received body, including a body deferred by the source count check.
 
 A compatibility follow-up is available for a sole, empty unsupported receipt when the authenticated original now yields two runnable variants. The original assessment remains in the ledger. An enabled source or a verified withdrawal supplies custody. The first real measurement closes this follow-up and a lost lease can use one more grant. If an unassessed original has gone missing, a currently committed alias can take its place after byte and identity verification. Its next assessment runs against its own hash.

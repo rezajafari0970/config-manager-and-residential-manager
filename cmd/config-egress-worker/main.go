@@ -119,6 +119,9 @@ func execute(ctx context.Context, c client, driver *driverSession, j egress.Job)
 		r.Code = "input_unavailable"
 	default:
 		p = egress.Prepare(j.Raw)
+		if p.Code == egress.AmbiguousVMessTransport {
+			r.Code = p.Code
+		}
 	}
 	if len(p.Variants) == 2 {
 		job, cancel := context.WithTimeout(ctx, 220*time.Second)

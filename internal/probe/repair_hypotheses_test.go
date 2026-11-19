@@ -12,7 +12,7 @@ func TestMisplacedVMessSecurityRequiresIndependentHypotheses(t *testing.T) {
 	raw := []byte("vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"add":"192.0.2.1","port":443,"id":"synthetic","net":"ws","tls":"auto","scy":"aes-128-gcm","sni":"example.com"}`)))
 	original := bytes.Clone(raw)
 	p := Prepare(raw)
-	if p.Code != "prepared" || len(p.Candidates) != 2 || !bytes.Equal(raw, original) {
+	if p.Code != "prepared" || p.RawIssue != AmbiguousVMessTransport || len(p.Candidates) != 2 || !bytes.Equal(raw, original) {
 		t.Fatal(p.Code)
 	}
 	for i, c := range p.Candidates {
@@ -21,6 +21,14 @@ func TestMisplacedVMessSecurityRequiresIndependentHypotheses(t *testing.T) {
 		}
 		var m M
 		json.Unmarshal(c.Config, &m)
+		in := m["inbounds"].([]any)
+		if len(in) != 1 {
+			t.Fatal("diagnostic listener count")
+		}
+		socks := in[0].(M)
+		if socks["listen"] != "127.0.0.1" || socks["protocol"] != "socks" || socks["port"] != float64(10808) || socks["settings"].(M)["auth"] != "noauth" {
+			t.Fatal("incompatible diagnostic listener")
+		}
 		ob := m["outbounds"].([]any)[0].(M)
 		if ob["settings"].(M)["security"] != "aes-128-gcm" || ob["settings"].(M)["id"] != "synthetic" {
 			t.Fatal("credentials/cipher changed")

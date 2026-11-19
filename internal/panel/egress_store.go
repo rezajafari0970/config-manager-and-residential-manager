@@ -10,6 +10,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"io"
+	"strconv"
 	"time"
 )
 
@@ -31,7 +32,7 @@ const egressClaimCandidates = `WITH history_head(hash) AS MATERIALIZED (SELECT `
  UNION SELECT hash FROM egress_retirement_sources
  UNION SELECT hash FROM history_head WHERE hash IS NOT NULL
  UNION SELECT u.hash FROM egress_iran_guard g JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'
-), dispatch(streak,modern) AS MATERIALIZED (SELECT ` + egressDispatchStreak + `,` + egressModernFirstStreak + `) `
+), dispatch(streak,modern,other_maintenance) AS MATERIALIZED (SELECT ` + egressDispatchStreak + `,` + egressModernFirstStreak + `,` + maintenanceSinceConfirmation + `) `
 
 const egressLiveProof = `ever_accepted=1 AND tested>0 AND valid_until>:claim_now`
 const egressUrgentExpiry = egressLiveProof + ` AND valid_until<=:claim_now+120000`
@@ -47,7 +48,8 @@ func egressClaimPriority(lane string, turn uint64) string {
 	// The withdrawal marker can outlive its confirmation window. Only fresh
 	// evidence needs another urgent measurement; retained jobs still get
 	// their usual maintenance turns after that window.
-	order := `CASE WHEN reason='ads_iran_quarantined' THEN -1
+	order := `CASE WHEN (SELECT other_maintenance FROM dispatch)>=` + strconv.Itoa(maxOtherMaintenance) + ` AND ` + overdueConfirmation + ` THEN -2
+ WHEN reason='ads_iran_quarantined' THEN -1
  WHEN EXISTS(SELECT 1 FROM egress_retirements r WHERE r.hash=egress_jobs.hash
  AND r.hits>0 AND r.first_at>:claim_now-600000) THEN 0 `
 	if lane == "followup" && turn%3 == 0 {
@@ -92,7 +94,7 @@ func egressRankedClaim(lane string, turn uint64) string {
 	// An interrupted or unmeasured first probe keeps its place from the last
 	// grant. Untouched peers that were already waiting get the next chance.
 	return `WITH due AS MATERIALIZED (
- SELECT egress_jobs.hash,next_run,first_seen,claimed_at,valid_until,` + egressClaimPriority(maintenanceLane, turn) + ` AS priority,
+ SELECT egress_jobs.hash,next_run,first_seen,claimed_at,tested,valid_until,` + egressClaimPriority(maintenanceLane, turn) + ` AS priority,
  EXISTS(SELECT 1 FROM history_head a WHERE a.hash=c.hash) AS historic,
  CASE WHEN ` + egressDiscovery + ` THEN (SELECT max(u.created,egress_jobs.claimed_at) FROM egress_unique u WHERE u.hash=c.hash) END AS queued_at,
  CASE WHEN ever_accepted=1 AND tested>0 AND valid_until>0 AND valid_until<=:claim_now+60000
@@ -104,7 +106,7 @@ func egressRankedClaim(lane string, turn uint64) string {
  WHEN streak=-2 THEN ` + discoveryOrDeadline + `
  WHEN streak>=2 THEN queued_at IS NOT NULL ELSE ` + preference + ` END,
  CASE WHEN queued_at IS NULL THEN priority ELSE 7 END,
- CASE WHEN priority=4 THEN valid_until END,
+ CASE WHEN priority=-2 THEN max(next_run,tested,claimed_at) WHEN priority=4 THEN valid_until END,
  CASE WHEN queued_at IS NOT NULL THEN CASE WHEN modern>=9 THEN NOT historic ELSE historic END END,
  coalesce(queued_at,next_run),
  CASE WHEN queued_at IS NOT NULL THEN claimed_at END,
@@ -128,13 +130,13 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	now := egress.Now()
 	var cleanup bool
 	var candidate, historyHead string
-	var streak, modern int
+	var streak, modern, other int
 	ranked := egressRankedClaim(lane, s.renewalTurn.Load()+1)
-	e := s.workerReader().QueryRowContext(ctx, egressClaimCandidates+`SELECT streak,modern,coalesce((SELECT hash FROM history_head),''),
+	e := s.workerReader().QueryRowContext(ctx, egressClaimCandidates+`SELECT streak,modern,other_maintenance,coalesce((SELECT hash FROM history_head),''),
  EXISTS(SELECT 1 FROM egress_jobs WHERE token!='' AND NOT EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash))
  OR EXISTS(SELECT 1 FROM egress_run_members WHERE run=(SELECT max(id) FROM egress_runs) AND status='pending' AND NOT EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_run_members.hash)),
  CASE WHEN (SELECT enabled FROM egress_settings WHERE id=1)!=0 AND (SELECT count(*) FROM egress_jobs WHERE token!='' AND lease_until>:claim_now)<:worker_limit
- THEN coalesce((`+ranked+`),'') ELSE '' END FROM dispatch`, sql.Named("claim_now", now), sql.Named("worker_limit", egress.MaxWorkers)).Scan(&streak, &modern, &historyHead, &cleanup, &candidate)
+ THEN coalesce((`+ranked+`),'') ELSE '' END FROM dispatch`, sql.Named("claim_now", now), sql.Named("worker_limit", egress.MaxWorkers)).Scan(&streak, &modern, &other, &historyHead, &cleanup, &candidate)
 	if e != nil || !cleanup && candidate == "" {
 		return nil, e
 	}
@@ -173,11 +175,11 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	var size int64
 	var state, previousToken string
 	var first, retryStreak int
-	var discovery bool
-	e = tx.QueryRowContext(ctx, `SELECT hash,kind,size,revision,ever_accepted,attempts,state,token,first_completed,retry_streak,`+egressDiscovery+`
- FROM egress_work WHERE hash=:job_hash AND `+egressClaimDue+` AND `+egressDispatchStreak+`=:ranked_streak AND `+egressModernFirstStreak+`=:ranked_modern`,
-		sql.Named("job_hash", candidate), sql.Named("claim_now", now), sql.Named("ranked_streak", streak), sql.Named("ranked_modern", modern)).
-		Scan(&j.Hash, &j.Kind, &size, &j.Revision, &j.Deep, &j.Attempt, &state, &previousToken, &first, &retryStreak, &discovery)
+	var discovery, overdue bool
+	e = tx.QueryRowContext(ctx, `SELECT hash,kind,size,revision,ever_accepted,attempts,state,token,first_completed,retry_streak,`+egressDiscovery+`,`+overdueConfirmation+`
+ FROM egress_work AS egress_jobs WHERE hash=:job_hash AND `+egressClaimDue+` AND `+egressDispatchStreak+`=:ranked_streak AND `+egressModernFirstStreak+`=:ranked_modern AND `+maintenanceSinceConfirmation+`=:ranked_other`,
+		sql.Named("job_hash", candidate), sql.Named("claim_now", now), sql.Named("ranked_streak", streak), sql.Named("ranked_modern", modern), sql.Named("ranked_other", other)).
+		Scan(&j.Hash, &j.Kind, &size, &j.Revision, &j.Deep, &j.Attempt, &state, &previousToken, &first, &retryStreak, &discovery, &overdue)
 	if errors.Is(e, sql.ErrNoRows) {
 		if historic {
 			return nil, nil // Roll back the provisional admission with the stale rank.
@@ -222,6 +224,8 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 		if e = recordEgressHistoryTurn(ctx, tx.Tx, modern, historic); e != nil {
 			return nil, e
 		}
+	} else if e = recordConfirmationDispatch(ctx, tx.Tx, other, overdue); e != nil {
+		return nil, e
 	}
 	if e = tx.Commit(); e != nil {
 		return nil, e

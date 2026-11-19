@@ -84,6 +84,9 @@ func evaluateProfiles(r Report, p Plan, hash string, now int64) Decision {
 		if len(p.Variants) == 2 && (p.Variants[0].Name != "raw" || p.Variants[1].Name != "template") {
 			d.Reason = "variant_binding_invalid"
 		}
+		if structural := StructuralPreflightReason(r); structural != "" && boundRound(r, hash, now) && (r.Attempts[0].Core == NativeID) == (p.Driver == "sing-box") {
+			d.Reason = structural
+		}
 		if len(r.Checks) != 2 {
 			switch r.Code {
 			case "driver_session_failed", "direct_route_not_qualified", "direct_default_not_qualified", "endpoint_dns_failed", "ipv6_only_probe_pending", "core_rejected", "core_schema_mismatch", "missing_runtime_asset", "removed_allow_insecure", "unsupported_protocol_or_transport", "public_endpoint_requires_tls", "driver_subprocess_timeout", "driver_subprocess_failed", "driver_infrastructure_error", "runtime_start_failed", "network_retry_pending":

@@ -16,6 +16,7 @@ import (
 )
 
 const Version = "ads-egress.v9"
+const AmbiguousVMessTransport = probe.AmbiguousVMessTransport
 
 // Keep slots within the dedicated 32-address sandbox block.
 const MaxWorkers = 31
@@ -47,6 +48,10 @@ func Prepare(raw []byte) Plan {
 	p := probe.Prepare(raw)
 	if p.Code == protocolpolicy.Code {
 		return Plan{Driver: "none", Code: p.Code, Variants: []Variant{}}
+	}
+	if p.RawIssue == AmbiguousVMessTransport {
+		// TLS and plaintext repairs do not represent a single exact raw share.
+		return Plan{Driver: "none", Code: p.RawIssue, Variants: []Variant{}}
 	}
 	for _, c := range p.Candidates {
 		common, e := convert.Apply(c.Config)
@@ -275,6 +280,9 @@ func Evaluate(r Report, p Plan, hash string, now int64) Decision {
 	var d Decision
 	if len(p.Variants) != 2 {
 		d = Decision{State: "UNSUPPORTED", Reason: "driver_unavailable", Route: "UNKNOWN"}
+		if p.Code == AmbiguousVMessTransport {
+			d.Reason = p.Code
+		}
 	} else {
 		d = qualifyDelivery(evaluateProfiles(r, p, hash, now), r, p, now)
 	}
