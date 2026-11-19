@@ -48,15 +48,19 @@ func egressClaimPriority(lane string, turn uint64) string {
 	// The withdrawal marker can outlive its confirmation window. Only fresh
 	// evidence needs another urgent measurement; retained jobs still get
 	// their usual maintenance turns after that window.
-	order := `CASE WHEN (SELECT other_maintenance FROM dispatch)>=` + strconv.Itoa(maxOtherMaintenance) + ` AND ` + overdueConfirmation + ` THEN -2
- WHEN reason='ads_iran_quarantined' THEN -1
- WHEN EXISTS(SELECT 1 FROM egress_retirements r WHERE r.hash=egress_jobs.hash
- AND r.hits>0 AND r.first_at>:claim_now-600000) THEN 0 `
+	const freshRetirement = `EXISTS(SELECT 1 FROM egress_retirements r WHERE r.hash=egress_jobs.hash
+ AND r.hits>0 AND r.first_at>:claim_now-600000)`
+	order := `CASE WHEN (SELECT other_maintenance FROM dispatch)>=` + strconv.Itoa(maxOtherMaintenance) + ` AND ` + overdueConfirmation + ` THEN -3
+ WHEN reason='ads_iran_quarantined' THEN -2 `
 	if lane == "followup" && turn%3 == 0 {
-		// A zero deadline can also mean an incomplete result. Give the
-		// expired-proof turn first to receipts from proven residential jobs.
-		order += "WHEN ever_accepted=1 AND valid_until<=:claim_now AND " + egressRenewableNetwork + ` THEN CASE
- WHEN valid_until>0 AND tested>0 AND EXISTS(SELECT 1 FROM egress_residential_history h WHERE h.hash=egress_jobs.hash) THEN 1 ELSE 2 END `
+		// An already-withheld first failure can wait for other turns while
+		// this opportunity restores a previously evidenced residential route.
+		// Accepted safety confirmations continue ahead of the expired proof.
+		order += "WHEN " + freshRetirement + ` THEN CASE WHEN ever_accepted=1 THEN -1 ELSE 1 END
+ WHEN ever_accepted=1 AND valid_until<=:claim_now AND ` + egressRenewableNetwork + ` THEN CASE
+ WHEN valid_until>0 AND tested>0 AND EXISTS(SELECT 1 FROM egress_residential_history h WHERE h.hash=egress_jobs.hash) THEN 0 ELSE 2 END `
+	} else {
+		order += "WHEN " + freshRetirement + " THEN -1 "
 	}
 	// Keep a FIFO turn for due safety checks of withheld routes.
 	if lane == "followup" && turn%4 == 0 {
@@ -88,7 +92,7 @@ func egressRankedClaim(lane string, turn uint64) string {
 	if lane == "initial" {
 		// If a threatened proof is borrowing initial slots, a due Iran or
 		// retirement confirmation still gets a normal maintenance turn.
-		preference = "CASE WHEN urgent OR (priority<=0 AND EXISTS(SELECT 1 FROM due threat WHERE threat.urgent)) THEN 0 WHEN queued_at IS NOT NULL THEN 1 ELSE 2 END"
+		preference = "CASE WHEN urgent OR (priority<=1 AND EXISTS(SELECT 1 FROM due threat WHERE threat.urgent)) THEN 0 WHEN queued_at IS NOT NULL THEN 1 ELSE 2 END"
 		maintenanceLane = "followup"
 	}
 	// An interrupted or unmeasured first probe keeps its place from the last
@@ -106,7 +110,7 @@ func egressRankedClaim(lane string, turn uint64) string {
  WHEN streak=-2 THEN ` + discoveryOrDeadline + `
  WHEN streak>=2 THEN queued_at IS NOT NULL ELSE ` + preference + ` END,
  CASE WHEN queued_at IS NULL THEN priority ELSE 7 END,
- CASE WHEN priority=-2 THEN max(next_run,tested,claimed_at) WHEN priority=4 THEN valid_until END,
+ CASE WHEN priority=-3 THEN max(next_run,tested,claimed_at) WHEN priority=4 THEN valid_until END,
  CASE WHEN queued_at IS NOT NULL THEN CASE WHEN modern>=9 THEN NOT historic ELSE historic END END,
  coalesce(queued_at,next_run),
  CASE WHEN queued_at IS NOT NULL THEN claimed_at END,
