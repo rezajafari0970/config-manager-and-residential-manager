@@ -4,11 +4,41 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
+
+func TestPendingWithdrawalReadsAffectedMemberships(t *testing.T) {
+	s := testStore(t)
+	for _, condition := range []string{
+		"m.artifact_id IN (SELECT id FROM artifacts WHERE expires<=?)",
+		"m.source_id=? AND m.artifact_id NOT IN (SELECT identity FROM staged WHERE token='fixture')",
+	} {
+		rows, err := s.db.Query("EXPLAIN QUERY PLAN "+egressRememberPending+condition, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var indexedMembership, indexedJob bool
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err = rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			indexedMembership = indexedMembership || strings.Contains(detail, "SEARCH m USING")
+			indexedJob = indexedJob || (strings.Contains(detail, "SEARCH j USING") && strings.Contains(detail, "(hash=?)"))
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil || !indexedMembership || !indexedJob {
+			t.Fatal("expected scoped membership and exact job lookups", indexedMembership, indexedJob, err)
+		}
+	}
+}
 
 func pendingCount(t *testing.T, db databaseQuery, want int, query string, args ...any) {
 	t.Helper()

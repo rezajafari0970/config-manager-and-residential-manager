@@ -48,9 +48,11 @@ func (s *Store) migrateV47() error {
 	return tx.Commit()
 }
 
+// Drive both paths from the affected memberships. Starting with tested=0
+// would visit every archived unassessed job on every source completion.
 const egressRememberPending = `INSERT OR IGNORE INTO egress_first_backlog(source_id,hash)
- SELECT m.source_id,u.hash FROM memberships m JOIN egress_unique u ON u.identity=m.artifact_id
- JOIN egress_jobs j ON j.hash=u.hash
+ SELECT m.source_id,u.hash FROM memberships m CROSS JOIN egress_unique u ON u.identity=m.artifact_id
+ CROSS JOIN egress_jobs j ON j.hash=u.hash
  WHERE j.tested=0 AND j.first_completed=0 AND j.state!='DELETED'
  AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=u.identity)
  AND NOT EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=u.identity AND g.state='BLOCKED')
