@@ -100,7 +100,10 @@ func rememberOrdinaryFirst(ctx context.Context, tx *sql.Tx, records string, args
  WHERE NOT EXISTS(SELECT 1 FROM conversion_first_assessed a WHERE a.identity=r.identity)
  AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=r.identity)
  AND NOT EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=r.identity)
- AND NOT EXISTS(SELECT 1 FROM config_controls c WHERE c.id=r.identity AND c.action='deleted' AND c.expires>CAST(unixepoch('subsec')*1000 AS INTEGER))`, args...)
+ AND NOT EXISTS(SELECT 1 FROM config_controls c WHERE c.id=r.identity AND c.action='deleted' AND c.expires>CAST(unixepoch('subsec')*1000 AS INTEGER))
+ ON CONFLICT(source_id,identity) DO UPDATE SET hash=excluded.hash
+ WHERE conversion_first_backlog.hash!=excluded.hash AND EXISTS(
+ SELECT 1 FROM conversion_jobs active WHERE active.hash=excluded.hash AND active.token!='' AND active.lease_until>CAST(unixepoch('subsec')*1000 AS INTEGER))`, args...)
 	return err
 }
 

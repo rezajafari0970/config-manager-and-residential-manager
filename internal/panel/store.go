@@ -40,7 +40,7 @@ type Store struct {
 	rotationLocks       map[string]*rotationLock
 }
 
-const currentSchemaVersion = 52
+const currentSchemaVersion = 53
 
 func Open(path string, key []byte) (*Store, error) {
 	if len(key) != 32 || !filepath.IsAbs(path) {
@@ -283,6 +283,9 @@ PRAGMA user_version=1;`)
 		return nil, err
 	}
 	if err = s.migrateV52(); err != nil {
+		return nil, err
+	}
+	if err = s.migrateV53(); err != nil {
 		return nil, err
 	}
 	// Reconcile transient children left by older connections with foreign keys

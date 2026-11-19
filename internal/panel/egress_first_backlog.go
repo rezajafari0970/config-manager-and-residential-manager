@@ -69,20 +69,27 @@ func rememberExpiredEgress(ctx context.Context, tx *sql.Tx, stamp int64) error {
 
 func rememberReplacedEgress(ctx context.Context, tx *sql.Tx, result collect.Result, source, token string, stamp int64) error {
 	candidates := "SELECT identity FROM staged WHERE token=?"
+	renamed := "SELECT 1 FROM staged t WHERE t.token=? AND t.identity=m.artifact_id AND t.hash!=m.raw_hash"
 	arg := token
 	if !result.Staged {
-		ids := make([]string, len(result.Items))
-		for i, item := range result.Items {
-			ids[i] = item.Identity
+		byIdentity := make(map[string]string, len(result.Items))
+		for _, item := range result.Items {
+			byIdentity[item.Identity] = item.Hash
 		}
-		encoded, err := json.Marshal(ids)
+		encoded, err := json.Marshal(byIdentity)
 		if err != nil {
 			return err
 		}
-		candidates, arg = "SELECT value FROM json_each(?)", string(encoded)
+		candidates, arg = "SELECT key FROM json_each(?)", string(encoded)
+		renamed = "SELECT 1 FROM json_each(?) t WHERE t.key=m.artifact_id AND t.value!=m.raw_hash"
 	}
+	// A cosmetic replacement still owns the same identity, but the worker
+	// must finish the exact raw it already leased. Consider only active jobs
+	// in this extra branch; unleased renames need no new private pin.
 	if err := rememberOrdinaryFirst(ctx, tx, `SELECT m.source_id,m.artifact_id AS identity,m.raw_hash AS hash,m.kind,m.size FROM memberships m
- WHERE m.source_id=? AND m.artifact_id NOT IN (`+candidates+")", source, arg); err != nil {
+ WHERE m.source_id=? AND m.artifact_id NOT IN (`+candidates+`)
+ UNION ALL SELECT m.source_id,m.artifact_id,m.raw_hash,m.kind,m.size FROM conversion_jobs j CROSS JOIN memberships m ON m.raw_hash=j.hash
+ WHERE j.token!='' AND j.lease_until>? AND m.source_id=? AND EXISTS (`+renamed+")", source, arg, stamp, source, arg); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, egressRememberPending+"m.source_id=? AND m.artifact_id NOT IN ("+candidates+")", stamp, source, arg)

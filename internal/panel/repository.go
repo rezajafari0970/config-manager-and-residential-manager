@@ -143,6 +143,7 @@ func (s *Store) Save(ctx context.Context, id string, revision int64, input Sourc
 		return "", e
 	}
 	defer tx.Rollback()
+	var replacedOwner bool
 	if id == "" {
 		id = randomToken()
 		_, e = tx.ExecContext(ctx, "INSERT INTO sources ("+baseColumns+",url_hash,state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", id, input.Name, s.seal(id, []byte(input.URL)), display, input.Min, input.Max, input.Unit, input.Enabled, 1, now.Unix(), now.Unix(), now.UnixNano(), s.digest("source-url", input.URL), state)
@@ -164,6 +165,7 @@ func (s *Store) Save(ctx context.Context, id string, revision int64, input Sourc
 			}
 		}
 		if e == nil && oldHash != s.digest("source-url", input.URL) {
+			replacedOwner = true
 			if _, e = tx.ExecContext(ctx, "DELETE FROM memberships WHERE source_id=?", id); e != nil {
 				return "", e
 			}
@@ -189,6 +191,11 @@ func (s *Store) Save(ctx context.Context, id string, revision int64, input Sourc
 	// reconcile atomically; the collector reconciles new data when it arrives.
 	if !creating {
 		if e = syncConversions(ctx, tx); e != nil {
+			return "", e
+		}
+	}
+	if replacedOwner {
+		if e = forgetUnownedOrdinaryClocks(ctx, tx); e != nil {
 			return "", e
 		}
 	}

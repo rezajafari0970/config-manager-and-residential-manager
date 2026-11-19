@@ -105,6 +105,9 @@ func (s *Store) SaveProbeSettings(ctx context.Context, v probe.Settings) error {
 	if _, e = tx.ExecContext(ctx, "UPDATE conversion_jobs SET next_run=min(next_run,?)", time.Now().UnixMilli()+int64(v.RetestSeconds)*1000); e != nil {
 		return e
 	}
+	if _, e = tx.ExecContext(ctx, "UPDATE conversion_first_clock SET retry_at=min(retry_at,?) WHERE failures>0", time.Now().UnixMilli()+int64(v.RetestSeconds)*1000); e != nil {
+		return e
+	}
 	if !v.Enabled {
 		if _, e = tx.ExecContext(ctx, "UPDATE conversion_jobs SET token='',lease_until=0,state='queued' WHERE token!=''"); e != nil {
 			return e
@@ -183,6 +186,9 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 		return nil, e
 	}
 	if first {
+		if e = startOrdinaryClock(ctx, tx.Tx, j.Hash, now); e != nil {
+			return nil, e
+		}
 		if e = recordFirstProbeTurn(ctx, tx.Tx, j.Hash, now); e != nil {
 			return nil, e
 		}
@@ -323,6 +329,9 @@ func (s *Store) CompleteProbe(ctx context.Context, r probe.Result) error {
 	}
 	_, e = tx.ExecContext(ctx, "UPDATE conversion_jobs SET state=?,token='',lease_until=0,next_run=?,failures=?,version=? WHERE hash=?", state, now+delay*1000, failures, r.Version, r.Hash)
 	if e != nil {
+		return e
+	}
+	if e = deferOrdinaryClock(ctx, tx, r.Hash, r.Version, now+delay*1000, failures); e != nil {
 		return e
 	}
 	if r.Connection == "failed" || r.Connection == "partial" {

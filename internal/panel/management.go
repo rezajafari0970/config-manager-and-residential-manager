@@ -134,6 +134,9 @@ func (s *Store) ManageSources(ctx context.Context, b SourceBatch) (BatchResult, 
 		return result, e
 	}
 	if b.Action == "delete" {
+		if e = forgetUnownedOrdinaryClocks(ctx, tx); e != nil {
+			return result, e
+		}
 		if e = forgetUnownedConversionReceipts(ctx, tx); e != nil {
 			return result, e
 		}
@@ -232,6 +235,9 @@ func (s *Store) ManageConfigs(ctx context.Context, b ConfigBatch) (BatchResult, 
 		return result, e
 	}
 	if b.Action == "delete" {
+		if e = forgetUnownedOrdinaryClocks(ctx, tx); e != nil {
+			return result, e
+		}
 		if e = forgetUnownedConversionReceipts(ctx, tx); e != nil {
 			return result, e
 		}

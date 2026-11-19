@@ -18,7 +18,9 @@ func dropEgressForMigration(t *testing.T, s *Store) {
  FROM sqlite_schema WHERE type='trigger' AND name GLOB 'egress_first_history_*'`).Scan(&historyTriggers); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(historyTriggers + `; DROP TABLE egress_first_history; DROP TABLE egress_first_history_counts;
+	if _, err := s.db.Exec(historyTriggers + `; DROP TRIGGER conversion_first_clock_assessed; DROP TRIGGER conversion_first_clock_pin; DROP TRIGGER conversion_first_clock_schedule;
+ DROP VIEW conversion_first_raw_clock; DROP TABLE conversion_first_clock;
+ DROP TABLE egress_first_history; DROP TABLE egress_first_history_counts;
  DROP VIEW conversion_work_inputs; DROP VIEW conversion_first_inputs;
  DROP TRIGGER conversion_first_result_INSERT; DROP TRIGGER conversion_first_result_UPDATE;
  DROP TABLE conversion_first_backlog; DROP TABLE conversion_first_assessed; DROP TABLE conversion_first_turns;
