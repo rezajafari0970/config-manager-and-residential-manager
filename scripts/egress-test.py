@@ -28,14 +28,74 @@ class DiscoveryContracts(unittest.TestCase):
   box=Box();pool=types.SimpleNamespace(verify=lambda *a:None,lease=lambda *a:contextlib.nullcontext(box),geo=types.SimpleNamespace(attach=lambda rows:None),network=types.SimpleNamespace(attach=lambda rows:None))
   args=types.SimpleNamespace(prefix='cgt',run_id='abcdef',slot=31)
   req=dict(hash='synthetic',started=int(time.time()*1000),deep=True,accepted=False,plan=dict(driver='xray',variants=[dict(name=v,hash=digest,config=base64.b64encode(config).decode()) for v in ('raw','template')]))
-  with patch.object(driver,'runtime',lambda *a:({},{})),patch.object(driver,'resource_failures',lambda *a:0),patch.object(driver,'diagnostic_delivery',lambda *a:dict(assets=[dict(curl_exit=0,http_status=200,tls_verified=True,complete=True,content_match=True)])):
+  with patch.object(driver,'runtime',lambda *a:({},{})),patch.object(driver,'resource_failures',lambda *a:((1,2),(0,0))),patch.object(driver,'diagnostic_delivery',lambda *a:dict(assets=[dict(curl_exit=0,http_status=200,tls_verified=True,complete=True,content_match=True)])):
    old=driver.investigate(req,args,pool)
-   self.assertEqual(old['code'],'measured');self.assertEqual(len(old['checks']),2);self.assertEqual(len(old['evidence']),1);self.assertTrue(old['evidence'][0]['selected_samples']);self.assertEqual(old['evidence'][0]['samples'],[])
+   self.assertEqual(old['code'],'measured');self.assertEqual(len(old['checks']),2);self.assertEqual(len(old['evidence']),1);self.assertTrue(old['evidence'][0]['selected_samples']);self.assertEqual(old['evidence'][0]['samples'],[]);self.assertEqual(old['evidence'][0]['waves'],old['waves'])
    calls.clear();req['discovery']=True;new=driver.investigate(req,args,pool)
   self.assertEqual(len(new['checks']),2);self.assertEqual(new['code'],'measured')
   self.assertEqual(len(new['samples']),6*len(BASE_TARGETS))
   self.assertEqual([q['variant'] for q in calls],['raw','template'])
   for q in calls:self.assertEqual(q['waves'],3);self.assertTrue(q['sequential']);self.assertFalse(q['adaptive'])
+class SlotIsolationContracts(unittest.TestCase):
+ def test_slot_observation_ignores_siblings_and_requires_monotonic_counters(self):
+  import types
+  with tempfile.TemporaryDirectory() as directory:
+   parent=pathlib.Path(directory);cg=parent/'slot';cg.mkdir();box=types.SimpleNamespace(cg=cg)
+   counters=cg/'memory.events';other=parent/'memory.events'
+   counters.write_text('oom 0\noom_kill 0');attempt={}
+   with driver.observe_slot_pressure(box,attempt):other.write_text('oom 2\noom_kill 2')
+   self.assertEqual(attempt,{'monitored':True,'resource_pressure':False})
+   with driver.observe_slot_pressure(box,attempt):counters.write_text('oom 1\noom_kill 1')
+   self.assertTrue(attempt['resource_pressure'])
+   with self.assertRaises(OSError),driver.observe_slot_pressure(box,{}):
+    replaced=cg/'different';replaced.write_text(counters.read_text());replaced.replace(counters)
+   for broken in ['oom 2\noom_kill 0','broken',None]:
+    counters.write_text('oom 1\noom_kill 1')
+    with self.assertRaises(OSError),driver.observe_slot_pressure(box,{}):
+     if broken is None:counters.unlink()
+     else:counters.write_text(broken)
+ def test_driver_withholds_own_oom_and_does_not_repeat_all_cores(self):
+  import base64,contextlib,types
+  from unittest.mock import Mock,patch
+  body=b'{"outbounds":[]}';variants=[dict(name=n,hash=driver.lab.digest(body),config=base64.b64encode(body).decode()) for n in ('raw','template')]
+  with tempfile.TemporaryDirectory() as directory:
+   box=Mock();box.cg=pathlib.Path(directory);events=box.cg/'memory.events';events.write_text('oom 0\noom_kill 0')
+   box.launch.return_value.poll.return_value=None
+   def respond(args,**kw):
+    if not args[-1].endswith('egress-session.py'):return types.SimpleNamespace(stdout=b'0')
+    req=json.loads(kw['input'])
+    if req['variant']=='template':events.write_text('oom 1\noom_kill 1');raise OSError('fixture interruption')
+    return types.SimpleNamespace(stdout=json.dumps([{'wave':1} for _ in range(2*len(BASE_TARGETS))]).encode())
+   box.net.side_effect=respond;pool=Mock();pool.lease.side_effect=lambda *a:contextlib.nullcontext(box)
+   req=dict(plan=dict(driver='xray',variants=variants),hash=driver.lab.digest(body),started=1,discovery=True)
+   with patch.object(driver,'runtime',return_value=({},{})):
+    report=driver.investigate(req,types.SimpleNamespace(prefix='cgt'),pool)
+   self.assertEqual(report['code'],'local_resource_pressure');self.assertTrue(report['resource_pressure'])
+   self.assertEqual(len(report['attempts']),1);self.assertEqual(report['samples'],[])
+   self.assertTrue(report['evidence'][0]['resource_pressure']);self.assertTrue(report['evidence'][0]['samples']);self.assertEqual(report['evidence'][0]['waves'],1)
+ def test_failed_warm_reset_discards_only_the_owned_slot(self):
+  import types
+  from unittest.mock import MagicMock,patch
+  args=types.SimpleNamespace(prefix='cgt',slot=31,run_id='abcdef')
+  with tempfile.TemporaryDirectory() as directory,driver.ResourcePool(args) as pool:
+   broken=MagicMock();broken.policy.side_effect=OSError('lost namespace');pool.box=broken
+   good=MagicMock();good.cg=good.work=pathlib.Path(directory);(good.cg/'pids.current').write_text('0')
+   with patch.object(driver,'SessionBox',return_value=good) as create,patch.object(driver,'cleanup') as cleanup:
+    with self.assertRaises(OSError),pool.lease('/tmp/core','xray'):self.fail('used a broken namespace')
+    broken.__exit__.assert_called_once();self.assertIsNone(pool.box);cleanup.assert_called_once_with('cgt',31,'abcdef')
+    with pool.lease('/tmp/core','xray') as fresh:self.assertIs(fresh,good)
+    create.assert_called_once();good.__enter__.assert_called_once()
+ def test_deny_policy_is_reinstalled_after_partial_change(self):
+  from unittest.mock import patch
+  box=object.__new__(driver.EgressBox);requests=[]
+  def apply(box,values):
+   requests.append(values)
+   if values:raise OSError('partial update')
+  with patch.object(driver.lab.Sandbox,'policy',apply):
+   box.policy({})
+   with self.assertRaises(OSError):box.policy({'fixture':True})
+   box.policy({});box.policy({})
+  self.assertEqual(requests,[{}, {'fixture':True}, {}])
 class RenewalBudgetContracts(unittest.TestCase):
  def test_verified_inputs_do_not_silently_use_short_initial_deadline(self):
   self.assertEqual(driver.observation_budget({'deep':True,'accepted':True}),(3,8,8))
@@ -157,7 +217,7 @@ class DispatchContracts(unittest.TestCase):
               for name in ('raw','template')]
     box=Mock();pool=Mock();pool.lease.side_effect=lambda *args:contextlib.nullcontext(box)
     req=dict(plan=dict(driver='xray',variants=variants),hash=driver.lab.digest(body),started=1)
-    with patch.object(driver,'resource_failures',return_value=0),patch.object(driver.lab,'resolve_endpoints') as dns:
+    with patch.object(driver,'resource_failures',return_value=((1,2),(0,0))),patch.object(driver.lab,'resolve_endpoints') as dns:
      report=driver.investigate(req,types.SimpleNamespace(prefix='cgt'),pool)
     self.assertEqual(report['code'],expected)
     self.assertEqual([attempt['code'] for attempt in report['attempts']],[expected])

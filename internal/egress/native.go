@@ -21,13 +21,9 @@ func native(raw []byte) (Plan, bool) {
 	if len(plan.Candidates) != 1 {
 		return p, true
 	}
-	original := raw
-	if !json.Valid(original) {
-		decoded, err := probe.DecodeEnvelope(raw)
-		if err != nil || !json.Valid(decoded) {
-			return p, false
-		}
-		original = decoded
+	original, err := probe.DecodeExactEnvelope(raw)
+	if err != nil || !json.Valid(original) {
+		return p, false
 	}
 	template := plan.Candidates[0]
 	p.Complete = true

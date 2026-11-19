@@ -280,8 +280,8 @@ func TestNetworkCannotBorrowSelectedProofFromEarlierCore(t *testing.T) {
 	r.Core, r.CoreSHA = NativeID, NativeSHA // Wrong driver for this Xray plan.
 	r.Evidence = []Report{part}
 	d := Evaluate(r, p, r.Hash, now)
-	if d.Network.Eligible || d.Network.Reason != "ads_network_coverage_incomplete" {
-		t.Fatal(d.Network)
+	if d.Eligible || d.Network.Eligible || d.Network.Reason != "ads_network_route_unqualified" {
+		t.Fatal(d.Reason, d.Network)
 	}
 }
 

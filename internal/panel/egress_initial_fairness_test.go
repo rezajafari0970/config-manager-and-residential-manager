@@ -71,7 +71,7 @@ func TestEgressDispatchGuaranteesBothClassesDuringContention(t *testing.T) {
 					t.Fatal(err)
 				}
 				if index == 1 {
-					if _, err := s.db.Exec("INSERT INTO egress_retirements(hash,reason,hits,at) VALUES(?,'confirmed_ads_delivery_unhealthy',1,?)", hash, now-60000); err != nil {
+					if _, err := s.db.Exec("INSERT INTO egress_retirements(hash,reason,hits,at,first_at) VALUES(?,'confirmed_ads_delivery_unhealthy',1,?,?)", hash, now-60000, now-60000); err != nil {
 						t.Fatal(err)
 					}
 				}

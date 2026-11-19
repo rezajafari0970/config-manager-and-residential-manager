@@ -360,6 +360,9 @@ func TestIranRetainsEarlierAttemptEvidence(t *testing.T) {
 	old := iranFixture(*j)
 	old.Started = r.Started
 	old.Finished = r.Finished
+	// A separate core attempt makes its own TLS connection.
+	old.Samples[0].Nonce = egress.Hash([]byte("earlier independent connection"))[:32]
+	old.Samples[0].Connection = old.Samples[0].Nonce
 	r.Evidence = []egress.Report{old}
 	if egress.Iran(r, p, j.Hash, egress.Now()) == nil {
 		t.Fatal("clean selected attempt hid earlier IR")

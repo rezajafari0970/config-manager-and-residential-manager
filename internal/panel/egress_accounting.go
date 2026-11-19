@@ -7,14 +7,15 @@ import "context"
 func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, error) {
 	now := readStamp(ctx)
 	var total, paused, running, due, scheduled, cached, first, assessed, retained int
-	err := q.QueryRowContext(ctx, `SELECT count(*),
+	var enabled bool
+	err := q.QueryRowContext(ctx, `SELECT (SELECT enabled FROM egress_settings WHERE id=1),count(*),
  coalesce(sum(paused!=0),0),
  coalesce(sum(paused=0 AND token!='' AND lease_until>?),0),
  coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND (next_run<=? OR (ever_accepted=1 AND tested>0 AND retry_streak=0 AND valid_until>? AND valid_until<=?))),0),
  coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND NOT (next_run<=? OR (ever_accepted=1 AND tested>0 AND retry_streak=0 AND valid_until>? AND valid_until<=?))),0),
  coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash NOT IN(SELECT hash FROM egress_work)),0),
  coalesce(sum(tested=0),0),coalesce(sum(tested>0),0),coalesce(sum(ever_accepted=1),0)
- FROM egress_inventory`, now, now, now, now, now+120000, now, now, now, now+120000, now).Scan(&total, &paused, &running, &due, &scheduled, &cached, &first, &assessed, &retained)
+ FROM egress_inventory`, now, now, now, now, now+120000, now, now, now, now+120000, now).Scan(&enabled, &total, &paused, &running, &due, &scheduled, &cached, &first, &assessed, &retained)
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +69,14 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	renewal, safety, err := egressRenewalCounts(ctx, q, now)
 	if err != nil {
 		return nil, err
+	}
+	// A global pause stops new grants. Already leased and cached identities
+	// keep their state until the worker returns or the lease expires.
+	if !enabled {
+		paused += due + scheduled
+		due, scheduled = 0, 0
+		renewal["paused"] += renewal["due"] + renewal["scheduled"]
+		renewal["due"], renewal["scheduled"] = 0, 0
 	}
 	firstProgress, err := firstAssessmentState(ctx, q, now)
 	if err != nil {

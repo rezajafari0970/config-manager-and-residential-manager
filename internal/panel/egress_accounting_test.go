@@ -90,6 +90,16 @@ func TestEgressAccountingPartitionsAndOutputUnits(t *testing.T) {
 	if pub["published"] != 0 || pub["country_filtered"] != 1 || pub["retained"] != 2 {
 		t.Fatal(pub)
 	}
+	exec("UPDATE egress_settings SET enabled=0")
+	a, err = egressAccounting(frozen, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, renewal = a["queue"].(map[string]int), a["renewal"].(map[string]int)
+	if queue["running"] != 1 || queue["paused"] != 4 || queue["due"] != 0 || queue["scheduled"] != 0 || renewal["paused"] != 2 || renewal["due"] != 0 || renewal["scheduled"] != 0 {
+		t.Fatal("disabled dispatcher advertised work", queue, renewal)
+	}
+
 }
 
 func TestEgressDueAcceptedUsesReservedEarlyRenewal(t *testing.T) {

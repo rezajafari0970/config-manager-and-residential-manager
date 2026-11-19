@@ -59,26 +59,33 @@ func sourceAdmission(ctx context.Context, tx *sql.Tx, source string, unique int,
 	return decision, e
 }
 
-// Count replacement-eligible identities, not response occurrences or suppressed
-// identities. Detect private manual revocations even when admission defers.
+func sourceInputQuery(r collect.Result, token string) (string, any, error) {
+	if r.Staged {
+		return "SELECT identity FROM staged WHERE token=?", token, nil
+	}
+	ids := make([]string, len(r.Items))
+	for i, item := range r.Items {
+		ids[i] = item.Identity
+	}
+	b, err := json.Marshal(ids)
+	return "SELECT value AS identity FROM json_each(?)", string(b), err
+}
+
+// The cardinality gate counts admissible memberships. A guard can withhold
+// the whole raw response while its identity remains available for monitoring.
 func eligibleSourceItems(ctx context.Context, tx *sql.Tx, r collect.Result, token string, stamp int64) (int, bool, error) {
-	source := "SELECT identity FROM staged WHERE token=?"
-	arg := any(token)
-	if !r.Staged {
-		ids := make([]string, len(r.Items))
-		for i, item := range r.Items {
-			ids[i] = item.Identity
-		}
-		b, e := json.Marshal(ids)
-		if e != nil {
-			return 0, false, e
-		}
-		arg = string(b)
-		source = "SELECT value AS identity FROM json_each(?)"
+	source, arg, err := sourceInputQuery(r, token)
+	if err != nil {
+		return 0, false, err
 	}
 	var eligible int
-	var manual bool
-	query := "WITH candidates AS (" + source + "), flags AS (SELECT EXISTS(SELECT 1 FROM input_exclusions t WHERE t.identity=c.identity AND t.manual=1) AS manual, EXISTS(SELECT 1 FROM config_controls d WHERE d.id=c.identity AND d.action='deleted' AND d.expires>?) AS deleted FROM candidates c) SELECT coalesce(sum(CASE WHEN manual=0 AND deleted=0 THEN 1 ELSE 0 END),0),coalesce(max(manual),0) FROM flags"
-	e := tx.QueryRowContext(ctx, query, arg, stamp).Scan(&eligible, &manual)
-	return eligible, manual, e
+	var withhold bool
+	query := "WITH candidates AS (" + source + `), flags AS (
+ SELECT EXISTS(SELECT 1 FROM input_exclusions t WHERE t.identity=c.identity AND t.manual=1) AS manual,
+ EXISTS(SELECT 1 FROM config_controls d WHERE d.id=c.identity AND d.action='deleted' AND d.expires>?) AS deleted,
+ EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=c.identity) AS guarded FROM candidates c)
+ SELECT coalesce(sum(CASE WHEN manual=0 AND deleted=0 THEN 1 ELSE 0 END),0),
+ coalesce(max(manual OR guarded),0) FROM flags`
+	err = tx.QueryRowContext(ctx, query, arg, stamp).Scan(&eligible, &withhold)
+	return eligible, withhold, err
 }

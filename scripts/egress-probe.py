@@ -36,6 +36,7 @@ class EgressBox(lab.Sandbox):
  def policy(self,resolved):
   key=json.dumps(resolved,sort_keys=True,separators=(',',':'))
   if key==getattr(self,'policy_key',None):return
+  self.policy_key=None
   super().policy(resolved);self.policy_key=key
 class NativeBox(EgressBox):
  def core_mounts(self):
@@ -64,18 +65,27 @@ class ResourcePool:
    self.pins[path]=key
  @contextlib.contextmanager
  def lease(self,path,driver):
-  if self.box is None:
-   box=SessionBox(path,self.args.run_id,8192+self.args.slot,prefix=self.args.prefix)
-   box.__enter__();self.box=box
-  box=self.box;box.stop();box.policy({});box.core=pathlib.Path(path).resolve();box.driver=driver
-  try:yield box
-  finally:
-   box.stop();box.policy({})
-   for _ in range(20):
-    if (box.cg/'pids.current').read_text().strip()=='0':break
-    time.sleep(.05)
-   else:self.close();raise ValueError('sandbox_not_empty')
-   for name in ('config.json','hosts','resolv.conf'):(box.work/name).unlink(missing_ok=True)
+  try:
+   if self.box is None:
+    box=SessionBox(path,self.args.run_id,8192+self.args.slot,prefix=self.args.prefix)
+    box.__enter__();self.box=box
+   box=self.box
+   box.stop();box.policy({});box.core=pathlib.Path(path).resolve();box.driver=driver
+   try:
+    yield box
+   finally:
+    box.stop();box.policy({})
+    for _ in range(20):
+     if (box.cg/'pids.current').read_text().strip()=='0':break
+     time.sleep(.05)
+    else:raise OSError('sandbox_not_empty')
+    for name in ('config.json','hosts','resolv.conf'):(box.work/name).unlink(missing_ok=True)
+  except (OSError,subprocess.SubprocessError):
+   # The namespace/cgroup may have disappeared or only partially reset.
+   # A subsequent attempt must acquire new resources before running a core.
+   try:self.close()
+   finally:cleanup(self.args.prefix,self.args.slot,self.args.run_id)
+   raise
 def runtime(config,driver):
  if driver=='xray':
   return scope.runtime(config,lab)
@@ -123,11 +133,25 @@ def core_independent_failure(code):
  # likewise independent of core choice. The job retains its UNKNOWN receipt.
  return code in ('protocol_disabled','endpoint_dns_failed','ipv6_only_probe_pending',
                  'direct_route_not_qualified','direct_default_not_qualified')
-def resource_failures(prefix):
+def resource_failures(box):
  try:
-  fields=dict(line.split() for line in (pathlib.Path('/sys/fs/cgroup')/(prefix+'-sandboxes')/'memory.events').read_text().splitlines())
-  return int(fields.get('oom',0))+int(fields.get('oom_kill',0))
- except (OSError,ValueError):return 0
+  with (box.cg/'memory.events').open() as events:
+   st=os.fstat(events.fileno())
+   fields=dict(line.split() for line in events)
+  return (st.st_dev,st.st_ino),(int(fields['oom']),int(fields['oom_kill']))
+ except (ValueError,KeyError) as error:raise OSError('sandbox_counters_unavailable') from error
+
+@contextlib.contextmanager
+def observe_slot_pressure(box,attempt):
+ # memory.events on the shared parent includes every sibling slot. Read
+ # this core's counters while its exact cgroup still exists under the lease.
+ before_group,before=resource_failures(box)
+ try:yield
+ finally:
+  after_group,after=resource_failures(box)
+  if after_group!=before_group or any(end<start for start,end in zip(before,after)):raise OSError('sandbox_counters_reset')
+  attempt.update(monitored=True,resource_pressure=after!=before)
+
 def diagnostic_delivery(box,variant,targets,timeout):
  try:
   q=box.net(['/usr/bin/python3',str(HERE/'egress-delivery.py')],input=json.dumps(dict(variant=variant,targets=targets,timeout=timeout)).encode(),timeout=timeout+3)
@@ -170,16 +194,16 @@ def investigate(req,args,pool=None):
  targets=sessions.target_registry(req.get('targets'));targets=targets if discovery else [t for t in targets if t.get('driver')!='https-reachability'];plan=req['plan'];r=dict(version='ads-egress.v9',hash=req['hash'],started=req['started'],finished=0,core='',core_sha='',infrastructure=False,code='driver_unavailable',checks=[],samples=[],health=[],delivery=[],attempts=[],evidence=[],wall_ms=0,waves=probe_waves)
  conditional_controls=sum(bool(t.get('when_ads_family')) for t in targets)
  base_targets=len(targets)-conditional_controls
- begin=time.monotonic();best=-1;before_resource_failures=resource_failures(args.prefix)
+ begin=time.monotonic();best=-1
  if len(plan.get('variants',[]))!=2:return r
  for core,path,pin in (core_order(plan) if plan['driver']=='xray' else [NATIVE]):
-  at=time.monotonic();attempt_started=int(time.time()*1000);attempt_pressure=resource_failures(args.prefix);checks=[];samples=[];health=[];delivery=[];code='core_unavailable';stages={};checkpoint=at
+  at=time.monotonic();attempt_started=int(time.time()*1000);attempt={'resource_pressure':False,'monitored':False};completed=False;checks=[];samples=[];health=[];delivery=[];code='core_unavailable';stages={};checkpoint=at
   def mark(name):
    nonlocal checkpoint
    current=time.monotonic();stages[name]=(current-checkpoint)*1000;checkpoint=current
   try:
    pool.verify(path,pin);mark('pin')
-   with pool.lease(path,plan['driver']) as box:
+   with pool.lease(path,plan['driver']) as box, observe_slot_pressure(box,attempt):
     mark('namespace')
     for v in plan['variants']:
      data=base64.b64decode(v['config'],validate=True)
@@ -215,21 +239,24 @@ def investigate(req,args,pool=None):
       delivery.append(assets)
      samples+=rows
      box.stop();code='measured';mark(v['name']+'_probes')
-   mark('reset')
-   score=sum(bool(x.get('echo')) for x in samples)
-   if len(checks)==2 and all(x['core'] for x in checks):score+=100
-   if score>best:r.update(core=core,core_sha=pin,checks=checks,samples=samples,health=health,delivery=delivery,code=code);best=score
-   r['attempts'].append(dict(core=core,code=code,ms=(time.monotonic()-at)*1000,stages=stages))
-   # A validated running core does not need four repetitions of a network timeout.
-   # Schema/start failures still use the full pinned compatibility matrix.
-   if len(checks)==2 and all(x.get('core') for x in checks):break
+   completed=True;mark('reset')
   except Exception as error:
    code=error_code(error)
-   r['attempts'].append(dict(core=core,code=code,ms=(time.monotonic()-at)*1000,stages=stages))
-   if best<0:r['code']=code
-   if core_independent_failure(code):break
-  finally:
-   if samples:r['evidence'].append(dict(version=r['version'],hash=r['hash'],started=attempt_started,finished=int(time.time()*1000),core=core,core_sha=pin,checks=checks,samples=samples,resource_pressure=resource_failures(args.prefix)>attempt_pressure))
+  pressure=attempt['resource_pressure']
+  if pressure:code='local_resource_pressure'
+  if samples and attempt['monitored']:r['evidence'].append(dict(version=r['version'],hash=r['hash'],started=attempt_started,finished=int(time.time()*1000),core=core,core_sha=pin,checks=checks,samples=samples,waves=max(row.get('wave',0) for row in samples),resource_pressure=pressure))
+  r['attempts'].append(dict(core=core,code=code,ms=(time.monotonic()-at)*1000,stages=stages))
+  # Only attempts that returned from the sandbox with an intact reset may
+  # provide the selected variant bindings. Other observations stay scoped
+  # to their own attempt for independently verified safety checks.
+  if completed:
+   score=sum(bool(x.get('echo')) for x in samples)
+   if len(checks)==2 and all(x['core'] for x in checks):score+=100
+   if not pressure and score>best:
+    r.update(core=core,core_sha=pin,checks=checks,samples=samples,health=health,delivery=delivery,code=code);best=score
+  if best<0 or (pressure and not r['samples']):r.update(code=code,resource_pressure=pressure)
+  if pressure or core_independent_failure(code):break
+  if completed and len(checks)==2 and all(x.get('core') for x in checks):break
  # An independent host asset check is outage calibration only. Cache avoids
  # repeating two unrelated public probes for every disconnected input.
  if r['delivery'] and not any(asset_available(a) for part in r['delivery'] for a in part.get('assets',[])):
@@ -237,7 +264,7 @@ def investigate(req,args,pool=None):
   if control:
    r['infrastructure']=any(asset_available(a) for a in control.get('assets',[]))
    r['delivery'].append(control)
- r['waves']=max([2]+[x.get('wave',0) for x in r['samples']])
+ r['waves']=max((x.get('wave',0) for x in r['samples']),default=2)
  # Reference selected samples once while preserving their attempt-local safety
  # metadata; unrelated attempts under resource pressure cannot erase valid IR.
  r['evidence']=[dict(part,samples=[],selected_samples=True) if part['samples'] is r['samples'] else part for part in r['evidence']]
@@ -246,7 +273,6 @@ def investigate(req,args,pool=None):
  pool.geo.attach(observations)
  pool.network.attach(observations)
  private_sources(observations,secrets.token_bytes(32))
- r['resource_pressure']=resource_failures(args.prefix)>before_resource_failures
  r['finished']=int(time.time()*1000);r['wall_ms']=(time.monotonic()-begin)*1000
  for part in r['evidence']:part['finished']=r['finished']
  return r
@@ -268,7 +294,7 @@ def main():
      line=sys.stdin.buffer.readline(24*1024*1024)
      if not line:break
      if not line.endswith(b'\n'):raise ValueError('request_limit')
-     print(json.dumps(investigate(json.loads(line),args,pool)),flush=True)
+     print(json.dumps(investigate(json.loads(line),args,pool),separators=(',',':')),flush=True)
    else:print(json.dumps(investigate(json.load(sys.stdin),args,pool)))
  finally:cleanup(args.prefix,args.slot,args.run_id)
 if __name__=='__main__':main()

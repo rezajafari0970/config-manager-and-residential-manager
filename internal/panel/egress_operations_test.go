@@ -82,6 +82,14 @@ func TestEgressSnapshotFreezesViewExpiryAndCountryCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := egress.Now()
+	healthDeadline := now + 15000
+	if _, err := s.db.Exec("UPDATE egress_health SET valid_until=?", healthDeadline); err != nil {
+		t.Fatal(err)
+	}
+	exports, _, err := egressSnapshot(ctx, s.db)
+	if err != nil || len(exports) != 1 || exports[0].Until != healthDeadline {
+		t.Fatal("export exceeded health receipt", err)
+	}
 	s.db.Exec("UPDATE egress_jobs SET valid_until=?", now-1)
 	s.db.Exec("UPDATE egress_health SET valid_until=?", now-1)
 	s.db.Exec("UPDATE egress_geo_results SET valid_until=?", now-1)

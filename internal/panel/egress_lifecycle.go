@@ -115,6 +115,11 @@ func inconclusiveRenewal(d egress.Decision, r egress.Report, health string) bool
 			return false
 		}
 	}
+	// The route evaluator can report incomplete binding for a worker which
+	// failed its preflight before recording any evidence.
+	if unmeasuredFirstReason(r, d.Reason) != "" {
+		return true
+	}
 	switch d.Reason {
 	case "driver_session_failed", "driver_subprocess_timeout", "driver_subprocess_failed", "driver_infrastructure_error", "local_resource_pressure", "missing_runtime_asset", "endpoint_dns_failed":
 		return true

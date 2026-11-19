@@ -204,20 +204,3 @@ func countryState(ctx context.Context, q databaseQuery) (map[string]any, error) 
 	}
 	return map[string]any{"policy": p, "match_mode": "any", "codes": egress.CountryCodes(), "counts": counts, "known": known, "shared": shared, "published": published, "unknown": access - known, "window_ms": egress.CountryWindow}, nil
 }
-
-func entryCountries(ctx context.Context, q databaseQuery, hash string) ([]string, error) {
-	rows, e := q.QueryContext(ctx, "SELECT country FROM egress_countries WHERE hash=? AND last_seen>? ORDER BY country", hash, readStamp(ctx)-egress.CountryWindow)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var c string
-		if e = rows.Scan(&c); e != nil {
-			return nil, e
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
-}

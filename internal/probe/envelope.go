@@ -12,17 +12,26 @@ import (
 // DecodeEnvelope unwraps representations, never guesses an encryption key. It
 // keeps the immutable original outside this function and bounds nesting/bytes.
 func DecodeEnvelope(raw []byte) ([]byte, error) {
-	b := bytes.TrimSpace(raw)
+	payload, err := DecodeExactEnvelope(raw)
+	return bytes.TrimSpace(payload), err
+}
+
+// DecodeExactEnvelope preserves the bytes of the innermost JSON object,
+// including framing whitespace, for evidence bound to the launched config.
+func DecodeExactEnvelope(raw []byte) ([]byte, error) {
+	b := raw
 	mustJSON := false
 	for depth := 0; depth < 6; depth++ {
 		if len(b) > repair.MaxBytes {
 			return nil, errors.New("inspection_size_limit")
 		}
+		object := b
+		b = bytes.TrimSpace(b)
 		if len(b) == 0 {
 			return nil, errors.New("custom_json_envelope_invalid")
 		}
 		if b[0] == '{' {
-			return b, nil
+			return object, nil
 		}
 		if b[0] == '"' {
 			mustJSON = true
@@ -66,7 +75,7 @@ func DecodeEnvelope(raw []byte) ([]byte, error) {
 			}
 			return nil, errors.New("custom_json_envelope_invalid")
 		}
-		b = bytes.TrimSpace(decoded)
+		b = decoded
 	}
 	return nil, errors.New("custom_json_envelope_depth")
 }

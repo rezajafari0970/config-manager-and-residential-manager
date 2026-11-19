@@ -45,6 +45,23 @@ func routeHexBytes(s string, n int) bool {
 	return err == nil && len(b) == n
 }
 
+func boundCore(driver, core, sha string) bool {
+	if driver != "xray" && driver != "sing-box" || (core == NativeID) != (driver == "sing-box") {
+		return false
+	}
+	return Cores[core] != "" && Cores[core] == sha
+}
+
+// Both drivers launch the exact bytes whose digest the plan supplies.
+func boundCheck(c Check, expected string) bool {
+	return c.Core && c.Hash == expected && c.RuntimeHash == expected
+}
+
+func boundRound(r Report, hash string, now int64) bool {
+	return r.Version == Version && r.Hash == hash && r.Started > 0 && r.Started >= now-300000 &&
+		r.Finished >= r.Started && r.Finished <= now+2000 && len(r.Samples) <= 256
+}
+
 func routeBound(r Report, p Plan, hash string, now int64) string {
 	if r.Version != Version || r.Hash != hash || r.Started <= 0 || r.Started > r.Finished || r.Finished > now+2000 || r.Started < now-300000 || r.Finished < now-EvidenceTTL {
 		return "stale_or_unbound_receipt"
@@ -55,12 +72,12 @@ func routeBound(r Report, p Plan, hash string, now int64) string {
 	if !p.Complete || len(p.Variants) != 2 || len(r.Checks) != 2 || p.Variants[0].Name != "raw" || p.Variants[1].Name != "template" {
 		return "exact_variants_incomplete"
 	}
-	if r.Waves < 2 || r.Waves > 3 || len(r.Samples) > 256 || len(r.Evidence) > 4 || Cores[r.Core] == "" || Cores[r.Core] != r.CoreSHA {
+	if r.Waves < 2 || r.Waves > 3 || len(r.Samples) > 256 || len(r.Evidence) > 4 || !boundCore(p.Driver, r.Core, r.CoreSHA) {
 		return "driver_receipt_invalid"
 	}
 	for i, v := range p.Variants {
 		c := r.Checks[i]
-		if Hash(v.Config) != v.Hash || c.Name != v.Name || c.Hash != v.Hash || !c.Core || !routeHexBytes(c.RuntimeHash, 32) || p.Driver == "xray" && c.RuntimeHash != v.Hash {
+		if Hash(v.Config) != v.Hash || c.Name != v.Name || !boundCheck(c, v.Hash) {
 			return "variant_binding_failed"
 		}
 	}
@@ -71,7 +88,7 @@ func routeValid(s Sample, r Report) bool {
 	if t, ok := targetFor(s.Domain); ok && t.WhenAdsFamily != 0 && s.Family != t.WhenAdsFamily {
 		return false
 	}
-	return routeHexBytes(s.Source, 32) && routeHexBytes(s.Certificate, 32) && routeHexBytes(s.Response, 32) && routeHexBytes(s.Nonce, 16) && s.Nonce == s.Connection && (s.Family == 4 || s.Family == 6) && s.TLS && s.SameStream && s.Echo && s.Transport == "tcp" && s.Wave >= 1 && s.Wave <= r.Waves && s.At >= r.Started && s.At <= r.Finished+2000
+	return s.Wave >= 1 && s.Wave <= r.Waves && validSource(s, r)
 }
 
 // ObserveRoutes is the shared per-domain evidence engine. The compiled registry

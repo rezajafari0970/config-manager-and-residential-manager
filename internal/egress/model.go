@@ -54,8 +54,14 @@ func Prepare(raw []byte) Plan {
 			continue
 		}
 		original := c.Config
-		if p.Kind == "json" && json.Valid(raw) {
-			original = raw
+		switch p.Kind {
+		case "json", "custom", "httpcustom", "napsternet":
+			// The repair candidate can supply the template. Its bytes cannot
+			// stand in for the raw JSON an individual subscriber receives.
+			original, e = probe.DecodeExactEnvelope(raw)
+			if e != nil {
+				continue
+			}
 		}
 		complete := singlePath(original)
 		return Plan{Driver: "xray", Code: "prepared", Complete: complete, Format: "xray", Variants: []Variant{{"raw", Hash(original), original}, {"template", Hash(common), common}}}

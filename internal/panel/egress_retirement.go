@@ -10,6 +10,9 @@ import (
 // provider outages never become a fabricated negative. Each hit must be a
 // separate, revision-fenced report started after the previous measurement.
 func retirementReason(d egress.Decision, health string, accepted bool) string {
+	if d.State == "DELETED" {
+		return "" // The country guard has already completed permanent removal.
+	}
 	if health == "unhealthy" {
 		return "confirmed_ads_delivery_unhealthy"
 	}
@@ -26,6 +29,7 @@ func (s *Store) retirement(ctx context.Context, tx *sql.Tx, hash, reason string,
 	if err != nil && err != sql.ErrNoRows {
 		return false, 0, err
 	}
+	found := err == nil
 	if eligible {
 		if _, err = tx.ExecContext(ctx, "DELETE FROM egress_retirements WHERE hash=?", hash); err != nil {
 			return false, 0, err
@@ -53,6 +57,9 @@ func (s *Store) retirement(ctx context.Context, tx *sql.Tx, hash, reason string,
 			first = finished
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO egress_retirements(hash,reason,hits,at,first_at) VALUES(?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET reason=excluded.reason,hits=excluded.hits,at=excluded.at,first_at=excluded.first_at`, hash, reason, hits, finished, first)
+	}
+	if err == nil && !found && reason == "confirmed_ads_delivery_unhealthy" {
+		err = retainRetirementSources(ctx, tx, hash)
 	}
 	return hits >= 3, hits, err
 }

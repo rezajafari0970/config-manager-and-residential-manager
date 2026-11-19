@@ -44,6 +44,23 @@ func (s *Store) migrateV33() error {
 	return tx.Commit()
 }
 
+// Start the finite audit from current inputs and retained work. The cold
+// archive can hold many more rows with tested=0 than the active inventory.
+const egressInventoryCandidates = `SELECT u.hash FROM (SELECT DISTINCT artifact_id FROM memberships) m CROSS JOIN egress_unique u ON u.identity=m.artifact_id
+ UNION SELECT u.hash FROM egress_network_review v CROSS JOIN egress_unique u ON u.identity=v.identity
+ UNION SELECT hash FROM egress_first_backlog
+ UNION SELECT hash FROM egress_retirement_sources
+ UNION SELECT hash FROM egress_first_history WHERE phase='active'
+ UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1
+ UNION SELECT u.hash FROM egress_iran_guard g CROSS JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'`
+
+const insertEgressRunMembers = `WITH cohort_scope(hash) AS MATERIALIZED (` + egressInventoryCandidates + `)
+ INSERT INTO egress_run_members(run,hash,accepted)
+ SELECT ?,j.hash,0 FROM cohort_scope c CROSS JOIN egress_jobs j ON j.hash=c.hash
+ WHERE EXISTS(SELECT 1 FROM egress_work w WHERE w.hash=j.hash) AND j.first_completed=0 AND j.tested=0 AND j.ever_accepted=0 AND j.paused=0
+ AND NOT EXISTS(SELECT 1 FROM egress_owners o JOIN input_exclusions x ON x.identity=o.identity WHERE o.hash=j.hash)
+ AND NOT EXISTS(SELECT 1 FROM egress_owners o JOIN egress_iran_guard g ON g.identity=o.identity WHERE o.hash=j.hash AND g.state='BLOCKED')`
+
 // ResetEgress opens a finite audit cohort over outstanding first assessments.
 // Workers retain their leases and schedules. A repeated request for an active
 // cohort reuses it, and a completed cohort with no new inputs remains intact.
@@ -75,10 +92,7 @@ func (s *Store) ResetEgress(ctx context.Context, revision int64) (int64, error) 
 	if err != nil {
 		return 0, err
 	}
-	result, err = tx.ExecContext(ctx, `INSERT INTO egress_run_members(run,hash,accepted)
- SELECT ?,j.hash,0 FROM egress_work j WHERE j.first_completed=0 AND j.tested=0 AND j.ever_accepted=0 AND j.paused=0
- AND NOT EXISTS(SELECT 1 FROM egress_owners o JOIN input_exclusions x ON x.identity=o.identity WHERE o.hash=j.hash)
- AND NOT EXISTS(SELECT 1 FROM egress_owners o JOIN egress_iran_guard g ON g.identity=o.identity WHERE o.hash=j.hash AND g.state='BLOCKED')`, id)
+	result, err = tx.ExecContext(ctx, insertEgressRunMembers, id)
 	if err != nil {
 		return 0, err
 	}

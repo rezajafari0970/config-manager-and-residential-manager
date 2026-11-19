@@ -16,73 +16,60 @@ type IranObservation struct {
 }
 
 func Iran(r Report, p Plan, hash string, now int64) *IranObservation {
-	if len(r.Evidence) > 4 {
+	return findIranSignal(r, p, hash, now, false)
+}
+
+// A disagreement can withhold publication without creating a confirmed guard hit.
+func IranCountryConflict(r Report, p Plan, hash string, now int64) bool {
+	return findIranSignal(r, p, hash, now, true) != nil
+}
+
+func findIranSignal(r Report, p Plan, hash string, now int64, conflict bool) *IranObservation {
+	if !boundRound(r, hash, now) || len(r.Evidence) > 4 {
 		return nil
 	}
-	if x := iranRound(r, p, hash, now); x != nil {
+	connections := connectionCounts(r)
+	if x := iranSignal(r, p, now, connections, conflict); x != nil {
 		return x
 	}
 	for _, part := range r.Evidence {
 		part, ok := resolveAttemptSamples(r, part)
-		if !ok {
+		if !ok || len(part.Evidence) != 0 || !boundRound(part, hash, now) || part.Started < r.Started || part.Finished > r.Finished {
 			continue
 		}
-		if len(part.Evidence) == 0 && len(part.Samples) <= 256 && part.Started >= r.Started && part.Finished <= r.Finished {
-			if x := iranRound(part, p, hash, now); x != nil {
-				return x
-			}
+		if x := iranSignal(part, p, now, connections, conflict); x != nil {
+			return x
 		}
 	}
 	return nil
 }
 
-// Minority-IR conflicts veto publication without becoming confirmed guard hits.
-func IranCountryConflict(r Report, p Plan, hash string, now int64) bool {
-	if len(r.Evidence) > 4 {
-		return false
-	}
-	if iranSignal(r, p, hash, now, true) != nil {
-		return true
-	}
-	for _, part := range r.Evidence {
-		part, ok := resolveAttemptSamples(r, part)
-		if !ok {
-			continue
-		}
-		if len(part.Evidence) == 0 && len(part.Samples) <= 256 && part.Started >= r.Started && part.Finished <= r.Finished && iranSignal(part, p, hash, now, true) != nil {
-			return true
-		}
-	}
-	return false
-}
-func iranRound(r Report, p Plan, hash string, now int64) *IranObservation {
-	return iranSignal(r, p, hash, now, false)
-}
-func iranSignal(r Report, p Plan, hash string, now int64, conflict bool) *IranObservation {
-	if r.Version != Version || r.Hash != hash || r.Started <= 0 || r.Started > r.Finished || r.Started < now-300000 || r.Finished > now+2000 || r.ResourcePressure || Cores[r.Core] == "" || Cores[r.Core] != r.CoreSHA {
+func iranSignal(r Report, p Plan, now int64, connections map[string]int, conflict bool) *IranObservation {
+	if r.ResourcePressure || r.Waves < 1 || r.Waves > 3 || !boundCore(p.Driver, r.Core, r.CoreSHA) || len(r.Checks) > 2 {
 		return nil
 	}
-	// Only the observed variant needs to have run successfully. Failure of the
-	// other variant, controls or payload tests cannot hide authenticated IR.
+	// A successful observation in either exact variant is sufficient.
 	valid := map[string]bool{}
-	for _, v := range p.Variants {
-		for _, c := range r.Checks {
-			if c.Name == v.Name && Hash(v.Config) == v.Hash && c.Hash == v.Hash && c.Core && routeHexBytes(c.RuntimeHash, 32) && (p.Driver != "xray" || c.RuntimeHash == v.Hash) {
-				valid[v.Name] = true
+	for _, c := range r.Checks {
+		if _, duplicate := valid[c.Name]; duplicate {
+			return nil
+		}
+		valid[c.Name] = false
+		for _, v := range p.Variants {
+			if c.Name == v.Name && boundCheck(c, v.Hash) && Hash(v.Config) == v.Hash {
+				valid[c.Name] = true
 			}
 		}
 	}
 	for _, s := range r.Samples {
-		if !valid[s.Variant] || !s.ActualAds || (!conflict && s.Geo.Country != "IR") || !validSource(s, r) {
+		if !valid[s.Variant] || !s.Geo.mentionsIran() || !countrySample(s, r, connections) {
 			continue
 		}
-		// Validate this observation with the same independent provider policy as
-		// publication; route completeness is deliberately not a country prerequisite.
 		one := r
 		one.Samples = []Sample{s}
 		country := observedCountries(one, r.Finished+IranInterval, now)
 		if conflict && country.Status == "country_iran_conflict" || !conflict && country.Complete && len(country.Countries) == 1 && country.Countries[0] == "IR" {
-			return &IranObservation{IranVersion, hash, s.Domain, s.Variant, s.At, country}
+			return &IranObservation{IranVersion, r.Hash, s.Domain, s.Variant, s.At, country}
 		}
 	}
 	return nil
@@ -92,6 +79,11 @@ func iranSignal(r Report, p Plan, hash string, now int64, conflict bool) *IranOb
 // with exactly matching core/check bindings; its pressure flag stays independent.
 func resolveAttemptSamples(r, part Report) (Report, bool) {
 	if !part.SelectedSamples {
+		// Legacy attempt summaries carry bounded wave labels on each sample
+		// but omit the count. The worker never schedules more than three.
+		if part.Waves == 0 {
+			part.Waves = 3
+		}
 		return part, true
 	}
 	if len(part.Samples) != 0 || part.Core != r.Core || part.CoreSHA != r.CoreSHA || part.Hash != r.Hash || part.Version != r.Version || len(part.Checks) != len(r.Checks) {
@@ -102,6 +94,9 @@ func resolveAttemptSamples(r, part Report) (Report, bool) {
 			return part, false
 		}
 	}
-	part.Samples = r.Samples
+	if part.Waves != 0 && part.Waves != r.Waves {
+		return part, false
+	}
+	part.Samples, part.Waves = r.Samples, r.Waves
 	return part, true
 }

@@ -175,8 +175,11 @@ func evaluateProfiles(r Report, p Plan, hash string, now int64) Decision {
 	}
 	sort.Strings(d.Sources)
 	sort.Strings(d.ControlSources)
-	if len(d.Sources) > 0 {
-		d.Route = "PARTIAL_DIFFERENCE"
+	for _, domain := range m.Domains {
+		if slices.ContainsFunc(domain.Variants, func(v RouteVariant) bool { return v.State == "SEPARATE" }) {
+			d.Route = "PARTIAL_DIFFERENCE"
+			break
+		}
 	}
 	if m.IranObserved || d.CountryConflict {
 		d.State = "QUARANTINED"

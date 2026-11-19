@@ -131,3 +131,75 @@ func TestUnmeasuredFirstRequiresExplicitLocalFailureAndNoMeasurements(t *testing
 		}
 	}
 }
+
+func TestInterruptedSlotWithPartialEvidencePreservesFirst(t *testing.T) {
+	r := egress.Report{Code: "local_resource_pressure", ResourcePressure: true,
+		Attempts: []egress.Attempt{{Code: "core_schema_mismatch"}, {Code: "local_resource_pressure"}},
+		Evidence: []egress.Report{{ResourcePressure: true, Samples: []egress.Sample{{Code: "network_failure"}}}},
+	}
+	if got := unmeasuredFirstReason(r, "local_resource_pressure"); got != r.Code {
+		t.Fatalf("interrupted first was consumed: %q", got)
+	}
+	ctx := context.Background()
+	s := testStore(t)
+	newExportSource(t, s, "slot pressure", sourceURI(887))
+	j, err := s.ClaimEgress(ctx)
+	if err != nil || j == nil {
+		t.Fatal("first lease", err)
+	}
+	r.Version, r.Hash = egress.Version, j.Hash
+	r.Started, r.Finished = egress.Now(), egress.Now()
+	r.Evidence[0].Version, r.Evidence[0].Hash = egress.Version, j.Hash
+	if err := s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != nil {
+		t.Fatal(err)
+	}
+	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND first_completed=0 AND tested=0 AND token='' AND reason='local_resource_pressure'", j.Hash)
+	pendingCount(t, s.db, 0, "SELECT first_assessments FROM egress_metrics")
+	r.Evidence = append(r.Evidence, egress.Report{Samples: []egress.Sample{{Code: "network_failure"}}})
+	if got := unmeasuredFirstReason(r, "local_resource_pressure"); got != "" {
+		t.Fatalf("independent clean measurement was discarded: %q", got)
+	}
+}
+
+func TestCompletionRequiresEvidenceBeforeConsumingLease(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	newExportSource(t, s, "driver contract", sourceURI(808))
+	j, err := s.ClaimEgress(ctx)
+	if err != nil || j == nil {
+		t.Fatal("first lease", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		report func() egress.Report
+	}{
+		{"measured without work", func() egress.Report { return egress.Report{Code: "measured"} }},
+		{"driver unavailable for prepared bytes", func() egress.Report { return egress.Report{Code: "driver_unavailable"} }},
+		{"opaque empty envelope", func() egress.Report { return egress.Report{} }},
+		{"measured with mislabeled variant", func() egress.Report {
+			r := syntheticEgress(*j)
+			r.Code = "measured"
+			r.Checks[1].RuntimeHash = r.Hash
+			return r
+		}},
+	} {
+		r := tc.report()
+		r.Hash, r.Version = j.Hash, egress.Version
+		if r.Started == 0 {
+			r.Started = egress.Now()
+			r.Finished = r.Started
+		}
+		if err := s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != ErrInvalid {
+			t.Fatalf("%s accepted or consumed lease: %v", tc.name, err)
+		}
+	}
+	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND first_completed=0 AND tested=0 AND token=?", j.Hash, j.Token)
+	pendingCount(t, s.db, 0, "SELECT first_assessments FROM egress_metrics")
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_events WHERE hash=?", j.Hash)
+	// Older callers legitimately supply the measurements without a transport
+	// code or attempts array. The original lease accepts their corrected receipt.
+	if err := s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: syntheticEgress(*j)}); err != nil {
+		t.Fatal("corrected receipt", err)
+	}
+	pendingCount(t, s.db, 1, "SELECT first_assessments FROM egress_metrics")
+}

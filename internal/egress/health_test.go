@@ -4,7 +4,7 @@ import "testing"
 
 func TestPayloadHealthRequiresBoundReceiptsAndIndependentOutageControl(t *testing.T) {
 	now := Now()
-	p := Plan{Driver: "xray", Variants: []Variant{{Name: "raw", Hash: Hash([]byte("raw"))}, {Name: "template", Hash: Hash([]byte("template"))}}}
+	p := Plan{Driver: "xray", Variants: []Variant{{Name: "raw", Config: []byte("raw"), Hash: Hash([]byte("raw"))}, {Name: "template", Config: []byte("template"), Hash: Hash([]byte("template"))}}}
 	r := Report{Started: now, Finished: now, Core: "xray-26.11.9", CoreSHA: Cores["xray-26.11.9"]}
 	tr := Transfer{Bytes: HealthBytes, CurlExit: 0, HTTPStatus: 200, TLSVerified: true}
 	for _, v := range p.Variants {
@@ -13,6 +13,17 @@ func TestPayloadHealthRequiresBoundReceiptsAndIndependentOutageControl(t *testin
 	}
 	if Health(r, p, now) != "healthy" {
 		t.Fatal("complete payload")
+	}
+	nativePlan, nativeReceipt := p, r
+	nativePlan.Driver = "sing-box"
+	nativeReceipt.Core, nativeReceipt.CoreSHA = NativeID, NativeSHA
+	nativeReceipt.Checks = append([]Check(nil), r.Checks...)
+	if Health(nativeReceipt, nativePlan, now) != "healthy" || Health(nativeReceipt, p, now) != "unknown" {
+		t.Fatal("native health must come from the native driver")
+	}
+	nativeReceipt.Checks[0].RuntimeHash = Hash([]byte("rewritten"))
+	if Health(nativeReceipt, nativePlan, now) != "unknown" {
+		t.Fatal("native health accepted a different runtime")
 	}
 	r.Checks[0].Hash = Hash([]byte("other"))
 	if Health(r, p, now) != "unknown" {

@@ -2,13 +2,14 @@ package panel
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
 func (s *Store) registerPrivateEgress(mux *http.ServeMux) {
@@ -40,7 +41,7 @@ func (s *Store) registerPrivateEgress(mux *http.ServeMux) {
 		respond(w, 200, true)
 	})
 	mux.HandleFunc("POST /egress/complete", func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, egress.MaxCompletionBytes)
 		var c egress.Completion
 		if decode(r, &c) != nil {
 			failure(w, ErrInvalid)
@@ -161,7 +162,7 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("brief") == "1" {
 		reportColumn = "json_object('code',coalesce(json_extract(report,'$.code'),''))"
 	}
-	args := []any{readStamp(ctx)}
+	args := []any{readStamp(ctx), readStamp(ctx) - egress.CountryWindow}
 	if hash := r.URL.Query().Get("hash"); hash != "" {
 		if !validDigest(hash) {
 			failure(w, ErrInvalid)
@@ -177,10 +178,14 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT j.hash,j.kind,j.state,j.reason,j.revision,j.tested,j.valid_until,j.format,j.decision,j.proof,
  CASE WHEN n.hash=j.hash AND n.candidate_hash=j.candidate_hash AND n.checked_at=j.tested THEN n.summary ELSE '{}' END,
  coalesce(n.held,0),coalesce(n.clean_rounds,0),CASE WHEN n.held=1 THEN n.last_adverse ELSE '{}' END,
- CASE WHEN v.identity IS NULL THEN '' WHEN v.attempts<2 OR (j.token!='' AND j.lease_until>?) THEN 'pending' ELSE 'inconclusive' END,` + publicationFlags + `
+ CASE WHEN v.identity IS NULL THEN '' WHEN v.attempts<2 OR (j.token!='' AND j.lease_until>?) THEN 'pending' ELSE 'inconclusive' END,` + publicationFlags + `,
+ (SELECT json_group_array(name) FROM (SELECT DISTINCT s.name FROM memberships m JOIN sources s ON s.id=m.source_id WHERE m.artifact_id=u.identity ORDER BY s.name)),
+ (SELECT json_group_array(country) FROM (SELECT c.country FROM egress_countries c WHERE c.hash=j.hash AND c.last_seen>? ORDER BY c.country)),
+ coalesce(h.status,''),coalesce(h.checked_at,0),coalesce(h.valid_until,0)
  FROM (SELECT hash,candidate_hash,kind,state,reason,revision,tested,valid_until,format,token,lease_until,decision,` + reportColumn + ` AS proof
  FROM ` + table + ` WHERE state!='DELETED'` + filter + ` ORDER BY tested DESC,hash LIMIT 50 OFFSET ?) j
- LEFT JOIN egress_unique u ON u.hash=j.hash LEFT JOIN egress_network_results n ON n.identity=u.identity LEFT JOIN egress_network_review v ON v.identity=u.identity ORDER BY j.tested DESC,j.hash`
+ LEFT JOIN egress_unique u ON u.hash=j.hash LEFT JOIN egress_network_results n ON n.identity=u.identity LEFT JOIN egress_network_review v ON v.identity=u.identity
+ LEFT JOIN egress_health h ON h.hash=j.hash ORDER BY j.tested DESC,j.hash`
 	rows, e = db.QueryContext(ctx, query, args...)
 	if e != nil {
 		failure(w, e)
@@ -191,8 +196,9 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		var h, kind, state, reason, format, decision, report, network, adverse, review string
 		var held, eligible, published bool
 		var cleanRounds int
-		var rev, tested, until int64
-		if e = rows.Scan(&h, &kind, &state, &reason, &rev, &tested, &until, &format, &decision, &report, &network, &held, &cleanRounds, &adverse, &review, &eligible, &published); e != nil {
+		var rev, tested, until, checked, valid int64
+		var sources, countries, health string
+		if e = rows.Scan(&h, &kind, &state, &reason, &rev, &tested, &until, &format, &decision, &report, &network, &held, &cleanRounds, &adverse, &review, &eligible, &published, &sources, &countries, &health, &checked, &valid); e != nil {
 			rows.Close()
 			failure(w, e)
 			return
@@ -241,9 +247,14 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		assessment["eligible"], _ = json.Marshal(eligible)
 		assessment["until"], _ = json.Marshal(until)
 		assessment["published"], _ = json.Marshal(published)
-		entries = append(entries, map[string]any{"hash": h, "kind": kind, "state": state, "route_assessment": route,
+		entry := map[string]any{"hash": h, "kind": kind, "state": state, "route_assessment": route,
 			"network": json.RawMessage(network), "network_held": held, "network_review": review, "network_clean_rounds": cleanRounds, "last_adverse": json.RawMessage(adverse),
-			"residential_eligible": eligible, "published": published, "reason": reason, "revision": rev, "tested": tested, "valid_until": until, "format": format, "decision": assessment, "report": json.RawMessage(report)})
+			"residential_eligible": eligible, "published": published, "reason": reason, "revision": rev, "tested": tested, "valid_until": until, "format": format, "decision": assessment, "report": json.RawMessage(report),
+			"sources": json.RawMessage(sources), "countries": json.RawMessage(countries)}
+		if health != "" {
+			entry["health"] = map[string]any{"status": health, "checked_at": checked, "valid_until": valid, "fresh": valid > readStamp(ctx)}
+		}
+		entries = append(entries, entry)
 	}
 	if e = rows.Err(); e != nil {
 		rows.Close()
@@ -251,44 +262,6 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	for _, entry := range entries {
-		names := []string{}
-		owners, err := db.QueryContext(ctx, "SELECT DISTINCT s.name FROM sources s JOIN memberships m ON m.source_id=s.id JOIN egress_unique u ON u.identity=m.artifact_id WHERE u.hash=? ORDER BY s.name", entry["hash"])
-		if err != nil {
-			failure(w, err)
-			return
-		}
-		for owners.Next() {
-			var name string
-			if err = owners.Scan(&name); err != nil {
-				owners.Close()
-				failure(w, err)
-				return
-			}
-			names = append(names, name)
-		}
-		if err = owners.Err(); err != nil {
-			owners.Close()
-			failure(w, err)
-			return
-		}
-		owners.Close()
-		entry["sources"] = names
-		countries, err := entryCountries(ctx, db, entry["hash"].(string))
-		if err != nil {
-			failure(w, err)
-			return
-		}
-		entry["countries"] = countries
-		var health string
-		var checked, valid int64
-		if err = db.QueryRowContext(ctx, "SELECT status,checked_at,valid_until FROM egress_health WHERE hash=?", entry["hash"]).Scan(&health, &checked, &valid); err == nil {
-			entry["health"] = map[string]any{"status": health, "checked_at": checked, "valid_until": valid, "fresh": valid > readStamp(ctx)}
-		} else if err != sql.ErrNoRows {
-			failure(w, err)
-			return
-		}
-	}
 	var partial int
 	if e = db.QueryRowContext(ctx, "SELECT count(*) FROM egress_inventory WHERE state!='DELETED' AND json_extract(decision,'$.route')='PARTIAL_DIFFERENCE'").Scan(&partial); e != nil {
 		failure(w, e)
@@ -371,6 +344,7 @@ type egressExportEntry struct {
 	Hash          string
 	Candidate     string
 	Until         int64 `json:"-"`
+	Turn          int64 `json:"-"`
 	Format        string
 	Countries     []string
 	Coverage      string
@@ -381,10 +355,11 @@ type egressExportEntry struct {
 func egressSnapshot(ctx context.Context, q databaseQuery) ([]egressExportEntry, string, error) {
 	// Read membership and country history in one statement. The final check runs
 	// under the writer reservation, so a query per config would delay renewals.
-	rows, e := q.QueryContext(ctx, `SELECT e.hash,e.candidate_hash,min(e.valid_until,e.network_valid_until,g.valid_until,c.last_seen+?),e.format,c.country,
+	rows, e := q.QueryContext(ctx, `SELECT e.hash,e.candidate_hash,min(e.valid_until,e.network_valid_until,g.valid_until,h.valid_until,c.last_seen+?),e.format,c.country,
  coalesce(json_extract(e.decision,'$.ads_coverage'),''),coalesce(json_extract(e.decision,'$.qualified_profiles'),'[]'),
- coalesce(json_extract(n.summary,'$.shared_hosting'),'[]')
- FROM egress_export_eligible e JOIN egress_geo_results g ON g.hash=e.hash
+ coalesce(json_extract(n.summary,'$.shared_hosting'),'[]'),coalesce(t.turn,0)
+ FROM egress_export_eligible e JOIN egress_geo_results g ON g.hash=e.hash JOIN egress_health h ON h.hash=e.hash
+ LEFT JOIN egress_turns t ON t.hash=e.hash
  JOIN egress_unique u ON u.hash=e.hash LEFT JOIN egress_network_results n
  ON n.identity=u.identity AND n.hash=e.hash AND n.candidate_hash=e.candidate_hash AND n.checked_at=e.tested
  JOIN egress_countries c ON c.hash=e.hash AND c.last_seen>? ORDER BY e.hash,c.country`, egress.CountryWindow, readStamp(ctx)-egress.CountryWindow)
@@ -396,7 +371,7 @@ func egressSnapshot(ctx context.Context, q databaseQuery) ([]egressExportEntry, 
 	for rows.Next() {
 		var x egressExportEntry
 		var country, profiles, shared string
-		if e = rows.Scan(&x.Hash, &x.Candidate, &x.Until, &x.Format, &country, &x.Coverage, &profiles, &shared); e != nil {
+		if e = rows.Scan(&x.Hash, &x.Candidate, &x.Until, &x.Format, &country, &x.Coverage, &profiles, &shared, &x.Turn); e != nil {
 			return nil, "", e
 		}
 		if len(out) == 0 || out[len(out)-1].Hash != x.Hash {
@@ -426,8 +401,19 @@ func egressSnapshot(ctx context.Context, q databaseQuery) ([]egressExportEntry, 
 	}{revision, out})
 	return out, egress.Hash(b), nil
 }
-func (m egressModule) export(w http.ResponseWriter, r *http.Request) { m.exportAttempt(w, r, 0) }
-func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, attempt int) {
+
+// The snapshot is ordered by hash, which breaks ties between unserved entries.
+func nextEgressHash(entries []egressExportEntry) string {
+	chosen := entries[0]
+	for _, entry := range entries[1:] {
+		if entry.Turn < chosen.Turn {
+			chosen = entry
+		}
+	}
+	return chosen.Hash
+}
+
+func (m egressModule) export(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Ads-Iran-Guard", egress.IranVersion+"; IR-veto; observed-only")
 	if !equal(r.PathValue("token"), m.s.store.digest("egress-export-v2", "all")) {
@@ -439,6 +425,22 @@ func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, atte
 		http.NotFound(w, r)
 		return
 	}
+	// A slow client can keep reading its chosen bytes after the next turn
+	// is committed. Only the selection and commit need serialization.
+	release := func() {}
+	if format == "next.json" {
+		unlock, err := m.s.store.lockRotation(r.Context(), "residential/next")
+		if err != nil {
+			failure(w, err)
+			return
+		}
+		release = sync.OnceFunc(unlock)
+		defer release()
+	}
+	m.exportAttempt(w, r, format, 0, release)
+}
+
+func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, format string, attempt int, release func()) {
 	entries, generation, e := egressSnapshot(r.Context(), m.s.store.reader())
 	if e != nil {
 		failure(w, e)
@@ -454,11 +456,7 @@ func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, atte
 	}
 	var chosen string
 	if format == "next.json" {
-		e = m.s.store.read(r.Context()).QueryRowContext(r.Context(), "SELECT e.hash FROM egress_export_eligible e LEFT JOIN egress_turns t ON t.hash=e.hash ORDER BY coalesce(t.turn,0),e.hash LIMIT 1").Scan(&chosen)
-		if e != nil {
-			failure(w, e)
-			return
-		}
+		chosen = nextEgressHash(entries)
 	}
 	spool, e := newExportSpool()
 	if e != nil {
@@ -534,25 +532,24 @@ func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, atte
 		if attempt < 2 && r.URL.Query().Get("generation") == "" {
 			tx.Rollback()
 			spool.Close()
-			m.exportAttempt(w, r, attempt+1)
+			m.exportAttempt(w, r, format, attempt+1, release)
 			return
 		}
 		http.Error(w, "eligibility changed", 409)
 		return
 	}
-	if chosen != "" && r.Method != http.MethodHead {
-		var first string
-		e = tx.QueryRowContext(r.Context(), "SELECT e.hash FROM egress_export_eligible e LEFT JOIN egress_turns t ON t.hash=e.hash ORDER BY coalesce(t.turn,0),e.hash LIMIT 1").Scan(&first)
-		if e != nil || first != chosen {
-			if attempt < 2 && r.URL.Query().Get("generation") == "" {
-				tx.Rollback()
-				spool.Close()
-				m.exportAttempt(w, r, attempt+1)
-				return
-			}
-			http.Error(w, "rotation advanced; retry", 409)
+	if chosen != "" && nextEgressHash(finalEntries) != chosen {
+		if attempt < 2 {
+			tx.Rollback()
+			spool.Close()
+			m.exportAttempt(w, r, format, attempt+1, release)
 			return
 		}
+		http.Error(w, "rotation advanced; retry", http.StatusConflict)
+		return
+	}
+
+	if chosen != "" && r.Method != http.MethodHead {
 		_, e = tx.ExecContext(r.Context(), "INSERT INTO egress_turns VALUES(?,(SELECT coalesce(max(turn),0)+1 FROM egress_turns)) ON CONFLICT(hash) DO UPDATE SET turn=excluded.turn", chosen)
 		if e != nil {
 			failure(w, e)
@@ -567,6 +564,7 @@ func (m egressModule) exportAttempt(w http.ResponseWriter, r *http.Request, atte
 		failure(w, e)
 		return
 	}
+	release()
 	// A delayed commit cannot extend a proof to the start of delivery.
 	if deadline <= egress.Now() {
 		http.Error(w, "eligibility expired", http.StatusServiceUnavailable)

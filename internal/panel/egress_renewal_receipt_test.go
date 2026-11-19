@@ -55,6 +55,20 @@ func TestRenewalDriverOutagePreservesOnlyOriginalUnexpiredReceipt(t *testing.T) 
 	if err := s.db.QueryRow("SELECT reason,state FROM egress_events WHERE hash=? ORDER BY id DESC LIMIT 1", job.Hash).Scan(&lastReason, &lastState); err != nil || lastReason != "driver_session_failed" || lastState != "UNKNOWN" {
 		t.Fatal("renewal failure is missing from history", lastReason, lastState, err)
 	}
+	// Preflight failures can be wrapped by route-bound validation instead of
+	// appearing as the decision reason. The earlier proof still has its own clock.
+	for _, code := range []string{"core_pin_mismatch", "local_resource_pressure"} {
+		if _, err := s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", job.Hash); err != nil {
+			t.Fatal(err)
+		}
+		j := claim()
+		now := egress.Now()
+		r := egress.Report{Version: egress.Version, Hash: j.Hash, Started: now, Finished: now, Code: code, ResourcePressure: code == "local_resource_pressure"}
+		if err := s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != nil {
+			t.Fatal(err)
+		}
+		pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_export_eligible WHERE hash=? AND tested=? AND valid_until=?", j.Hash, checked, deadline)
+	}
 	if _, err := s.db.Exec("UPDATE egress_jobs SET valid_until=1,next_run=0 WHERE hash=?", job.Hash); err != nil {
 		t.Fatal(err)
 	}

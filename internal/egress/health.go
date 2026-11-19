@@ -48,12 +48,12 @@ func healthProviders(h HealthSample) (int, bool) {
 // negatives require BOTH payload targets failing in BOTH exact runtimes while
 // the same two targets succeed outside the tunnel. Repetition is a store policy.
 func Health(r Report, p Plan, now int64) string {
-	if r.ResourcePressure || r.Started <= 0 || r.Started > r.Finished || now-r.Finished > 300000 || r.Finished > now+2000 || len(r.Health) > 3 || len(p.Variants) != 2 || len(r.Checks) != 2 || Cores[r.Core] == "" || Cores[r.Core] != r.CoreSHA {
+	if r.ResourcePressure || r.Started <= 0 || r.Started > r.Finished || now-r.Finished > 300000 || r.Finished > now+2000 || len(r.Health) > 3 || len(p.Variants) != 2 || len(r.Checks) != 2 || !boundCore(p.Driver, r.Core, r.CoreSHA) {
 		return "unknown"
 	}
 	for i, v := range p.Variants {
 		c := r.Checks[i]
-		if c.Name != v.Name || c.Hash != v.Hash || !c.Core || len(c.RuntimeHash) != 64 || p.Driver == "xray" && c.RuntimeHash != v.Hash {
+		if c.Name != v.Name || Hash(v.Config) != v.Hash || !boundCheck(c, v.Hash) {
 			return "unknown"
 		}
 	}

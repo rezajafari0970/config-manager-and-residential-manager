@@ -414,11 +414,16 @@ func (s *Store) Complete(ctx context.Context, job collect.Job, result collect.Re
 		if result.Staged {
 			unique = stagedCount
 		}
-		eligible, manual, err := eligibleSourceItems(ctx, tx, result, job.Token, stamp)
+		eligible, withhold, err := eligibleSourceItems(ctx, tx, result, job.Token, stamp)
 		if err != nil {
 			return err
 		}
-		globallySuppressed = manual
+		globallySuppressed = withhold
+		if !withhold {
+			if err := recordResponseInputs(ctx, tx, job.ID, result, job.Token); err != nil {
+				return err
+			}
+		}
 		admission, err := sourceAdmission(ctx, tx, job.ID, eligible, result.Raw.Hash, now)
 		if err != nil {
 			return err
@@ -511,8 +516,10 @@ func (s *Store) Complete(ctx context.Context, job collect.Job, result collect.Re
 			return e
 		}
 	}
-	if result.Staged {
-		if e = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM staged t JOIN input_exclusions r ON r.identity=t.identity WHERE t.token=? AND r.manual=1)", job.Token).Scan(&globallySuppressed); e != nil {
+	if result.Staged && !globallySuppressed && result.State != "updated" {
+		if e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM staged t WHERE t.token=?
+ AND (EXISTS(SELECT 1 FROM input_exclusions r WHERE r.identity=t.identity AND r.manual=1)
+ OR EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=t.identity)))`, job.Token).Scan(&globallySuppressed); e != nil {
 			return e
 		}
 	}

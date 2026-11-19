@@ -13,10 +13,19 @@ func unmeasuredFirstReason(r egress.Report, reason string) string {
 	if len(r.Samples)+len(r.Delivery)+len(r.Health) != 0 {
 		return ""
 	}
+	ownPressure := r.Code == "local_resource_pressure" && r.ResourcePressure
 	for _, part := range r.Evidence {
+		if ownPressure && part.ResourcePressure {
+			continue
+		}
 		if len(part.Samples)+len(part.Health)+len(part.Delivery) != 0 {
 			return ""
 		}
+	}
+	// The driver withholds the selected measurements when its own slot hit an
+	// OOM. A previous incompatible core does not settle the interrupted run.
+	if ownPressure {
+		return r.Code
 	}
 	if reason == "input_unavailable" && (r.Code == "driver_unavailable" || r.Code == "input_unavailable") {
 		return reason

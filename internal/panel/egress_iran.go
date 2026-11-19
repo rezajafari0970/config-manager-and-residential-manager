@@ -87,11 +87,18 @@ func (s *Store) applyIran(ctx context.Context, tx *sql.Tx, r egress.Report, p eg
 	if e != nil {
 		return out, e
 	}
+	newGuard := false
 	for _, id := range ids {
 		if signal != nil {
-			if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO egress_iran_guard(identity,state,first_seen) VALUES(?,'QUARANTINED',?)`, id, now); e != nil {
+			res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO egress_iran_guard(identity,state,first_seen) VALUES(?,'QUARANTINED',?)`, id, now)
+			if err != nil {
+				return out, err
+			}
+			n, e := res.RowsAffected()
+			if e != nil {
 				return out, e
 			}
+			newGuard = newGuard || n > 0
 		}
 		var state string
 		var last int64
@@ -129,17 +136,19 @@ func (s *Store) applyIran(ctx context.Context, tx *sql.Tx, r egress.Report, p eg
 	if !out.Quarantined {
 		return out, nil
 	}
-	if _, e = tx.ExecContext(ctx, `UPDATE egress_jobs SET state='QUARANTINED',reason='ads_iran_quarantined',valid_until=0,next_run=min(next_run,?) WHERE state!='DELETED' AND (reason!='ads_iran_quarantined' OR valid_until!=0) AND hash!=? AND hash IN(SELECT o.hash FROM egress_owners o JOIN egress_iran_guard g ON g.identity=o.identity)`, now+egress.IranSpacing, r.Hash); e != nil {
+	if _, e = tx.ExecContext(ctx, `UPDATE egress_jobs SET state='QUARANTINED',reason='ads_iran_quarantined',valid_until=0,next_run=min(next_run,?) WHERE state!='DELETED' AND (reason!='ads_iran_quarantined' OR valid_until!=0) AND hash!=? AND hash IN(SELECT o.hash FROM egress_owners o JOIN egress_iran_guard g ON g.identity=o.identity WHERE g.identity IN(SELECT identity FROM egress_owners WHERE hash=?))`, now+egress.IranSpacing, r.Hash, r.Hash); e != nil {
 		return out, e
 	}
 	// Invalidate cached source responses on the first signal, including aliases.
-	if _, e = tx.ExecContext(ctx, `DELETE FROM responses WHERE source_id IN(SELECT o.source FROM egress_owners o JOIN egress_iran_guard g ON g.identity=o.identity)`); e != nil {
-		return out, e
+	if newGuard {
+		if _, e := tx.ExecContext(ctx, revokeResponseInputsSQL, r.Hash); e != nil {
+			return out, e
+		}
 	}
 	if out.Blocked {
 		// Revoke every representation of every confirmed identity; persistent
 		// input_exclusions also suppress newly fetched renamed copies at admission.
-		rows, e = tx.QueryContext(ctx, `SELECT DISTINCT o.hash FROM egress_owners o JOIN egress_iran_guard g ON g.identity=o.identity JOIN egress_jobs j ON j.hash=o.hash WHERE g.state='BLOCKED' AND j.state!='DELETED'`)
+		rows, e = tx.QueryContext(ctx, `SELECT DISTINCT o.hash FROM egress_owners o JOIN egress_iran_guard g ON g.identity=o.identity JOIN egress_jobs j ON j.hash=o.hash WHERE g.state='BLOCKED' AND j.state!='DELETED' AND g.identity IN(SELECT identity FROM egress_owners WHERE hash=?)`, r.Hash)
 		if e != nil {
 			return out, e
 		}

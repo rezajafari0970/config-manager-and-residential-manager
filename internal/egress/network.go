@@ -144,11 +144,6 @@ func networkKind(s Sample, finished, now int64) string {
 	return n.Kind
 }
 
-func networkRoundValid(r Report, hash string, now int64) bool {
-	return r.Version == Version && r.Hash == hash && r.Started > 0 && r.Started >= now-300000 &&
-		r.Finished >= r.Started && r.Finished <= now+2000 && len(r.Samples) <= 256
-}
-
 type networkScan struct {
 	verdict                  NetworkVerdict
 	domains                  map[string]bool
@@ -176,8 +171,7 @@ type networkFlowEvidence struct {
 // A hosting network and a separated route require independent evidence.
 // Confirm the same hosting attribution in two paired waves of one core attempt.
 func (scan *networkScan) observe(r Report, plan Plan, variantHashes map[string]string, connections map[string]int, seen map[string]bool, selected bool, now int64) {
-	if r.ResourcePressure || Cores[r.Core] == "" || Cores[r.Core] != r.CoreSHA || len(r.Checks) > 2 ||
-		(plan.Driver != "xray" && plan.Driver != "sing-box") || (r.Core == NativeID) != (plan.Driver == "sing-box") {
+	if r.ResourcePressure || !boundCore(plan.Driver, r.Core, r.CoreSHA) || len(r.Checks) > 2 {
 		return
 	}
 	valid := map[string]bool{}
@@ -186,12 +180,7 @@ func (scan *networkScan) observe(r Report, plan Plan, variantHashes map[string]s
 		if _, duplicate := valid[c.Name]; duplicate || !ok {
 			return
 		}
-		valid[c.Name] = c.Hash == hash && c.Core && routeHexBytes(c.RuntimeHash, 32) && (plan.Driver != "xray" || c.RuntimeHash == hash)
-	}
-	// Older attempt summaries omit Waves. Their individual observation labels
-	// remain bound to the original attempt and the three-wave protocol limit.
-	if !selected && r.Waves == 0 {
-		r.Waves = 3
+		valid[c.Name] = boundCheck(c, hash)
 	}
 	if r.Waves < 1 || r.Waves > 3 {
 		return
@@ -317,7 +306,7 @@ func (scan *networkScan) observe(r Report, plan Plan, variantHashes map[string]s
 
 func evaluateExitNetwork(r Report, p Plan, hash string, now int64, route Decision) NetworkVerdict {
 	verdict := NetworkVerdict{Policy: NetworkPolicyVersion, Version: NetworkVersion, State: "unknown", Reason: "ads_network_receipt_unbound"}
-	if !networkRoundValid(r, hash, now) || !p.Complete || len(p.Variants) != 2 || len(r.Evidence) > 4 ||
+	if !boundRound(r, hash, now) || !p.Complete || len(p.Variants) != 2 || len(r.Evidence) > 4 ||
 		p.Variants[0].Name != "raw" || p.Variants[1].Name != "template" {
 		return verdict
 	}
@@ -338,7 +327,7 @@ func evaluateExitNetwork(r Report, p Plan, hash string, now int64, route Decisio
 	scan.observe(r, p, hashes, connections, seen, true, now)
 	for _, part := range r.Evidence {
 		a, ok := resolveAttemptSamples(r, part)
-		if ok && len(a.Evidence) == 0 && a.Started >= r.Started && a.Finished <= r.Finished && networkRoundValid(a, hash, now) {
+		if ok && len(a.Evidence) == 0 && a.Started >= r.Started && a.Finished <= r.Finished && boundRound(a, hash, now) {
 			scan.observe(a, p, hashes, connections, seen, false, now)
 		}
 	}

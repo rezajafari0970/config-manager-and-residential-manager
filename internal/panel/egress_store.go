@@ -27,6 +27,7 @@ const egressClaimCandidates = `WITH history_head(hash) AS MATERIALIZED (SELECT `
  UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1
  UNION SELECT u.hash FROM egress_network_review v CROSS JOIN egress_unique u ON u.identity=v.identity
  UNION SELECT hash FROM egress_first_backlog
+ UNION SELECT hash FROM egress_retirement_sources
  UNION SELECT hash FROM history_head WHERE hash IS NOT NULL
  UNION SELECT u.hash FROM egress_iran_guard g JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'
 ), dispatch(streak,modern) AS MATERIALIZED (SELECT ` + egressDispatchStreak + `,` + egressModernFirstStreak + `) `
@@ -42,8 +43,12 @@ const egressClaimDue = `paused=0 AND (next_run<=:claim_now OR (retry_streak=0 AN
 const egressRenewableNetwork = `NOT EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_results n ON n.identity=u.identity WHERE u.hash=egress_jobs.hash AND n.held=1) AND NOT EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_review v ON v.identity=u.identity WHERE u.hash=egress_jobs.hash)`
 
 func egressClaimPriority(lane string, turn uint64) string {
+	// The withdrawal marker can outlive its confirmation window. Only fresh
+	// evidence needs another urgent measurement; retained jobs still get
+	// their usual maintenance turns after that window.
 	order := `CASE WHEN reason='ads_iran_quarantined' THEN -1
- WHEN EXISTS(SELECT 1 FROM egress_retirements r WHERE r.hash=egress_jobs.hash) THEN 0 `
+ WHEN EXISTS(SELECT 1 FROM egress_retirements r WHERE r.hash=egress_jobs.hash
+ AND r.hits>0 AND r.first_at>:claim_now-600000) THEN 0 `
 	if lane == "followup" && turn%3 == 0 {
 		// A zero deadline can also mean an incomplete result. Give the
 		// expired-proof turn first to receipts from proven residential jobs.
@@ -83,10 +88,12 @@ func egressRankedClaim(lane string, turn uint64) string {
 		preference = "CASE WHEN urgent OR (priority<=0 AND EXISTS(SELECT 1 FROM due threat WHERE threat.urgent)) THEN 0 WHEN queued_at IS NOT NULL THEN 1 ELSE 2 END"
 		maintenanceLane = "followup"
 	}
+	// An interrupted or unmeasured first probe keeps its place from the last
+	// grant. Untouched peers that were already waiting get the next chance.
 	return `WITH due AS MATERIALIZED (
- SELECT egress_jobs.hash,next_run,first_seen,valid_until,` + egressClaimPriority(maintenanceLane, turn) + ` AS priority,
+ SELECT egress_jobs.hash,next_run,first_seen,claimed_at,valid_until,` + egressClaimPriority(maintenanceLane, turn) + ` AS priority,
  EXISTS(SELECT 1 FROM history_head a WHERE a.hash=c.hash) AS historic,
- CASE WHEN ` + egressDiscovery + ` THEN (SELECT u.created FROM egress_unique u WHERE u.hash=c.hash) END AS queued_at,
+ CASE WHEN ` + egressDiscovery + ` THEN (SELECT max(u.created,egress_jobs.claimed_at) FROM egress_unique u WHERE u.hash=c.hash) END AS queued_at,
  CASE WHEN ever_accepted=1 AND tested>0 AND valid_until>0 AND valid_until<=:claim_now+60000
  AND EXISTS(SELECT 1 FROM egress_residential_history h WHERE h.hash=c.hash)
  AND ` + egressRenewableNetwork + ` THEN 1 ELSE 0 END AS urgent
@@ -99,6 +106,7 @@ func egressRankedClaim(lane string, turn uint64) string {
  CASE WHEN priority=4 THEN valid_until END,
  CASE WHEN queued_at IS NOT NULL THEN CASE WHEN modern>=9 THEN NOT historic ELSE historic END END,
  coalesce(queued_at,next_run),
+ CASE WHEN queued_at IS NOT NULL THEN claimed_at END,
  CASE WHEN queued_at IS NULL THEN first_seen END,hash LIMIT 1`
 }
 
@@ -262,13 +270,8 @@ func (s *Store) RenewEgress(ctx context.Context, j egress.Job) error {
 }
 func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	j, r := c.Job, c.Report
-	if !validDigest(j.Hash) || r.Hash != j.Hash || r.Version != egress.Version || len(r.Samples) > 256 || len(r.Attempts) > 8 || len(r.Checks) > 2 || len(r.Health) > 3 || len(r.Evidence) > 4 || len(r.Delivery) > 3 {
+	if !validDigest(j.Hash) || !egress.ValidReportShape(r, j.Hash) {
 		return ErrInvalid
-	}
-	for _, part := range r.Evidence {
-		if len(part.Evidence) != 0 || len(part.Samples) > 256 || len(part.Checks) > 2 || len(part.Health) > 3 || len(part.Delivery) > 3 || part.Hash != j.Hash || part.Version != egress.Version {
-			return ErrInvalid
-		}
 	}
 	b, e := s.openExportBlob(j.Hash)
 	var raw []byte
@@ -281,6 +284,9 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 		raw = nil
 	}
 	plan := egress.Prepare(raw)
+	if !egress.ValidAssessment(r, plan) {
+		return ErrInvalid
+	}
 	now := egress.Now()
 	evaluate := func(now int64) (egress.Decision, string) {
 		d := egress.Evaluate(r, plan, j.Hash, now)
@@ -556,7 +562,7 @@ func (s *Store) revokeEgress(ctx context.Context, tx *sql.Tx, hash, reason strin
 	}
 	aliases := "SELECT o.hash FROM egress_owners o WHERE o.identity IN(SELECT identity FROM egress_owners WHERE hash=?)"
 	for _, q := range []string{
-		"DELETE FROM responses WHERE source_id IN(SELECT source FROM egress_owners WHERE identity IN(SELECT identity FROM egress_owners WHERE hash=?))",
+		revokeResponseInputsSQL,
 		"DELETE FROM staged WHERE identity IN(SELECT identity FROM egress_owners WHERE hash=?)",
 		"DELETE FROM artifacts WHERE id IN(SELECT identity FROM egress_owners WHERE hash=?)",
 	} {

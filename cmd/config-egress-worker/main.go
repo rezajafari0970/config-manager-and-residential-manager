@@ -110,12 +110,17 @@ func clean(helper, prefix string, slot int, run string) {
 }
 func execute(ctx context.Context, c client, driver *driverSession, j egress.Job) {
 	started := egress.Now()
-	p := egress.Prepare(j.Raw)
+	var p egress.Plan
 	r := egress.Report{Version: egress.Version, Hash: j.Hash, Started: started, Finished: started, Code: "driver_unavailable"}
-	if j.Issue != "" {
+	switch {
+	case j.Issue != "":
 		r.Code = j.Issue
+	case egress.Hash(j.Raw) != j.Hash:
+		r.Code = "input_unavailable"
+	default:
+		p = egress.Prepare(j.Raw)
 	}
-	if len(p.Variants) == 2 && egress.Hash(j.Raw) == j.Hash && j.Issue == "" {
+	if len(p.Variants) == 2 {
 		job, cancel := context.WithTimeout(ctx, 220*time.Second)
 		defer cancel()
 		done := make(chan struct{})
@@ -144,7 +149,9 @@ func execute(ctx context.Context, c client, driver *driverSession, j egress.Job)
 		// A valid measurement (including UNKNOWN) is immediately committed.
 		for attempt := 0; attempt < 2; attempt++ {
 			output, err := driver.exchange(job, input)
-			if err == nil && json.Unmarshal(output, &r) == nil {
+			var reply egress.Report
+			if err == nil && json.Unmarshal(output, &reply) == nil && egress.ValidDriverReply(reply, p, j.Hash, started, egress.Now()) {
+				r = reply
 				break
 			}
 			driver.stop()
@@ -210,7 +217,7 @@ func (d *driverSession) start() error {
 	go func() {
 		defer close(responses)
 		scanner := bufio.NewScanner(output)
-		scanner.Buffer(make([]byte, 65536), 1<<20)
+		scanner.Buffer(make([]byte, 65536), egress.MaxCompletionBytes+1) // include the framing newline
 		for scanner.Scan() {
 			body := append([]byte(nil), scanner.Bytes()...)
 			select {

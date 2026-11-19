@@ -2,6 +2,7 @@ package egress
 
 import (
 	"encoding/hex"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -43,6 +44,16 @@ type CountryResult struct {
 	ValidUntil int64             `json:"valid_until"`
 }
 
+func (g CountryFact) mentionsIran() bool {
+	return g.Country == "IR" || slices.ContainsFunc(g.Providers, func(p CountryProvider) bool { return p.Country == "IR" })
+}
+
+func countrySample(s Sample, r Report, connections map[string]int) bool {
+	t, ok := targetFor(s.Domain)
+	return ok && t.Role == "ads" && s.ActualAds && (s.Variant == "raw" || s.Variant == "template") &&
+		connections[s.Connection] == 1 && routeValid(s, r)
+}
+
 // This supplements, never replaces, the independently validated route decision.
 // Every authenticated observation in the qualified profile needs fresh consensus.
 // The independent Iran veto also inspects Ads outside that profile.
@@ -56,9 +67,10 @@ func Countries(r Report, route Decision, now int64) CountryResult {
 		out.Status = "route_unqualified"
 		return out
 	}
+	connections := connectionCounts(r)
 	// Safety still inspects ALL measured Ads, including shared/nonqualifying ones.
 	for _, s := range r.Samples {
-		if !s.ActualAds || !validSource(s, r) {
+		if !s.Geo.mentionsIran() || !countrySample(s, r, connections) {
 			continue
 		}
 		one := r
@@ -90,7 +102,7 @@ func Countries(r Report, route Decision, now int64) CountryResult {
 		filtered := r
 		filtered.Samples = nil
 		for _, sample := range r.Samples {
-			if members[sample.Domain] {
+			if members[sample.Domain] && countrySample(sample, r, connections) {
 				filtered.Samples = append(filtered.Samples, sample)
 			}
 		}
@@ -140,20 +152,12 @@ func observedCountries(r Report, until, now int64) CountryResult {
 	providers := map[string]CountryProvider{}
 	count := 0
 	for _, s := range r.Samples {
-		if !s.ActualAds || !validSource(s, r) {
-			continue
-		}
-		domain := false
-		for _, d := range Domains {
-			if s.Domain == d {
-				domain = true
-			}
-		}
-		if !domain || (s.Variant != "raw" && s.Variant != "template") {
-			continue
-		}
 		g := s.Geo
-		if g.Version != CountryVersion || g.Status != "located" || !ValidCountry(g.Country) || g.At < r.Started || g.At > r.Finished+2000 || g.At > now+2000 || len(g.Providers) < 2 || len(g.Providers) > 8 {
+		if g.Version != CountryVersion || g.At < r.Started || g.At > r.Finished+2000 || g.At > now+2000 || len(g.Providers) < 2 || len(g.Providers) > 8 {
+			return out
+		}
+		disputed := g.Status == "country_provider_disagreement" && g.Country == ""
+		if !disputed && (g.Status != "located" || !ValidCountry(g.Country)) {
 			return out
 		}
 		seen := map[string]bool{}
@@ -191,24 +195,21 @@ func observedCountries(r Report, until, now int64) CountryResult {
 			}
 			providers[p.Name+":"+p.Dataset+":"+p.Country] = p
 		}
-		votes, total := 0, 0
+		votes := map[string]int{}
+		total := 0
 		for _, country := range lineages {
 			if country != "conflict" {
+				votes[country]++
 				total++
-				if country == g.Country {
-					votes++
-				}
 			}
 		}
-		// A fresh minority IR observation blocks publication without being promoted
-		// to a confirmed IR observation for the sticky deny guard.
-		for _, country := range lineages {
-			if country == "IR" && g.Country != "IR" {
-				out.Status = "country_iran_conflict"
-				return out
-			}
+		// A disputed result has no declared country. Trust only independent
+		// votes and never turn a disagreement into a confirmed IR observation.
+		if votes["IR"] > 0 && total > votes["IR"] && g.Country != "IR" {
+			out.Status = "country_iran_conflict"
+			return out
 		}
-		if votes < 2 || votes*2 <= total {
+		if disputed || votes[g.Country] < 2 || votes[g.Country]*2 <= total {
 			out.Status = "country_conflict"
 			return out
 		}

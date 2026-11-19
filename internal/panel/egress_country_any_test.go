@@ -15,6 +15,7 @@ func TestEgressAnyCountrySharedOutputsAndMigration(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	newExportSource(t, s, "three-country", sourceURI(226))
+	newExportSource(t, s, "alias-owner", sourceURI(226))
 	j, err := s.ClaimEgress(ctx)
 	if err != nil || j == nil {
 		t.Fatal(err)
@@ -43,6 +44,28 @@ func TestEgressAnyCountrySharedOutputsAndMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	module := egressModule{app}
+	checkEntry := func(wantCountries []string) {
+		t.Helper()
+		rr := exportRequest(t, app.Handler(), "GET", app.origin+"/api/egress?view=diagnostics&brief=1&hash="+j.Hash)
+		var body struct {
+			Entries []struct {
+				Hash               string
+				Sources, Countries []string
+				Health             struct {
+					Status string
+					Fresh  bool
+				}
+			}
+		}
+		if rr.Code != 200 || json.Unmarshal(rr.Body.Bytes(), &body) != nil || len(body.Entries) != 1 {
+			t.Fatal("missing entry", rr.Code)
+		}
+		row := body.Entries[0]
+		if row.Hash != j.Hash || !reflect.DeepEqual(row.Sources, []string{"alias-owner", "three-country"}) || !reflect.DeepEqual(row.Countries, wantCountries) || row.Health.Status != "healthy" || !row.Health.Fresh {
+			t.Fatal(row)
+		}
+	}
+	checkEntry([]string{"CY", "MX", "TW"})
 	base := app.origin + "/egress-subscription/" + s.digest("egress-export-v2", "all") + "/"
 	check := func(published int) {
 		t.Helper()
@@ -55,10 +78,6 @@ func TestEgressAnyCountrySharedOutputsAndMigration(t *testing.T) {
 		}
 		if !reflect.DeepEqual(info["counts"], map[string]int{"TW": 1, "MX": 1, "CY": 1}) {
 			t.Fatal(info)
-		}
-		countries, err := entryCountries(ctx, s.db, j.Hash)
-		if err != nil || !reflect.DeepEqual(countries, []string{"CY", "MX", "TW"}) {
-			t.Fatal(countries, err)
 		}
 		var retained int
 		if err = s.db.QueryRow("SELECT count(*) FROM egress_jobs WHERE hash=? AND ever_accepted=1 AND state!='DELETED'", j.Hash).Scan(&retained); err != nil || retained != 1 {
@@ -145,4 +164,5 @@ func TestEgressAnyCountrySharedOutputsAndMigration(t *testing.T) {
 	if err != nil || info["published"] != 0 {
 		t.Fatal("expired selected country matched", info, err)
 	}
+	checkEntry([]string{"MX"})
 }
