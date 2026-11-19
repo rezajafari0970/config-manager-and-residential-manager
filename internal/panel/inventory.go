@@ -60,6 +60,9 @@ func (s *Store) migrateV14() error {
 // Queue before any expiry cascade deletes the source-to-artifact association.
 // Never extend an artifact lifetime, clear deletion controls, or enable a source.
 func queueExpiredSources(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	if err := rememberExpiredEgress(ctx, tx, now.UnixMilli()); err != nil {
+		return err
+	}
 	_, e := tx.ExecContext(ctx, `UPDATE sources SET next_run=min(next_run,?),refresh_reason='retention',
  state=CASE WHEN lease_token!='' AND lease_until>? THEN state ELSE 'queued' END
  WHERE enabled=1 AND id IN (

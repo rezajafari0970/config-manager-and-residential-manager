@@ -24,6 +24,7 @@ func (s *Store) ClaimEgress(ctx context.Context) (*egress.Job, error) {
 const egressClaimCandidates = `WITH claim_scope(hash) AS MATERIALIZED (
  SELECT u.hash FROM (SELECT DISTINCT artifact_id FROM memberships) m JOIN egress_unique u ON u.identity=m.artifact_id
  UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1
+ UNION SELECT hash FROM egress_first_backlog
  UNION SELECT u.hash FROM egress_iran_guard g JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'
 ) `
 
@@ -452,6 +453,11 @@ func (s *Store) manageEgress(ctx context.Context, tx *sql.Tx, action string, all
 	}
 	if action != "delete" {
 		_, e := tx.ExecContext(ctx, "UPDATE egress_jobs SET paused=?,revision=revision+1,token='',lease_until=0,valid_until=0,next_run=0,state=CASE WHEN ever_accepted=1 THEN 'QUARANTINED' ELSE state END WHERE ("+condition+") AND state!='DELETED'", action == "disable")
+		return e
+	}
+	// An explicit deletion also cancels withdrawn, unassessed inputs whose
+	// ordinary artifact or temporary deletion control may already have expired.
+	if _, e := tx.ExecContext(ctx, "DELETE FROM egress_first_backlog WHERE "+condition); e != nil {
 		return e
 	}
 	if _, e := tx.ExecContext(ctx, "UPDATE egress_jobs SET revision=revision+1,token='',lease_until=0,valid_until=0 WHERE ("+condition+") AND ever_accepted=0"); e != nil {

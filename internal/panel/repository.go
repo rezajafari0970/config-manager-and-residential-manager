@@ -223,16 +223,17 @@ func (s *Store) SaveSettings(ctx context.Context, v collect.Settings) error {
 		return e
 	}
 	defer tx.Rollback()
-	if e = queueExpiredSources(ctx, tx, time.Now()); e != nil {
+	now := time.Now()
+	if e = queueExpiredSources(ctx, tx, now); e != nil {
 		return e
 	}
-	if _, e = tx.ExecContext(ctx, "DELETE FROM artifacts WHERE expires<=?", time.Now().UnixMilli()); e != nil {
+	if _, e = tx.ExecContext(ctx, "DELETE FROM artifacts WHERE expires<=?", now.UnixMilli()); e != nil {
 		return e
 	}
-	if _, e = tx.ExecContext(ctx, "DELETE FROM responses WHERE expires<=?", time.Now().UnixMilli()); e != nil {
+	if _, e = tx.ExecContext(ctx, "DELETE FROM responses WHERE expires<=?", now.UnixMilli()); e != nil {
 		return e
 	}
-	if _, e = tx.ExecContext(ctx, "DELETE FROM config_controls WHERE expires<=?", time.Now().UnixMilli()); e != nil {
+	if _, e = tx.ExecContext(ctx, "DELETE FROM config_controls WHERE expires<=?", now.UnixMilli()); e != nil {
 		return e
 	}
 	if _, e = tx.ExecContext(ctx, "UPDATE config_controls SET expires=min(expires,created+?)", v.RetentionSeconds*1000); e != nil {
@@ -426,6 +427,9 @@ func (s *Store) Complete(ctx context.Context, job collect.Job, result collect.Re
 	}
 	if result.State == "updated" && (len(result.Items) > 0 || stagedCount > 0) {
 		generation++
+		if e = rememberReplacedEgress(ctx, tx, result, job.ID, job.Token, stamp); e != nil {
+			return e
+		}
 		if _, e = tx.ExecContext(ctx, "DELETE FROM memberships WHERE source_id=?", job.ID); e != nil {
 			return e
 		}
