@@ -119,6 +119,14 @@ func TestEgressStagedInputsSurviveFailedSourceProcessing(t *testing.T) {
 	if n, e := s.StageBatch(ctx, job, result.Items); e != nil || n != 2 {
 		t.Fatal(n, e)
 	}
+	q, err := freezeEgress(ctx, s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounting, err := egressAccounting(ctx, q)
+	if err != nil || accounting["staged_versions"] != 2 || accounting["staged_coverage_missing"] != 0 || accounting["current_identities"] != 0 {
+		t.Fatal("expected two staged registrations before membership commit", accounting, err)
+	}
 	if e = s.Complete(ctx, job, collect.Result{State: "error", ErrorCode: "processing_timeout", Staged: true, HTTPStatus: 200}, time.Now()); e != nil {
 		t.Fatal(e)
 	}

@@ -7,6 +7,10 @@ export function renderAccounting(a){
  $('#egress-inventory').textContent=n(a.current_identities)+' کانفیگ یکتای منابع فعلی · '+n(a.retained_outside_current)+' کانفیگ دارای سابقهٔ مسیر جدا، خارج از منابع فعلی؛ هر هویت فقط یک نمایندهٔ آزمون دارد.';
  $('#egress-queue').textContent=n(a.assessed_versions)+' کانفیگ یکتا با نتیجهٔ بررسی جاری · '+n(a.awaiting_first)+' در انتظار بررسی با معیار فعلی · '+n(q.running)+' در حال بررسی · '+n(q.due)+' آماده · '+n(q.scheduled)+' پیگیری زمان‌بندی‌شده · '+n(q.cached)+' نتیجهٔ ذخیره‌شده بدون تکرار · '+n(q.paused)+' متوقف';
  $('#egress-network-counts').textContent='از '+n(p.route_verified)+' کانفیگ با مسیر جدا و سلامت معتبر، '+n(p.hosting)+' مورد به دلیل خروج دیتاسنتری و '+n(p.mixed)+' مورد به دلیل خروج ترکیبی از رزیدنتال کنار گذاشته شده‌اند. از موارد واجد شرایط، برای '+n(p.eligible_network_unattributed)+' مورد نوع شبکهٔ مسیر جدا مشخص نشده است.';
+ const review=a.safety_review;
+ if(review && (review.iran || review.country_conflict || review.network || review.route_or_health_loss)) {
+  $('#egress-network-counts').textContent+=' از موارد بدون تأیید مسیر جاری، '+n(review.iran)+' مورد در قرنطینهٔ ایران، '+n(review.country_conflict)+' مورد دارای شواهد متناقض دربارهٔ خروجی ایران، '+n(review.network)+' مورد دارای منع شبکهٔ دیتاسنتری یا ترکیبی و '+n(review.route_or_health_loss)+' مورد در انتظار بررسی مجددِ از دست رفتن مسیر یا سلامت‌اند. هر مورد یک‌بار و جدا از صف تمدید رزیدنتال شمرده می‌شود.';
+ }
  if (p.eligible_with_shared_hosting) $('#egress-network-counts').textContent+=' در '+n(p.eligible_with_shared_hosting)+' کانفیگ واجد شرایط، مقصدی خارج از پروفایل تأییدشده از مسیر عادی و دیتاسنتری گذشته است.';
  $('#egress-output-counts').textContent=n(p.published)+' خام سالم = '+n(p.template_count??p.published)+' قالب آزموده = '+n(p.identities)+' هویت ورودی یکتا · '+n(p.country_filtered)+' خارج از انتخاب کشور · '+n(p.country_unknown)+' در انتظار تعیین معتبر کشور';
 }

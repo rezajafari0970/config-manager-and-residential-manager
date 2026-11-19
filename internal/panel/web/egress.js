@@ -5,8 +5,43 @@ import {renderAccounting} from './egress-accounting.js';
 import {profileSummary,profileDetails,networkDetails} from './egress-profiles.js';
 import {healthSettings} from './egress-health.js';
 import {rescanSummary} from './egress-rescan.js';
+function sourceCoverage(){
+ const panel=$('#egress-source-coverage'), status=$('#egress-source-coverage-status'), rows=$('#egress-source-coverage-rows');
+ const prev=$('#egress-source-prev'), next=$('#egress-source-next');
+ let offset=0, pageSize=50, busy=false, nextRefresh=0;
+ function row(label,c){
+  return '<tr><th scope="row">'+esc(label)+'</th>'+[c.current_unique,c.registered,c.current_tested,c.awaiting,c.excluded,c.missing_job].map(v=>'<td>'+fa.format(v)+'</td>').join('')+'</tr>';
+ }
+ async function refresh(force=false){
+  if(!panel.open || busy || (!force && performance.now()<nextRefresh))return;
+  busy=true;
+  prev.disabled=true;next.disabled=true;
+  try{
+   const data=await api('/api/egress/source-coverage?offset='+offset);
+   pageSize=data.page_size;
+   if(offset>0 && !data.sources.length && offset>=data.enabled_sources){
+    offset=Math.max(0,Math.floor((data.enabled_sources-1)/pageSize)*pageSize);
+    nextRefresh=0;
+    return;
+   }
+   rows.innerHTML=row('مجموع یکتای همهٔ منابع فعال',data.global)+data.sources.map(s=>row((s.name||'منبع')+' · '+s.id.slice(0,8),s)).join('');
+   status.textContent=fa.format(data.enabled_sources)+' منبع فعال · '+new Date(data.as_of_ms).toLocaleTimeString('fa-IR')+(data.sources.length?' · ردیف '+fa.format(offset+1)+' تا '+fa.format(offset+data.sources.length):'');
+   prev.disabled=offset===0;
+   next.disabled=offset+data.sources.length>=data.enabled_sources;
+   nextRefresh=performance.now()+30000;
+  }catch{
+   status.textContent='دریافت پوشش منابع ناموفق بود. تلاش مجدد خودکار انجام می‌شود.';
+   nextRefresh=performance.now()+10000;
+  }finally{busy=false}
+ }
+ panel.addEventListener('toggle',()=>{if(panel.open)refresh(true)});
+ prev.onclick=()=>{offset=Math.max(0,offset-pageSize);refresh(true)};
+ next.onclick=()=>{offset+=pageSize;refresh(true)};
+ return refresh;
+}
 export default function Egress(){
  const evidence=egressEvidence($('#egress-list'));
+ const refreshSources=sourceCoverage();
  const health=healthSettings(()=>refresh());
  const countries=countryFilter(()=>{offset=0;refresh()});
  let offset=0,busy=false,state=null;
@@ -21,7 +56,8 @@ export default function Egress(){
   const guard=state.iran_guard; $('#egress-iran-guard').textContent='محافظ ایران: '+fa.format(guard.quarantined_identities)+' هویت قرنطینه · '+fa.format(guard.blocked_identities)+' هویت مسدود پایدار · '+fa.format(guard.overdue_retained)+' کانفیگ نگهداری‌شده با بررسی عقب‌افتاده از ۱۰ دقیقه';
   renderAccounting(state.accounting);
   $('#egress-network-counts').textContent+=profileSummary(state.profile_stats);
-  $('#egress-worker').textContent=(state.now-state.worker.heartbeat<20000?'پردازشگر فعال':'پردازشگر در دسترس نیست')+' · '+fa.format(state.now-state.worker.heartbeat<20000?state.worker.active:0)+' بررسی هم‌زمان · '+fa.format(state.throughput?.completed_10m||0)+' بررسی / '+fa.format(state.throughput?.unique_10m||0)+' کانفیگ یکتا / '+fa.format(state.throughput?.unique_definitive_10m||0)+' کانفیگ با نتیجهٔ قطعی مسیر در ۱۰ دقیقه اخیر · هدف: ۱۰۰۰ در ۱۰ و ۲۰۰۰ در ۱۵ دقیقه؛ نامشخص نتیجهٔ قطعی محسوب نمی‌شود';
+  const t=state.throughput,n=v=>fa.format(v);
+  $('#egress-worker').textContent=(state.now-state.worker.heartbeat<20000?'پردازشگر فعال':'پردازشگر در دسترس نیست')+' · '+n(state.now-state.worker.heartbeat<20000?state.worker.active:0)+' بررسی هم‌زمان · در ۵ دقیقهٔ اخیر '+n(t.unique_definitive_5m)+' کانفیگ یکتا با نتیجهٔ قطعی از هدف '+n(t.target_5m)+' · '+n(t.first_settled_5m)+' اولین نتیجهٔ قطعی، '+n(t.previously_settled_5m)+' دارای نتیجهٔ قطعی قبلی'+(t.settlement_unknown_5m?'، '+n(t.settlement_unknown_5m)+' با سابقهٔ نامعلوم':'')+' · '+n(t.completed_5m)+' آزمون تکمیل‌شده. در ۱۰ دقیقهٔ اخیر '+n(t.unique_definitive_10m)+' کانفیگ یکتا نتیجهٔ قطعی داشته‌اند.';
   $('#egress-metrics').textContent='آمار دورهٔ جدید از '+new Date(state.metrics.since).toLocaleString('fa-IR')+': '+fa.format(state.metrics.completed)+' بررسی ثبت‌شده · '+fa.format(state.metrics.first_assessments)+' اولین بررسی · '+fa.format(state.metrics.lease_recoveries)+' بازیابی کار نیمه‌تمام · '+fa.format(state.metrics.registered)+' ورودی تازه';
   $('#egress-links').innerHTML=Object.entries(state.links).map(([f,u])=>`<div class="subscription-box"><label>${esc(titles[f])}</label><div class="sub-link"><a dir="ltr" href="${esc(u)}">${esc(u)}</a><button class="secondary" data-copy="${esc(f)}">کپی لینک</button></div></div>`).join('');
   const open=evidence.capture();
@@ -30,5 +66,5 @@ export default function Egress(){
  }catch(e){toast(e.message||'دریافت وضعیت ناموفق بود')}finally{busy=false}}
  $('#egress-diagnostics').onchange=()=>{offset=0;refresh()};$('#egress-prev').onclick=()=>{offset=Math.max(0,offset-50);refresh()};$('#egress-next').onclick=()=>{if(state?.entries.length===50){offset+=50;refresh()}};
  $('#egress-links').onclick=async e=>{const b=e.target.closest('[data-copy]');if(b&&state){try{await navigator.clipboard.writeText(state.links[b.dataset.copy]);toast('لینک کپی شد')}catch{toast('لینک را انتخاب و کپی کنید')}}};
- return {filters:()=>({}),render:()=>{},tasks:[refresh]};
+ return {filters:()=>({}),render:()=>{},tasks:[refresh,refreshSources]};
 }

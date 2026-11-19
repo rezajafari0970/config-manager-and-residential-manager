@@ -18,14 +18,19 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
-	var current, raws, missing, retainedOutside, outside, deleted int
+	var current, raws, missing, retainedOutside, outside, deleted, staged, stagedMissing int
 	err = q.QueryRowContext(ctx, `SELECT
  (SELECT count(DISTINCT artifact_id) FROM memberships),
  (SELECT count(DISTINCT raw_hash) FROM memberships),
  (SELECT count(DISTINCT artifact_id) FROM memberships m WHERE NOT EXISTS(SELECT 1 FROM egress_unique u WHERE u.identity=m.artifact_id) AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=m.artifact_id)),
  (SELECT count(*) FROM egress_unique u JOIN egress_inventory j ON j.hash=u.hash WHERE j.ever_accepted=1 AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.artifact_id=u.identity)),
  (SELECT count(*) FROM egress_unique u JOIN egress_inventory j ON j.hash=u.hash WHERE NOT EXISTS(SELECT 1 FROM memberships m WHERE m.artifact_id=u.identity)),
- (SELECT count(*) FROM egress_unique u JOIN egress_jobs j ON j.hash=u.hash WHERE j.state='DELETED')`).Scan(&current, &raws, &missing, &retainedOutside, &outside, &deleted)
+ (SELECT count(*) FROM egress_unique u JOIN egress_jobs j ON j.hash=u.hash WHERE j.state='DELETED'),
+ (SELECT count(DISTINCT t.hash) FROM sources s JOIN staged t ON t.token=s.lease_token AND t.source_id=s.id
+   WHERE s.enabled=1 AND s.lease_until>?),
+ (SELECT count(DISTINCT t.hash) FROM sources s JOIN staged t ON t.token=s.lease_token AND t.source_id=s.id
+   WHERE s.enabled=1 AND s.lease_until>? AND NOT EXISTS(SELECT 1 FROM egress_jobs j WHERE j.hash=t.hash)
+   AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=t.identity))`, now, now).Scan(&current, &raws, &missing, &retainedOutside, &outside, &deleted, &staged, &stagedMissing)
 	if err != nil {
 		return nil, err
 	}
@@ -50,26 +55,62 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
-	var renewalPaused, renewalRunning, renewalDue, renewalScheduled, renewalCached int
-	err = q.QueryRowContext(ctx, `SELECT
- coalesce(sum(paused!=0),0),
- coalesce(sum(paused=0 AND token!='' AND lease_until>?),0),
- coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND (next_run<=? OR (tested>0 AND valid_until>? AND valid_until<=?))),0),
- coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND NOT (next_run<=? OR (tested>0 AND valid_until>? AND valid_until<=?))),0),
- coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash NOT IN(SELECT hash FROM egress_work)),0)
- FROM egress_inventory WHERE ever_accepted=1 AND hash NOT IN(SELECT hash FROM egress_eligible)`, now, now, now, now, now+120000, now, now, now, now+120000, now).Scan(&renewalPaused, &renewalRunning, &renewalDue, &renewalScheduled, &renewalCached)
+	renewal, safety, err := egressRenewalCounts(ctx, q, now)
 	if err != nil {
 		return nil, err
 	}
+	awaiting := renewal["paused"] + renewal["running"] + renewal["due"] + renewal["scheduled"] + renewal["cached"]
 	return map[string]any{
 		"at": now, "unit": "collector_identity", "live_versions": total, "current_identities": current, "current_versions": raws,
 		"current_live_versions": total - outside, "archive_versions": outside, "deleted_versions": deleted,
-		"coverage_missing": missing, "staged_coverage_missing": 0, "staged_versions": 0,
+		"coverage_missing": missing, "staged_coverage_missing": stagedMissing, "staged_versions": staged,
 		"awaiting_first": first, "assessed_versions": assessed, "retained_outside_current": retainedOutside,
 		"queue":   map[string]int{"paused": paused, "running": running, "due": due, "scheduled": scheduled, "cached": cached},
-		"renewal": map[string]int{"paused": renewalPaused, "running": renewalRunning, "due": renewalDue, "scheduled": renewalScheduled, "cached": renewalCached},
-		"publication": map[string]int{"retained": retained, "awaiting_proof": retained - routeEligible, "route_verified": routeEligible, "eligible": eligible,
+		"renewal": renewal, "safety_review": safety,
+		"publication": map[string]int{"retained": retained, "awaiting_proof": awaiting, "route_verified": routeEligible, "eligible": eligible,
 			"hosting": hosting, "mixed": mixed, "network_unverified": routeEligible - eligible - hosting - mixed, "eligible_network_unattributed": eligible - access, "eligible_with_shared_hosting": shared,
 			"country_unknown": eligible - known, "country_filtered": known - published, "published": published, "raw_count": published, "template_count": published, "tested_template_count": published, "distinct_templates": templates, "identities": identities},
 	}, nil
+}
+
+// Partition retained identities without current route proof. A durable veto
+// still applies after route expiry. Its next safety check is not a renewal
+// prospect, even when it has a live worker lease.
+func egressRenewalCounts(ctx context.Context, q databaseQuery, now int64) (map[string]int, map[string]int, error) {
+	renewal := map[string]int{"paused": 0, "running": 0, "due": 0, "scheduled": 0, "cached": 0}
+	safety := map[string]int{"iran": 0, "country_conflict": 0, "network": 0, "route_or_health_loss": 0}
+	rows, err := q.QueryContext(ctx, `SELECT bucket,count(*) FROM (
+ SELECT CASE
+   WHEN g.state='QUARANTINED' THEN 'iran'
+   WHEN j.hash IN (SELECT hash FROM egress_jobs WHERE json_extract(decision,'$.country_conflict')=1) THEN 'country_conflict'
+   WHEN n.held=1 THEN 'network'
+   WHEN r.hash IS NOT NULL THEN 'route_or_health_loss'
+   WHEN j.paused!=0 THEN 'paused'
+   WHEN j.token!='' AND j.lease_until>? THEN 'running'
+   WHEN j.hash NOT IN (SELECT hash FROM egress_work) THEN 'cached'
+   WHEN j.next_run<=? OR (j.tested>0 AND j.valid_until>? AND j.valid_until<=?) THEN 'due'
+   ELSE 'scheduled' END AS bucket
+ FROM egress_inventory j JOIN egress_unique u ON u.hash=j.hash
+ LEFT JOIN egress_iran_guard g ON g.identity=u.identity
+ LEFT JOIN egress_network_results n ON n.identity=u.identity
+ LEFT JOIN egress_retirements r ON r.hash=j.hash
+ WHERE j.ever_accepted=1 AND j.hash NOT IN(SELECT hash FROM egress_eligible)
+ ) GROUP BY bucket`, now, now, now, now+120000)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var bucket string
+		var count int
+		if err := rows.Scan(&bucket, &count); err != nil {
+			return nil, nil, err
+		}
+		if _, isSafetyReview := safety[bucket]; isSafetyReview {
+			safety[bucket] = count
+		} else {
+			renewal[bucket] = count
+		}
+	}
+	return renewal, safety, rows.Err()
 }

@@ -62,8 +62,9 @@ func (s *Store) migrateV14() error {
 func queueExpiredSources(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	_, e := tx.ExecContext(ctx, `UPDATE sources SET next_run=min(next_run,?),refresh_reason='retention',
  state=CASE WHEN lease_token!='' AND lease_until>? THEN state ELSE 'queued' END
- WHERE enabled=1 AND (EXISTS(SELECT 1 FROM memberships m JOIN artifacts a ON a.id=m.artifact_id WHERE m.source_id=sources.id AND a.expires<=?)
- OR EXISTS(SELECT 1 FROM responses r WHERE r.source_id=sources.id AND r.expires<=?))`, now.UnixNano(), now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
+ WHERE enabled=1 AND id IN (
+ SELECT m.source_id FROM artifacts a JOIN memberships m ON m.artifact_id=a.id WHERE a.expires<=?
+ UNION ALL SELECT source_id FROM responses WHERE expires<=?)`, now.UnixNano(), now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
 	return e
 }
 

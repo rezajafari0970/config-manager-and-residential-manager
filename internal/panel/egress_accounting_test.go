@@ -139,3 +139,68 @@ func TestEgressThroughputCountsDistinctConclusiveInputs(t *testing.T) {
 		t.Fatal(v)
 	}
 }
+
+func TestEgressExpiredHoldsStayOutOfResidentialRenewalCounts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	newExportSource(t, s, "held-renewal-accounting", sourceURI(701), sourceURI(702), sourceURI(703), sourceURI(704))
+	var hashes []string
+	for i := 0; i < 4; i++ {
+		job, err := s.ClaimEgress(ctx)
+		if err != nil || job == nil {
+			t.Fatal("expected fresh job", err)
+		}
+		report := syntheticEgress(*job)
+		if i == 0 {
+			for j := range report.Samples {
+				x := &report.Samples[j]
+				if x.ActualAds {
+					x.Network.Kind, x.Network.Provider, x.Network.ASN = "hosting", "vultr", 20473
+				}
+			}
+		}
+		if err = s.CompleteEgress(ctx, egress.Completion{Job: *job, Report: report}); err != nil {
+			t.Fatal(err)
+		}
+		hashes = append(hashes, job.Hash)
+	}
+	now := egress.Now()
+	ctx = context.WithValue(ctx, readTimeKey{}, now)
+	q, err := freezeEgress(ctx, s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(verified, published, renewalDue, network, iran, loss, conflict int) {
+		t.Helper()
+		a, err := egressAccounting(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := a["publication"].(map[string]int)
+		r := a["renewal"].(map[string]int)
+		v := a["safety_review"].(map[string]int)
+		if p["published"] != published || p["route_verified"] != verified || p["retained"] != verified+renewalDue+network+iran+loss+conflict ||
+			p["awaiting_proof"] != renewalDue || r["due"] != renewalDue || r["running"]+r["scheduled"]+r["paused"]+r["cached"] != 0 ||
+			v["network"] != network || v["iran"] != iran || v["route_or_health_loss"] != loss || v["country_conflict"] != conflict {
+			t.Fatal(p, r, v)
+		}
+	}
+	check(4, 3, 0, 0, 0, 0, 0)
+	if _, err = s.db.Exec("UPDATE egress_jobs SET valid_until=1,next_run=0"); err != nil {
+		t.Fatal(err)
+	}
+	check(0, 0, 3, 1, 0, 0, 0)
+	if _, err = s.db.Exec("INSERT INTO egress_iran_guard(identity,state,first_seen) SELECT identity,'QUARANTINED',? FROM egress_unique WHERE hash=?", now, hashes[1]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec("INSERT INTO egress_retirements(hash,reason,hits,at,first_at) VALUES (?, 'confirmed_ads_route_lost', 1, ?, ?)", hashes[2], now, now); err != nil {
+		t.Fatal(err)
+	}
+	check(0, 0, 1, 1, 1, 1, 0)
+	// A minority-IR country conflict is a veto without a confirmed Iran hit.
+	// A conflict that overlaps Iran quarantine must count only once.
+	if _, err = s.db.Exec(`UPDATE egress_jobs SET decision=json_set(decision,'$.country_conflict',1) WHERE hash IN (?,?)`, hashes[1], hashes[3]); err != nil {
+		t.Fatal(err)
+	}
+	check(0, 0, 0, 1, 1, 1, 1)
+}

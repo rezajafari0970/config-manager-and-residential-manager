@@ -81,6 +81,7 @@ func (m egressModule) Register(mux *http.ServeMux) {
 		})
 	}
 	mux.HandleFunc("GET /api/egress", m.state)
+	mux.HandleFunc("GET /api/egress/source-coverage", m.sourceCoverage)
 	// Residential execution is automatic; no public manual queue mutation.
 
 	mux.HandleFunc("POST /api/egress/countries", m.countries)
@@ -289,9 +290,16 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		failure(w, e)
 		return
 	}
-	var completed, definitive, completed10, definitive10, unique5, unique10, conclusive5, conclusive10 int
+	var completed, definitive, completed10, definitive10, unique5, unique10, conclusive5, conclusive10, firstSettled5, previouslySettled5 int
 	now := readStamp(ctx)
-	if e = db.QueryRowContext(ctx, "SELECT coalesce(sum(at>?),0),coalesce(sum(at>? AND definitive=1),0),count(*),coalesce(sum(definitive),0),count(DISTINCT CASE WHEN at>? THEN hash END),count(DISTINCT hash),count(DISTINCT CASE WHEN at>? AND definitive=1 THEN hash END),count(DISTINCT CASE WHEN definitive=1 THEN hash END) FROM egress_events WHERE at>?", now-300000, now-300000, now-300000, now-300000, now-600000).Scan(&completed, &definitive, &completed10, &definitive10, &unique5, &unique10, &conclusive5, &conclusive10); e != nil {
+	start5 := now - 300000
+	if e = db.QueryRowContext(ctx, `SELECT coalesce(sum(e.at>?),0),coalesce(sum(e.at>? AND e.definitive=1),0),count(*),coalesce(sum(e.definitive),0),
+ count(DISTINCT CASE WHEN e.at>? THEN e.hash END),count(DISTINCT e.hash),
+ count(DISTINCT CASE WHEN e.at>? AND e.definitive=1 THEN e.hash END),count(DISTINCT CASE WHEN e.definitive=1 THEN e.hash END),
+ count(DISTINCT CASE WHEN e.at>? AND e.definitive=1 AND s.at>? AND s.at<=? THEN e.hash END),
+ count(DISTINCT CASE WHEN e.at>? AND e.definitive=1 AND s.at<=? THEN e.hash END)
+ FROM egress_events e LEFT JOIN egress_settlements s ON s.hash=e.hash WHERE e.at>? AND e.at<=?`, start5, start5, start5, start5, start5, start5, now, start5, start5, now-600000, now).
+		Scan(&completed, &definitive, &completed10, &definitive10, &unique5, &unique10, &conclusive5, &conclusive10, &firstSettled5, &previouslySettled5); e != nil {
 		failure(w, e)
 		return
 	}
@@ -342,7 +350,7 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		failure(w, err)
 		return
 	}
-	respond(w, 200, map[string]any{"profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": recovery, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": total, "pending": pending, "partial": partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "At least one complete Ads profile must pass the route and delivery checks in raw and template. A verified datacenter exit blocks publication unless the specific flow is proven to share the ordinary controls outside the qualifying profile. Shared hosting is reported separately. Unknown network ownership alone does not block it.", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
+	respond(w, 200, map[string]any{"profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": recovery, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"target_5m": 500, "first_settled_5m": firstSettled5, "previously_settled_5m": previouslySettled5, "settlement_unknown_5m": conclusive5 - firstSettled5 - previouslySettled5, "unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": total, "pending": pending, "partial": partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "At least one complete Ads profile must pass the route and delivery checks in raw and template. A verified datacenter exit blocks publication unless the specific flow is proven to share the ordinary controls outside the qualifying profile. Shared hosting is reported separately. Unknown network ownership alone does not block it.", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
 }
 
 type egressExportEntry struct {
