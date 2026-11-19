@@ -100,7 +100,7 @@ func (s *Store) reconcileEgressNetworkPolicy() error {
 	}
 	defer tx.Rollback()
 	result, err := tx.Exec(`INSERT INTO metadata(key,value) VALUES('ads-exit-network-policy',?)
- ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value`, egress.NetworkVersion)
+ ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value`, egress.NetworkPolicyVersion)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (s *Store) reconcileEgressNetworkPolicy() error {
 		return err
 	}
 	if changed != 0 {
-		if _, err = tx.Exec("UPDATE egress_jobs SET next_run=0 WHERE ever_accepted=1 AND paused=0 AND state!='DELETED'"); err != nil {
+		if _, err = tx.Exec("UPDATE egress_jobs SET next_run=0 WHERE ever_accepted=1 AND paused=0 AND state!='DELETED' AND NOT EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_results n ON n.identity=u.identity WHERE u.hash=egress_jobs.hash)"); err != nil {
 			return err
 		}
 	}
@@ -301,7 +301,7 @@ func saveEgressNetwork(ctx context.Context, tx *sql.Tx, r egress.Report, plan eg
 		}
 		held, cleanRounds, cleanUntil, lastAdverse = true, 0, 0, string(adverse)
 	case clean:
-		if cleanUntil <= now || previousHash != r.Hash || previousCandidate != candidate || previousPolicy != n.Version {
+		if cleanUntil <= now || previousHash != r.Hash || previousCandidate != candidate || previousPolicy != n.Policy {
 			cleanRounds = 0
 		}
 		if r.Started > lastFinished {
@@ -318,7 +318,7 @@ func saveEgressNetwork(ctx context.Context, tx *sql.Tx, r egress.Report, plan eg
  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(identity) DO UPDATE SET hash=excluded.hash,candidate_hash=excluded.candidate_hash,
  policy=excluded.policy,state=excluded.state,reason=excluded.reason,checked_at=excluded.checked_at,valid_until=excluded.valid_until,
  held=excluded.held,clean_rounds=excluded.clean_rounds,last_finished=excluded.last_finished,clean_until=excluded.clean_until,
- last_adverse=excluded.last_adverse,summary=excluded.summary`, identity, r.Hash, candidate, n.Version, n.State, n.Reason, now, until,
+ last_adverse=excluded.last_adverse,summary=excluded.summary`, identity, r.Hash, candidate, n.Policy, n.State, n.Reason, now, until,
 		held, cleanRounds, max(r.Finished, lastFinished), cleanUntil, lastAdverse, string(b))
 	return held && clean && cleanRounds == 1, err
 }

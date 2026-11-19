@@ -5,6 +5,8 @@ HERE=pathlib.Path(__file__).parent
 def load(name,file):
  spec=importlib.util.spec_from_file_location(name,HERE/file);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
 session=load('egress_session','egress-session.py');driver=load('egress_driver','egress-probe.py')
+BASE_TARGETS=[t for t in session.DEFAULT_TARGETS if not t.get('when_ads_family')]
+V6_CONTROLS={t['domain'] for t in session.DEFAULT_TARGETS if t.get('when_ads_family')==6}
 class DiscoveryContracts(unittest.TestCase):
  def test_discovery_measures_both_variants_and_all_three_waves_despite_overlap(self):
   import base64,contextlib,hashlib,types,time
@@ -18,7 +20,7 @@ class DiscoveryContracts(unittest.TestCase):
     if args[-1].endswith('egress-session.py'):
      q=json.loads(kw['input']);calls.append(q);rows=[]
      for wave in range(1,q['waves']+1):
-      for i,t in enumerate(q['targets']):
+      for i,t in enumerate(t for t in q['targets'] if not t.get('when_ads_family')):
        nonce=f'{wave:016x}{i:016x}'
        rows.append(dict(domain=t['domain'],variant=q['variant'],wave=wave,nonce=nonce,connection=nonce,ip='1.1.1.1',family=4,tls=True,same_stream=True,echo=True,actual_ads=t['role']=='ads'))
      return types.SimpleNamespace(stdout=json.dumps(rows).encode())
@@ -31,7 +33,7 @@ class DiscoveryContracts(unittest.TestCase):
    self.assertEqual(old['code'],'measured');self.assertEqual(len(old['checks']),2);self.assertEqual(len(old['evidence']),1);self.assertTrue(old['evidence'][0]['selected_samples']);self.assertEqual(old['evidence'][0]['samples'],[])
    calls.clear();req['discovery']=True;new=driver.investigate(req,args,pool)
   self.assertEqual(len(new['checks']),2);self.assertEqual(new['code'],'measured')
-  self.assertEqual(len(new['samples']),6*len(session.DEFAULT_TARGETS))
+  self.assertEqual(len(new['samples']),6*len(BASE_TARGETS))
   self.assertEqual([q['variant'] for q in calls],['raw','template'])
   for q in calls:self.assertEqual(q['waves'],3);self.assertTrue(q['sequential']);self.assertFalse(q['adaptive'])
 class RenewalBudgetContracts(unittest.TestCase):
@@ -68,6 +70,30 @@ class Contracts(unittest.TestCase):
  def test_second_authority_not_assumed(self):
   self.assertFalse(session.authority({'subjectAltName':[('DNS','*.doubleclick.net')]},'www.google.com'))
 
+class IPv6EchoContracts(unittest.TestCase):
+ def test_family_and_authority_are_bound_to_the_socks_connection(self):
+  from unittest.mock import AsyncMock,Mock,patch
+  for domain in sorted(V6_CONTROLS):
+   for ip,want in [('2606:4700:4700::1111',True),('1.1.1.1',False)]:
+    with self.subTest(domain=domain,ip=ip):
+     reader=AsyncMock()
+     reader.readexactly.side_effect=[b'\x05\x00',b'\x05\x00\x00\x01',bytes(6)]
+     writer=Mock()
+     writer.drain=AsyncMock();writer.start_tls=AsyncMock()
+     cert=writer.get_extra_info.return_value
+     cert.getpeercert.side_effect=lambda binary_form=False:b'cert' if binary_form else {'subjectAltName':[('DNS',domain)]}
+     nonce='c'*32
+     responses=[(200,{},json.dumps({'ip':ip}).encode())]
+     if domain=='ipv6.google.com':
+      responses=[(200,{},b'robots'),(429,{},f'IP address: {ip}<br>{nonce}'.encode())]
+     with patch.object(session.uuid,'uuid4',return_value=Mock(hex=nonce)),patch.object(asyncio,'open_connection',new=AsyncMock(return_value=(reader,writer))),patch.object(session,'read_response',new=AsyncMock(side_effect=responses)):
+      row=asyncio.run(session.measure(domain,'raw',1,3))
+     self.assertEqual(row['echo'],want);self.assertEqual(row['family'],6 if want else 0)
+     if not want:self.assertEqual(row['code'],'control_family_mismatch')
+     self.assertEqual(writer.start_tls.await_args.kwargs['server_hostname'],domain)
+     sent=[call.args[0] for call in writer.write.call_args_list]
+     self.assertEqual(sent[1],b'\x05\x01\x00'+session.socks_target(domain)+b'\x01\xbb')
+     for request in sent[2:]:self.assertIn(b'\r\nHost: '+domain.encode()+b'\r\n',request)
 class PerformanceContracts(unittest.TestCase):
  def test_safe_repeated_nonframing_header(self):
   async def check():
@@ -80,27 +106,27 @@ class PerformanceContracts(unittest.TestCase):
    arrived=[];all_started=asyncio.Event()
    async def fake(domain,variant,wave,timeout,control_ipv4=None,target=None):
     arrived.append((domain,wave))
-    if len(arrived)==min(12,3*len(session.DEFAULT_TARGETS)):all_started.set()
+    if len(arrived)==min(12,3*len(BASE_TARGETS)):all_started.set()
     await asyncio.wait_for(all_started.wait(),5)
     return dict(domain=domain,wave=wave,echo=True,family=4,actual_ads=domain in session.DOMAINS)
    session.measure=fake
    rows=await session.session({'variant':'raw','waves':3})
-   self.assertEqual(len(arrived),3*len(session.DEFAULT_TARGETS));self.assertEqual(len(rows),3*len(session.DEFAULT_TARGETS))
+   self.assertEqual(len(arrived),3*len(BASE_TARGETS));self.assertEqual(len(rows),3*len(BASE_TARGETS))
    self.assertEqual({x['wave'] for x in rows},{1,2,3})
   try:asyncio.run(run())
   finally:session.measure=original
- def test_ipv6_controls_share_primary_deadline(self):
+ def test_ipv6_controls_follow_primary_wave_within_its_budget(self):
   original=session.measure
   async def run():
    arrived=[];all_started=asyncio.Event()
    async def fake(domain,variant,wave,timeout,control_ipv4=None,target=None):
     arrived.append(domain)
-    if len(arrived)==len(session.DEFAULT_TARGETS):all_started.set()
+    if len(arrived)==len(BASE_TARGETS):all_started.set()
     await asyncio.wait_for(all_started.wait(),5)
-    return dict(domain=domain,wave=wave,echo=True,family=6 if domain in session.DOMAINS else 4,actual_ads=domain in session.DOMAINS)
+    return dict(domain=domain,wave=wave,echo=True,family=6 if domain in session.DOMAINS or domain in V6_CONTROLS else 4,actual_ads=domain in session.DOMAINS,ip=domain,tls=True,same_stream=True)
    session.measure=fake
    rows=await session.session({'variant':'raw','waves':1})
-   self.assertEqual(len(arrived),len(session.DEFAULT_TARGETS));self.assertEqual(len(rows),len(session.DEFAULT_TARGETS))
+   self.assertEqual(set(arrived[len(BASE_TARGETS):]),V6_CONTROLS);self.assertEqual(len(rows),len(session.DEFAULT_TARGETS))
   try:asyncio.run(run())
   finally:session.measure=original
  def test_max_slot_is_disjoint_and_owned(self):
@@ -183,7 +209,7 @@ class RegressionContracts(unittest.TestCase):
   session.measure=fake
   try:
    rows=asyncio.run(session.session({'variant':'raw','waves':3,'sequential':True}))
-   self.assertEqual(len(rows),3*len(session.DEFAULT_TARGETS));self.assertEqual(max(overlap),1)
+   self.assertEqual(len(rows),3*len(BASE_TARGETS));self.assertEqual(max(overlap),1)
   finally:session.measure=original
 class PrivacyContracts(unittest.TestCase):
  def test_only_job_local_opaque_equality_survives(self):
@@ -213,13 +239,39 @@ class AdaptiveContracts(unittest.TestCase):
   finally:session.measure=original
  def test_two_complete_paired_waves_skip_third(self):
   rows,calls=self.simulate(lambda r:None)
-  self.assertEqual(len(rows),2*len(session.DEFAULT_TARGETS));self.assertEqual({w for d,w in calls},{1,2})
+  self.assertEqual(len(rows),2*len(BASE_TARGETS));self.assertEqual({w for d,w in calls},{1,2})
  def test_third_wave_repeats_required_ads_and_comparison_controls(self):
   def change(r):
    if r['domain']==session.DOMAINS[0] and r['wave']==1:r['echo']=False
   rows,calls=self.simulate(change)
   self.assertEqual({d for d,w in calls if w==3},{t['domain'] for t in session.DEFAULT_TARGETS if t.get('required')})
-  self.assertEqual(len(rows),2*len(session.DEFAULT_TARGETS)+sum(t.get("required",False) for t in session.DEFAULT_TARGETS))
+  self.assertEqual(len(rows),2*len(BASE_TARGETS)+sum(t.get("required",False) for t in session.DEFAULT_TARGETS))
+ def test_ipv6_only_probes_fill_only_missing_groups_in_each_wave(self):
+  for existing,wanted in [(set(),V6_CONTROLS),({'www.google.com'},{'api6.ipify.org'}),({'www.cloudflare.com'},{'ipv6.google.com'}),({'www.google.com','www.cloudflare.com'},set())]:
+   with self.subTest(existing=existing):
+    def change(r):
+     if r['actual_ads'] or r['domain'] in existing or r['domain'] in V6_CONTROLS:r['family']=6
+    rows,calls=self.simulate(change)
+    self.assertEqual({w for d,w in calls},{1,2})
+    for wave in (1,2):
+     self.assertEqual({d for d,w in calls if w==wave and d in V6_CONTROLS},wanted)
+ def test_authenticated_shared_ipv6_or_unverified_ads_skips_extra_connections(self):
+  for shared in (True,False):
+   with self.subTest(shared=shared):
+    def change(r):
+     if r['actual_ads'] or r['domain']=='www.google.com':
+      r.update(family=6,ip='ordinary-v6')
+      if r['actual_ads'] and not shared:r['same_stream']=False
+    rows,calls=self.simulate(change)
+    self.assertFalse(any(d in V6_CONTROLS for d,w in calls))
+ def test_failed_ipv6_probes_are_bounded_to_one_per_domain_per_wave(self):
+  def change(r):
+   if r['actual_ads']:r['family']=6
+   if r['domain'] in V6_CONTROLS:r.update(echo=False,ip='',family=0)
+  rows,calls=self.simulate(change)
+  self.assertEqual({w for d,w in calls},{1,2,3})
+  for wave in (1,2,3):
+   self.assertCountEqual([d for d,w in calls if w==wave and d in V6_CONTROLS],V6_CONTROLS)
  def test_family_change_needs_third_wave(self):
   def change(r):
    if r['domain'] in session.DOMAINS and r['wave']==2:r['family']=6
@@ -296,6 +348,8 @@ class SchedulingContracts(unittest.TestCase):
   self.assertGreaterEqual(driver.scheduling.session_deadline(32,3,8,False),82)
   self.assertEqual(driver.scheduling.session_deadline(10,2,3,False),25)
   self.assertEqual(driver.scheduling.session_deadline(10,3,8,True),34)
+  for sequential in (True,False):
+   self.assertEqual(driver.scheduling.session_deadline(10,3,8,sequential,2),58)
  def test_transport_driver_controls_ordering_without_shortening_budget(self):
   for network,want in [('tcp',False),('ws',False),('grpc',False),('xhttp',True),('splithttp',True)]:
    cfg={'outbounds':[{'streamSettings':{'network':network}}]}

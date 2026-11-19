@@ -57,10 +57,11 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	err = q.QueryRowContext(ctx, `SELECT
  coalesce(sum(n.held=1 AND json_extract(n.last_adverse,'$.state')='hosting'),0),
  coalesce(sum(n.held=1 AND json_extract(n.last_adverse,'$.state')='mixed'),0),
- coalesce(sum(n.held=0 AND n.state='access' AND n.hash=e.hash AND n.candidate_hash=e.candidate_hash AND n.checked_at=e.tested AND n.valid_until>?),0),
- coalesce(sum(n.held=0 AND n.hash=e.hash AND n.candidate_hash=e.candidate_hash AND n.checked_at=e.tested AND json_array_length(n.summary,'$.shared_hosting')>0),0)
+ coalesce(sum(v.identity IS NULL AND n.held=0 AND n.state='access' AND n.hash=e.hash AND n.candidate_hash=e.candidate_hash AND n.checked_at=e.tested AND n.valid_until>?),0),
+ coalesce(sum(v.identity IS NULL AND n.held=0 AND n.hash=e.hash AND n.candidate_hash=e.candidate_hash AND n.checked_at=e.tested AND json_array_length(n.summary,'$.shared_hosting')>0),0)
  FROM egress_eligible e JOIN egress_unique u ON u.hash=e.hash
- LEFT JOIN egress_network_results n ON n.identity=u.identity`, now).Scan(&hosting, &mixed, &access, &shared)
+ LEFT JOIN egress_network_results n ON n.identity=u.identity
+ LEFT JOIN egress_network_review v ON v.identity=u.identity`, now).Scan(&hosting, &mixed, &access, &shared)
 	if err != nil {
 		return nil, err
 	}
@@ -88,12 +89,13 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 // prospect, even when it has a live worker lease.
 func egressRenewalCounts(ctx context.Context, q databaseQuery, now int64) (map[string]int, map[string]int, error) {
 	renewal := map[string]int{"paused": 0, "running": 0, "due": 0, "scheduled": 0, "cached": 0}
-	safety := map[string]int{"iran": 0, "country_conflict": 0, "network": 0, "route_or_health_loss": 0}
+	safety := map[string]int{"iran": 0, "country_conflict": 0, "network": 0, "route_or_health_loss": 0, "network_review": 0}
 	rows, err := q.QueryContext(ctx, `SELECT bucket,count(*) FROM (
  SELECT CASE
    WHEN g.state='QUARANTINED' THEN 'iran'
    WHEN j.hash IN (SELECT hash FROM egress_jobs WHERE json_extract(decision,'$.country_conflict')=1) THEN 'country_conflict'
    WHEN n.held=1 THEN 'network'
+   WHEN v.identity IS NOT NULL THEN 'network_review'
    WHEN r.hash IS NOT NULL THEN 'route_or_health_loss'
    WHEN j.paused!=0 THEN 'paused'
    WHEN j.token!='' AND j.lease_until>? THEN 'running'
@@ -104,6 +106,7 @@ func egressRenewalCounts(ctx context.Context, q databaseQuery, now int64) (map[s
  LEFT JOIN egress_iran_guard g ON g.identity=u.identity
  LEFT JOIN egress_network_results n ON n.identity=u.identity
  LEFT JOIN egress_retirements r ON r.hash=j.hash
+ LEFT JOIN egress_network_review v ON v.identity=u.identity
  WHERE j.ever_accepted=1 AND j.hash NOT IN(SELECT hash FROM egress_eligible)
  ) GROUP BY bucket`, now, now, now, now+120000)
 	if err != nil {

@@ -69,7 +69,8 @@ func TestVultrWithSplitControlsAndMixedTemplateIPv6(t *testing.T) {
 		}
 	}
 	d = Evaluate(r, p, r.Hash, now)
-	if !d.Network.BlocksResidential() || d.Network.Eligible || d.Network.Reason != "ads_mixed_exit" || d.Network.Domain != "securepubads.g.doubleclick.net" || d.Network.Variant != "template" || d.Network.Family != 6 || len(d.Network.Families) != 2 {
+	want := SharedNetwork{NetworkFlow{"securepubads.g.doubleclick.net", "template", 6}, "vultr", 20473}
+	if d.Network.BlocksResidential() || d.Network.Eligible || d.Network.Reason != "ads_hosting_route_unresolved" || !slices.Contains(d.Network.UnresolvedHosting, want) || len(d.Network.Families) != 2 || !d.Eligible || !slices.Equal(d.QualifiedProfiles, []string{profiles[1].ID}) {
 		t.Fatal(d.Network)
 	}
 }
@@ -117,14 +118,14 @@ func TestLegacyProfileRestoredWithOnlyObservedHostingVeto(t *testing.T) {
 	if !d.Eligible || len(d.QualifiedProfiles) != 1 || d.Network.BlocksResidential() || d.Network.State != "unknown" {
 		t.Fatal(d.Network, d.QualifiedProfiles)
 	}
-	// The failing second profile still vetoes when an actual Ads connection has a
-	// verified datacenter exit. Failure to classify all other peers changes nothing.
+	// The failing second profile still vetoes when repeated paired Ads connections have a
+	// verified separated datacenter exit. Failure to classify all other peers changes nothing.
 	domain := r.Delivery[0].Assets[1].Domain
 	populated, _, _ := networkFixture()
 	var found bool
 	for i := range r.Samples {
 		s := &r.Samples[i]
-		if s.Domain == domain && s.Variant == "template" && s.Wave == 2 {
+		if s.Domain == domain && s.Variant == "template" && s.Wave >= 2 {
 			s.Network = populated.Samples[i].Network
 			s.Network.CheckedAt = now
 			s.Network.ValidUntil = now + EvidenceTTL
@@ -158,6 +159,14 @@ func TestClearanceRequiresEveryPreviouslyObservedHostingFlow(t *testing.T) {
 				family = 6
 			}
 			setHosting(s, family)
+		}
+	}
+	for _, sample := range r.Samples {
+		if sample.Variant == second.Variant && (sample.Domain == "www.google.com" || sample.Domain == "api.ipify.org") {
+			sample.Family, sample.Source = 6, Hash([]byte("fixture ordinary IPv6"))
+			sample.Nonce = Hash([]byte("v6" + sample.Connection))[:32]
+			sample.Connection = sample.Nonce
+			r.Samples = append(r.Samples, sample)
 		}
 	}
 	adverse := Evaluate(r, p, r.Hash, now).Network
@@ -303,12 +312,21 @@ func TestOneReplayedHostingConnectionCannotDisappearBehindTwoCleanWaves(t *testi
 
 func TestNetworkEarlierAttemptVetoAndUnboundControl(t *testing.T) {
 	r, p, now := networkFixture()
-	s := r.Samples[0]
-	setHosting(&s, 4)
-	s.Nonce = Hash([]byte("previous-core-specific-connection"))[:32]
-	s.Connection = s.Nonce
 	part := r
-	part.Checks, part.Samples, part.Waves = r.Checks[:1], []Sample{s}, 0
+	part.Checks, part.Samples, part.Waves = r.Checks[:1], nil, 0
+	for _, s := range r.Samples {
+		if s.Variant != "raw" || s.Wave > 2 {
+			continue
+		}
+		if s.Domain == Domains[0] {
+			setHosting(&s, 4)
+		} else if s.Domain != "www.google.com" && s.Domain != "api.ipify.org" {
+			continue
+		}
+		s.Nonce = Hash([]byte("earlier" + s.Connection))[:32]
+		s.Connection = s.Nonce
+		part.Samples = append(part.Samples, s)
+	}
 	r.Evidence = []Report{part}
 	decide := func() NetworkVerdict { return Evaluate(r, p, r.Hash, now).Network }
 	if n := decide(); n.Eligible || n.State != "mixed" {
@@ -324,8 +342,91 @@ func TestNetworkEarlierAttemptVetoAndUnboundControl(t *testing.T) {
 	} {
 		r.Evidence[0] = cloneReceipt(part)
 		change(&r.Evidence[0])
-		if n := decide(); !n.Eligible {
-			t.Fatal("unbound or control evidence suppressed a proven network", n)
+		if n := decide(); n.BlocksResidential() {
+			t.Fatal("unbound or control observation established a datacenter hold", n)
 		}
+	}
+}
+
+func TestUnresolvedHostingCannotQualifyItsOwnProfile(t *testing.T) {
+	r, p, now := networkFixture()
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		// Leave the other waves intact, so the base route and delivery
+		// qualify independently of the ambiguous IPv6 hosting claim.
+		if s.Wave == 1 && s.Variant == "raw" && (s.Domain == profiles[0].Domains[0] || s.Domain == profiles[1].Domains[0]) {
+			setHosting(s, 6)
+		}
+	}
+	d := Evaluate(r, p, r.Hash, now)
+	if d.Network.Policy != NetworkPolicyVersion || d.Eligible || d.Negative || d.Until != 0 || d.State != "UNKNOWN" || d.Reason != "ads_hosting_route_unresolved" || d.Network.BlocksResidential() || len(d.QualifiedProfiles) != 0 || len(d.Network.UnresolvedHosting) != 2 {
+		t.Fatal(d.State, d.Reason, d.QualifiedProfiles, d.Network)
+	}
+}
+
+func TestSharedDatacenterWithoutQualifiedProfile(t *testing.T) {
+	r, p, now := networkFixture()
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		if s.ActualAds {
+			setHosting(s, 4)
+			s.Source = Hash([]byte("1.1.1.1"))
+			s.Network.Source = s.Source
+		}
+	}
+	d := Evaluate(r, p, r.Hash, now)
+	if !d.Negative || d.State != "NO_SPLIT" || d.Network.BlocksResidential() || !d.Network.SharedHostingOnly() || len(d.Network.SharedHosting) != len(Domains)*2 {
+		t.Fatal(d.State, d.Reason, d.Network)
+	}
+}
+
+func TestHostingAttributionNeverCombinesDifferentAttemptsOrOrigins(t *testing.T) {
+	for _, mode := range []string{"wave", "attempt", "provider", "asn", "variant", "domain"} {
+		t.Run(mode, func(t *testing.T) {
+			r, p, now := networkFixture()
+			part := r
+			part.Samples = nil
+			for i := range r.Samples {
+				s := &r.Samples[i]
+				if s.Wave > 2 || s.Variant != "raw" {
+					continue
+				}
+				if s.Domain == Domains[0] {
+					setHosting(s, 4)
+					if s.Wave == 2 {
+						switch mode {
+						case "wave":
+							s.Wave = 1
+						case "attempt":
+							sCopy := *s
+							part.Samples = append(part.Samples, sCopy)
+							s.Network = nil
+							s.Nonce = Hash([]byte("replace" + s.Connection))[:32]
+							s.Connection = s.Nonce
+						case "provider":
+							s.Network.Provider = "other"
+						case "asn":
+							s.Network.ASN++
+						case "variant":
+							s.Variant = "template"
+						case "domain":
+							s.Domain = Domains[1]
+						}
+					}
+				} else if mode == "attempt" && (s.Domain == "www.google.com" || s.Domain == "api.ipify.org") {
+					c := *s
+					c.Nonce = Hash([]byte("previous" + c.Connection))[:32]
+					c.Connection = c.Nonce
+					part.Samples = append(part.Samples, c)
+				}
+			}
+			if mode == "attempt" {
+				r.Evidence = []Report{part}
+			}
+			d := Evaluate(r, p, r.Hash, now)
+			if d.Network.BlocksResidential() || len(d.Network.UnresolvedHosting) == 0 {
+				t.Fatal("hosting observations combined outside a repeated, bound flow", d.Network)
+			}
+		})
 	}
 }

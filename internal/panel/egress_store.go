@@ -24,6 +24,7 @@ func (s *Store) ClaimEgress(ctx context.Context) (*egress.Job, error) {
 const egressClaimCandidates = `WITH claim_scope(hash) AS MATERIALIZED (
  SELECT u.hash FROM (SELECT DISTINCT artifact_id FROM memberships) m JOIN egress_unique u ON u.identity=m.artifact_id
  UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1
+ UNION SELECT u.hash FROM egress_network_review v CROSS JOIN egress_unique u ON u.identity=v.identity
  UNION SELECT hash FROM egress_first_backlog
  UNION SELECT u.hash FROM egress_iran_guard g JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'
 ) `
@@ -35,7 +36,7 @@ const egressClaimDue = `paused=0 AND (next_run<=? OR ` + egressUrgentExpiry + `)
 // A veto follows the identity across raw representatives. Its ordinary safety
 // check stays due, but the expiry of an unpublished proof is not a deadline
 // for residential publication.
-const egressRenewableNetwork = `NOT EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_results n ON n.identity=u.identity WHERE u.hash=egress_jobs.hash AND n.held=1)`
+const egressRenewableNetwork = `NOT EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_results n ON n.identity=u.identity WHERE u.hash=egress_jobs.hash AND n.held=1) AND NOT EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_review v ON v.identity=u.identity WHERE u.hash=egress_jobs.hash)`
 
 func egressClaimOrder(lane string, turn uint64) string {
 	order := ` ORDER BY CASE WHEN reason='ads_iran_quarantined' THEN 0
@@ -161,6 +162,9 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	j.Attempt++
 	j.Token = randomToken()
 	if _, e = tx.ExecContext(ctx, "UPDATE egress_jobs SET token=?,lease_until=?,claimed_at=?,attempts=attempts+1,retry_streak=? WHERE hash=?", j.Token, now+120000, now, retryStreak, j.Hash); e != nil {
+		return nil, e
+	}
+	if _, e = tx.ExecContext(ctx, "UPDATE egress_network_review SET attempts=attempts+1 WHERE attempts<2 AND identity=(SELECT identity FROM egress_unique WHERE hash=?)", j.Hash); e != nil {
 		return nil, e
 	}
 	if e = tx.Commit(); e != nil {
@@ -443,6 +447,13 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	if err != nil {
 		return err
 	}
+	reviewAgain, err := finishNetworkReview(ctx, tx, j.Hash, d)
+	if err != nil {
+		return err
+	}
+	if reviewAgain {
+		delay = min(delay, int64(30000))
+	}
 	if confirmNetwork {
 		delay = min(delay, int64(60000))
 	}
@@ -452,6 +463,13 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	}
 	if e = saveEgressCountries(ctx, tx, j.Hash, r, d, now); e != nil {
 		return e
+	}
+	if d.Eligible && !d.Network.BlocksResidential() {
+		// Remember proven pre-country-filter membership for maintenance only.
+		// This marker grants no route lifetime and is never used for publication.
+		if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO egress_residential_history(hash) SELECT hash FROM egress_geo_eligible WHERE hash=?", j.Hash); e != nil {
+			return e
+		}
 	}
 	if j.Deep {
 		if _, e = tx.ExecContext(ctx, "UPDATE egress_jobs SET deep_completed=1 WHERE hash=?", j.Hash); e != nil {
@@ -515,7 +533,7 @@ func (s *Store) manageEgress(ctx context.Context, tx *sql.Tx, action string, all
 	// Both exports retain identities past ordinary artifact expiry. A manual
 	// deletion must also retire an archived datacenter rejection.
 	rows, e := tx.QueryContext(ctx, "SELECT hash FROM egress_jobs WHERE ("+condition+`) AND state!='DELETED'
- AND (ever_accepted=1 OR hash IN (SELECT u.hash FROM egress_network_results n
+ AND (ever_accepted=1 OR hash IN (SELECT u.hash FROM egress_network_review v JOIN egress_unique u ON u.identity=v.identity) OR hash IN (SELECT u.hash FROM egress_network_results n
  JOIN egress_unique u ON u.identity=n.identity WHERE n.held=1))`)
 	if e != nil {
 		return e
@@ -538,6 +556,11 @@ func (s *Store) manageEgress(ctx context.Context, tx *sql.Tx, action string, all
 	return nil
 }
 func (s *Store) expireEgress(ctx context.Context, tx *sql.Tx, now int64) error {
+	// Park an interrupted final review without granting another automatic lease.
+	if _, err := tx.ExecContext(ctx, `UPDATE egress_jobs SET token='',lease_until=0,revision=revision+1,
+ next_run=max(next_run,?+(SELECT health_minutes*60000 FROM egress_lifecycle WHERE id=1)) WHERE token!='' AND lease_until<=? AND EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_review v ON v.identity=u.identity WHERE u.hash=egress_jobs.hash AND v.attempts=2)`, now, now); err != nil {
+		return err
+	}
 	if _, e := tx.ExecContext(ctx, "UPDATE egress_jobs SET state='QUARANTINED',reason='evidence_expired' WHERE ever_accepted=1 AND state='RESIDENTIAL' AND valid_until<=?", now); e != nil {
 		return e
 	}

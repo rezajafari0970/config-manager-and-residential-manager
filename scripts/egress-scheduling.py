@@ -8,11 +8,14 @@ evidence still receives a complete paired third recovery set.
 """
 SERIAL_TRANSPORTS = frozenset(('xhttp', 'splithttp'))
 
-def session_deadline(targets, waves, timeout, sequential):
+def session_deadline(targets, waves, timeout, sequential, conditional_controls=0):
  # The semaphore also queues observations. Two overlapping waves can occupy
  # two full timeout batches; an adaptive third wave needs its own budget.
  # The per-observation timeout is unchanged and the supervisor remains bounded.
  batches = ((targets + 11) // 12) * waves if sequential else (targets * min(waves, 2) + 11) // 12 + ((targets + 11) // 12 if waves == 3 else 0)
+ # A conditional control starts only after the base wave has yielded actual
+ # Ads families. Budget its wait separately while keeping the outer job bound.
+ batches += ((conditional_controls + 11) // 12) * waves
  return max(25, batches * timeout + 10)
 
 def sequential(request, config):

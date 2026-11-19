@@ -3,6 +3,7 @@ package egress
 import (
 	_ "embed"
 	"encoding/json"
+	"slices"
 	"sort"
 )
 
@@ -57,12 +58,20 @@ func Profiles() []Profile {
 // Deterministic compiled policy identity fences cached receipts after registry
 // or profile changes even if the evaluator implementation version is unchanged.
 func PolicyDigest() string {
+	// Conditional controls only supplement a missing witness. Old receipts
+	// without them retain the same target and qualification contract.
+	var baseline []Target
+	for _, t := range registry {
+		if t.WhenAdsFamily == 0 {
+			baseline = append(baseline, t)
+		}
+	}
 	b, _ := json.Marshal(struct {
 		Version  string
 		Profiles []Profile
 		Targets  []Target
 		Delivery []DeliveryTarget
-	}{ProfileVersion, Profiles(), Targets(), DeliveryTargets()})
+	}{ProfileVersion, Profiles(), baseline, DeliveryTargets()})
 	return Hash(b)
 }
 
@@ -149,7 +158,10 @@ func evaluateProfiles(r Report, p Plan, hash string, now int64) Decision {
 			} else if attempted {
 				status = "ROUTE_UNOBSERVABLE"
 			}
-			if t.Role == "control" && status != "CONTROL_OBSERVED" {
+			if t.WhenAdsFamily != 0 && !attempted {
+				continue
+			}
+			if t.WhenAdsFamily == 0 && t.Role == "control" && status != "CONTROL_OBSERVED" {
 				full = false
 			}
 			d.Services = append(d.Services, ServiceDecision{Variant: v.Name, Domain: t.Domain, Group: t.Group, Status: status, Observations: len(waves), Required: t.Required})
@@ -190,6 +202,35 @@ func evaluateProfiles(r Report, p Plan, hash string, now int64) Decision {
 		d.Negative = true
 	} else {
 		d.Reason = "ads_profile_evidence_incomplete"
+	}
+	return d
+}
+
+// Keep profile IDs and domain-scoped country/health evidence aligned whenever
+// a later publication gate narrows the result of the route comparison.
+func filterQualifiedProfiles(d Decision, reason string, allows func(Profile) bool) Decision {
+	if !d.Eligible {
+		return d
+	}
+	ids, domains := []string{}, []string{}
+	for _, p := range profiles {
+		if slices.Contains(d.QualifiedProfiles, p.ID) && allows(p) {
+			ids = append(ids, p.ID)
+			domains = append(domains, p.Domains...)
+		}
+	}
+	if len(ids) == len(d.QualifiedProfiles) {
+		return d
+	}
+	d.QualifiedProfiles, d.QualifiedDomains = ids, domains
+	sort.Strings(d.QualifiedProfiles)
+	sort.Strings(d.QualifiedDomains)
+	if len(ids) == 0 {
+		d.Eligible = false
+		d.State, d.Reason, d.Until = "UNKNOWN", reason, 0
+	} else {
+		d.CoverageComplete = false
+		d.AdsCoverage = "PARTIAL"
 	}
 	return d
 }

@@ -13,6 +13,7 @@ export function profileDetails(d){
 }
 
 const networkReasons = {
+ ads_hosting_route_unresolved: 'مالک شبکهٔ یکی از مبدأها مشخص است. شواهد برای انتساب آن به مسیر جداگانهٔ Ads کافی نیست.',
  ads_network_evidence_incomplete: 'نوع شبکهٔ بعضی مبدأهای مشاهده‌شدهٔ Ads نامعلوم است.',
  ads_network_coverage_incomplete: 'شواهد انتساب شبکه برای پروفایل آزموده‌شده کامل نیست.',
  ads_network_route_unqualified: 'جدایی مسیر یا دریافت فایل آزمایشی برای پروفایل آزموده‌شده تأیید نشده است.',
@@ -32,7 +33,11 @@ export function networkDetails(entry) {
  const blocked = entry.network_held;
  const observation = blocked ? entry.last_adverse || {} : latest;
  let summary;
- if (blocked) {
+ if (entry.network_review === 'pending') {
+  summary = 'نتیجهٔ قدیمی دیتاسنتری در انتظار بازبینی مسیر است.';
+ } else if (entry.network_review === 'inconclusive') {
+  summary = 'بازبینی انجام شد. شواهد کافی برای انتساب دیتاسنتر به مسیر جدا ثبت نشد.';
+ } else if (blocked) {
   summary = observation.state === 'mixed' ? 'خروج ترکیبی دیتاسنتر و شبکهٔ دسترسی در مسیر تبلیغات' : 'خروج دیتاسنتری در مسیر تبلیغات';
  } else if (latest.state === 'access') {
   summary = 'در آخرین آزمون، مبدأ اتصال‌های پروفایل دارای مسیر جدا به شبکهٔ دسترسی منتسب شد.';
@@ -47,13 +52,19 @@ export function networkDetails(entry) {
  if (entry.published) publication = 'منتشرشده در خروجی رزیدنتال';
  else if (entry.residential_eligible) publication = 'منتظر احراز کشور یا خارج از انتخاب کشور';
  if (blocked && entry.network_clean_rounds === 1) publication += ' · یک بررسی کامل از دو بررسی لازم برای رفع توقف ثبت شد';
- const shared = new Map();
- for (const flow of latest.shared_hosting || []) {
-  if (!shared.has(flow.provider)) shared.set(flow.provider,new Set());
-  shared.get(flow.provider).add(flow.domain);
+ function flowDetails(flows,label) {
+  const groups=new Map();
+  for (const flow of flows || []) {
+   const variant={raw:'خام',template:'قالب'}[flow.variant] || flow.variant;
+   const key=[flow.provider,flow.asn && 'AS'+flow.asn,variant,'IPv'+flow.family].filter(Boolean).join(' · ');
+   if (!groups.has(key)) groups.set(key,new Set());
+   groups.get(key).add(flow.domain);
+  }
+  return [...groups].map(([key,domains])=>
+   `<p class="hint">${esc(label)} · <bdi>${esc(key)}</bdi> · ${[...domains].sort().map(d=>`<bdi>${esc(d)}</bdi>`).join('، ')}</p>`
+  ).join('');
  }
- const ordinary = [...shared].map(([provider,domains]) =>
-  `<p class="hint">خروج دیتاسنتری در مسیر مشترک با کنترل‌های عادی · <bdi>${esc(provider)}</bdi> · ${[...domains].sort().map(d=>`<bdi>${esc(d)}</bdi>`).join('، ')}</p>`
- ).join('');
- return `<p>${esc(summary)}${observed ? ' · '+observed : ''}</p>${ordinary}<p class="hint">${esc(publication)}</p>`;
+ const ordinary = flowDetails(latest.shared_hosting,'خروج دیتاسنتری مشترک با ترافیک عادی');
+ const unresolved = flowDetails(latest.unresolved_hosting,'مبدأ دیتاسنتری با مسیر تأییدنشده');
+ return `<p>${esc(summary)}${observed ? ' · '+observed : ''}</p>${ordinary}${unresolved}<p class="hint">${esc(publication)}</p>`;
 }

@@ -11,6 +11,7 @@ def target_registry(values=None):
  seen=set()
  for t in values:
   if not isinstance(t,dict) or not re.fullmatch(r'[a-z0-9.-]{1,253}',t.get('domain','')) or t['domain'] in seen or t.get('role') not in ('ads','control') or t.get('driver') not in ('google-peer','cloudflare-trace','ipify','https-reachability'):raise ValueError('target_registry_invalid')
+  if t.get('when_ads_family',0) not in (0,6) or t.get('when_ads_family') and (t['role']!='control' or t.get('required')):raise ValueError('conditional_control_invalid')
   seen.add(t['domain'])
  return values
 try:DEFAULT_TARGETS=target_registry()
@@ -95,8 +96,9 @@ async def measure(domain,variant,wave,timeout,control_ipv4=None,target=None):
     status,h,b=await get(domain,'/robots.txt',False);row.update(first_status=status,actual_ads=target['role']=='ads')
     if not 200<=status<500:raise ValueError('target_http_status')
     if h.get('connection','').lower()=='close':raise ValueError('ads_connection_closed')
-    row['diagnostic_authority']=authority(tls.getpeercert(),'www.google.com')
-    status,h,b=await get('www.google.com','/sorry/index?shen_probe='+nonce,True);row['echo_status']=status
+    echo_host=domain if target.get('when_ads_family') else 'www.google.com'
+    row['diagnostic_authority']=authority(tls.getpeercert(),echo_host)
+    status,h,b=await get(echo_host,'/sorry/index?shen_probe='+nonce,True);row['echo_status']=status
     values=re.findall(rb'IP address:\s*([^<\s]+)',b)
     if len(values)!=1 or nonce.encode() not in b:raise ValueError('ads_echo_unavailable')
     value=values[0].decode('ascii');row['code']='ads_peer_reported' if target['role']=='ads' else 'google_control_peer_reported'
@@ -116,6 +118,7 @@ async def measure(domain,variant,wave,timeout,control_ipv4=None,target=None):
     return row
    ip=ipaddress.ip_address(value)
    if not ip.is_global or ip.is_multicast or ip.is_reserved:raise ValueError('nonpublic_echo')
+   if target.get('when_ads_family') and ip.version!=target['when_ads_family']:raise ValueError('control_family_mismatch')
    row.update(ip=str(ip),family=ip.version,same_stream=True,echo=True,response=digest(b),response_complete=True)
  except (TimeoutError,asyncio.TimeoutError):row['code']='connection_timeout'
  except ssl.SSLCertVerificationError:row['code']='tls_verification_failed'
@@ -143,15 +146,39 @@ def needs_pair_recovery(groups,required):
     if same and len({r.get('ip') for r in rows})==1 and len({r['wave'] for r in rows})>=2:paired.add(c['group'])
    if not shared and ('google-search' not in paired or len(paired)<2):return True
  return False
+def missing_family_controls(samples,targets,conditional):
+ # Additional comparison samples belong to this TCP variant and wave only.
+ # A shared source already explains that observation without a second group.
+ ads_domains={t['domain'] for t in targets if t['role']=='ads'}
+ groups={t['domain']:t['group'] for t in targets if t['role']=='control' and t['driver']!='https-reachability'}
+ result=[]
+ for family in {t['when_ads_family'] for t in conditional}:
+  rows=[r for r in samples if r.get('family')==family and r.get('echo') and r.get('tls') and r.get('same_stream') and r.get('ip')]
+  ads={r['ip'] for r in rows if r.get('actual_ads') and r['domain'] in ads_domains}
+  compared=[r for r in rows if r['domain'] in groups and not r.get('actual_ads')]
+  if not ads.difference(r['ip'] for r in compared):continue
+  present={groups[r['domain']] for r in compared}
+  for t in conditional:
+   if t['when_ads_family']!=family:continue
+   google=t['group']=='google-search'
+   if (google and 'google-search' not in present) or (not google and not present.difference({'google-search'})):
+    result.append(t)
+    present.add(t['group'])
+ return result
 async def session(req):
- targets=target_registry(req.get('targets'));limit=asyncio.Semaphore(12)
+ registry=target_registry(req.get('targets'));limit=asyncio.Semaphore(12)
+ targets=[t for t in registry if not t.get('when_ads_family')]
+ conditional=[t for t in registry if t.get('when_ads_family')]
  async def run(t,n):
   timeout=req.get('timeout',3)
   if n==start:timeout=req.get('first_timeout',timeout)
   async with limit:return await measure(t['domain'],req['variant'],n,timeout,req.get('control_ipv4'),t)
  async def wave(n,selected,delay=0):
   await asyncio.sleep(delay)
-  return await asyncio.gather(*(run(t,n) for t in selected))
+  rows=await asyncio.gather(*(run(t,n) for t in selected))
+  missing=missing_family_controls(rows,selected,conditional)
+  if missing:rows.extend(await asyncio.gather(*(run(t,n) for t in missing)))
+  return rows
  start=req.get('start_wave',1);waves=req.get('waves',3)
  if not 1<=waves<=3:raise ValueError('wave_limit')
  if req.get('adaptive') and waves==3:
@@ -165,7 +192,7 @@ async def session(req):
   # Recovery must remeasure the comparison destinations in the SAME wave.
   # Repeating only a failed Ads request leaves its recovered observation unpaired.
   # Reachability-only destinations cannot supply source evidence by retrying.
-  if needs_pair_recovery(groups,required):groups.append(await wave(start+2,required))
+  if needs_pair_recovery(groups,required+conditional):groups.append(await wave(start+2,required))
  elif req.get('sequential'):
   groups=[]
   for i in range(waves):groups.append(await wave(start+i,targets))

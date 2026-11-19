@@ -32,6 +32,7 @@ class Coverage(unittest.TestCase):
                     CREATE TABLE config_controls(id,action,expires);
                     CREATE TABLE egress_export_eligible(hash);
                     CREATE TABLE egress_eligible(hash);
+                    CREATE TABLE egress_network_eligible(hash);
                     CREATE TABLE staged(source_id,identity);
                     CREATE TABLE egress_first_backlog(source_id,hash);
                     CREATE TABLE egress_events(hash,at,definitive);
@@ -46,6 +47,7 @@ class Coverage(unittest.TestCase):
                       ('h6','PENDING','',0,0,0,0,0),('h7','PENDING','',0,0,0,0,0);
                     INSERT INTO egress_network_results VALUES('two',1);
                     INSERT INTO egress_export_eligible VALUES('h1');
+                    INSERT INTO egress_network_eligible VALUES('h1');
                     INSERT INTO input_exclusions VALUES('four');
                     INSERT INTO staged VALUES ('srcA','stage'),('srcB','stage');
                     INSERT INTO egress_first_backlog VALUES ('srcA','h7'),('srcB','h7');
@@ -64,6 +66,9 @@ class Coverage(unittest.TestCase):
             all_sources = report()
             totals = all_sources["global"]
             self.assertEqual(totals["current_unique"], 6)
+            self.assertEqual((totals["residential"], totals["published"]), (1, 1))
+            for source in all_sources["sources"].values():
+                self.assertEqual((source["residential"], source["published"]), (1, 1))
             self.assertEqual(totals["staged_unique"], 1)
             self.assertEqual(totals["withdrawn_awaiting_first"], 1)
             self.assertEqual(totals["current"], dict.fromkeys(
@@ -87,6 +92,33 @@ class Coverage(unittest.TestCase):
             self.assertIsNone(previous["global"]["withdrawn_awaiting_first"])
             self.assertIsNone(previous["sources"]["srcA"]["withdrawn_awaiting_first"])
             self.assertEqual(previous["global"]["current"], totals["current"])
+            with sqlite3.connect(path) as db:
+                db.executescript("""
+                    CREATE TABLE egress_first_backlog(source_id,hash);
+                    PRAGMA user_version=48;
+                """)
+            self.assertEqual(report()["global"]["current"], totals["current"])
+            with sqlite3.connect(path) as db:
+                db.executescript("""
+                    PRAGMA user_version=49;
+                    CREATE TABLE egress_network_review(identity PRIMARY KEY,attempts);
+                    INSERT INTO egress_network_review VALUES('three',0),('six',2);
+                    INSERT INTO memberships VALUES('srcB','three');
+                """)
+                db.execute("UPDATE egress_jobs SET token='active-fixture',lease_until=? WHERE hash='h6'", (now+60000,))
+            reviewing = report()
+            self.assertEqual(reviewing["global"]["current_unique"], 6)
+            self.assertEqual(reviewing["global"]["current"]["network_held"], 1)
+            self.assertEqual(reviewing["global"]["current"]["network_review_pending"], 2)
+            self.assertNotIn("network_review_inconclusive", reviewing["global"]["current"])
+            self.assertEqual(reviewing["sources"]["srcB"]["current"]["network_review_pending"], 2)
+            self.assertEqual(reviewing["sources"]["srcA"]["current"]["network_review_pending"], 1)
+            self.assertEqual((reviewing["global"]["residential"], reviewing["global"]["published"]), (1, 1))
+            with sqlite3.connect(path) as db:
+                db.execute("UPDATE egress_jobs SET lease_until=1 WHERE hash='h6'")
+            expired = report("--source-id", "srcB")
+            self.assertEqual(expired["global"]["current"], dict.fromkeys(
+                ["published", "network_review_inconclusive", "network_review_pending"], 1))
 
 
 if __name__ == "__main__":

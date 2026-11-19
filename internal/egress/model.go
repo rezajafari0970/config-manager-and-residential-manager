@@ -6,12 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
+	"time"
+
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/compat"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/convert"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
-
-	"time"
 )
 
 const Version = "ads-egress.v9"
@@ -272,6 +273,16 @@ func Evaluate(r Report, p Plan, hash string, now int64) Decision {
 		d = qualifyDelivery(evaluateProfiles(r, p, hash, now), r, p, now)
 	}
 	d.Network = evaluateExitNetwork(r, p, hash, now, d)
+	if len(d.Network.UnresolvedHosting) > 0 && !d.Network.BlocksResidential() {
+		d = filterQualifiedProfiles(d, "ads_hosting_route_unresolved", func(profile Profile) bool {
+			for _, hit := range d.Network.UnresolvedHosting {
+				if slices.Contains(profile.Domains, hit.Domain) {
+					return false
+				}
+			}
+			return true
+		})
+	}
 	d.FailureCodes = map[string]int{}
 	add := func(code string) {
 		if len(code) > 0 && len(code) <= 64 {

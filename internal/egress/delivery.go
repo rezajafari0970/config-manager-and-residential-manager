@@ -3,7 +3,6 @@ package egress
 import (
 	_ "embed"
 	"encoding/json"
-	"sort"
 )
 
 const DeliveryVersion = "ads-delivery.v1"
@@ -157,32 +156,7 @@ func Delivery(r Report, p Plan, now int64) DeliveryDecision {
 
 func qualifyDelivery(d Decision, r Report, p Plan, now int64) Decision {
 	d.Delivery = Delivery(r, p, now)
-	if !d.Eligible {
-		return d
-	}
-	ids, domains := []string{}, []string{}
-	for _, id := range d.QualifiedProfiles {
-		if d.Delivery.Profiles[id] != "available" {
-			continue
-		}
-		ids = append(ids, id)
-		for _, p := range profiles {
-			if p.ID == id {
-				domains = append(domains, p.Domains...)
-			}
-		}
-	}
-	if len(ids) == 0 {
-		d.Eligible = false
-		d.State = "UNKNOWN"
-		d.Reason = "ads_delivery_unproven"
-		d.Until = 0
-	} else if len(ids) < len(d.QualifiedProfiles) {
-		d.AdsCoverage = "PARTIAL"
-		d.CoverageComplete = false
-	}
-	sort.Strings(domains)
-	d.QualifiedProfiles = ids
-	d.QualifiedDomains = domains
-	return d
+	return filterQualifiedProfiles(d, "ads_delivery_unproven", func(p Profile) bool {
+		return d.Delivery.Profiles[p.ID] == "available"
+	})
 }

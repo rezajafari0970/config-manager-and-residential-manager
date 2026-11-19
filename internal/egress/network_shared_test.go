@@ -36,11 +36,11 @@ func TestHostingOnOrdinaryPathOfOtherProfile(t *testing.T) {
 			t.Fatal(flow)
 		}
 	}
-	// A remaining authentic differing wave on this very same flow prevents
-	// earlier equal waves from hiding a split hosting observation.
+	// Repeated separated waves on this same flow still establish a holding,
+	// even if another wave traversed the ordinary exit.
 	for i := range r.Samples {
 		s := &r.Samples[i]
-		if s.Domain == profiles[1].Domains[0] && s.Variant == "raw" && s.Wave == 3 {
+		if s.Domain == profiles[1].Domains[0] && s.Variant == "raw" && s.Wave >= 2 {
 			s.Source = Hash([]byte("distinct-AWS-exit"))
 			s.Network.Source = s.Source
 		}
@@ -98,9 +98,34 @@ func TestSharedPathControlBindingAndMissingWave(t *testing.T) {
 				r.Samples = append(r.Samples, controls...)
 			}
 			d := Evaluate(r, p, r.Hash, now)
-			if !d.Eligible || d.Network.BlocksResidential() != (mode != "stable") || d.Network.SharedHostingOnly() != (mode == "stable") {
+			hit := SharedNetwork{NetworkFlow{ad.Domain, ad.Variant, ad.Family}, ad.Network.Provider, ad.Network.ASN}
+			if !d.Eligible || d.Network.BlocksResidential() || slices.Contains(d.Network.SharedHosting, hit) != (mode == "stable") || slices.Contains(d.Network.UnresolvedHosting, hit) != (mode != "stable") {
 				t.Fatal(d.Network)
 			}
 		})
+	}
+}
+
+func TestHostingAttributionRejectsCrossWaveOrdinaryPoolOverlap(t *testing.T) {
+	r, p, now := networkFixture()
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		if s.Variant != "raw" {
+			continue
+		}
+		if s.Domain == Domains[0] && s.Wave <= 2 {
+			setHosting(s, 4)
+		}
+		if s.Domain == "www.cloudflare.com" && s.Wave == 3 {
+			// The Google and ipify controls remain stable and differ from the
+			// Ads source in both tested waves. A third ordinary control
+			// nevertheless used that same source during this attempt.
+			s.Source = Hash([]byte("observed-hosting-source"))
+		}
+	}
+	d := Evaluate(r, p, r.Hash, now)
+	hit := SharedNetwork{NetworkFlow{Domains[0], "raw", 4}, "vultr", 20473}
+	if d.Network.BlocksResidential() || !slices.Contains(d.Network.UnresolvedHosting, hit) || !d.Eligible || slices.Contains(d.QualifiedProfiles, profiles[0].ID) {
+		t.Fatal(d.QualifiedProfiles, d.Network)
 	}
 }

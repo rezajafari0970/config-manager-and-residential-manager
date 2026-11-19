@@ -68,6 +68,9 @@ func routeBound(r Report, p Plan, hash string, now int64) string {
 }
 
 func routeValid(s Sample, r Report) bool {
+	if t, ok := targetFor(s.Domain); ok && t.WhenAdsFamily != 0 && s.Family != t.WhenAdsFamily {
+		return false
+	}
 	return routeHexBytes(s.Source, 32) && routeHexBytes(s.Certificate, 32) && routeHexBytes(s.Response, 32) && routeHexBytes(s.Nonce, 16) && s.Nonce == s.Connection && (s.Family == 4 || s.Family == 6) && s.TLS && s.SameStream && s.Echo && s.Transport == "tcp" && s.Wave >= 1 && s.Wave <= r.Waves && s.At >= r.Started && s.At <= r.Finished+2000
 }
 

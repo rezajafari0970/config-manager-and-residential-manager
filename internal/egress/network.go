@@ -6,6 +6,7 @@ import (
 )
 
 const NetworkVersion = "ads-exit-network.v1"
+const NetworkPolicyVersion = "ads-exit-network-policy.v2"
 
 // NetworkFact is produced inside the trusted worker while the reflected
 // address still exists. Source is the same job-local HMAC as Sample.Source.
@@ -43,27 +44,29 @@ type NetworkFlowOrigin struct {
 // Eligible describes positive access attribution only. The residential route
 // policy uses BlocksResidential; unclassified traffic does not add a veto.
 type NetworkVerdict struct {
-	Version         string              `json:"version"`
-	State           string              `json:"state"`
-	Reason          string              `json:"reason"`
-	Detail          string              `json:"detail,omitempty"`
-	Eligible        bool                `json:"eligible"`
-	Until           int64               `json:"until"`
-	Domain          string              `json:"domain,omitempty"`
-	Variant         string              `json:"variant,omitempty"`
-	Family          int                 `json:"family,omitempty"`
-	Provider        string              `json:"provider,omitempty"`
-	Providers       []string            `json:"providers,omitempty"`
-	ASN             uint32              `json:"asn,omitempty"`
-	Families        []int               `json:"families,omitempty"`
-	DomainsObserved int                 `json:"domains_observed"`
-	HostingFlows    []NetworkFlow       `json:"hosting_flows,omitempty"`
-	SharedHosting   []SharedNetwork     `json:"shared_hosting,omitempty"`
-	SharedFlows     []NetworkFlow       `json:"shared_flows,omitempty"`
-	HostingASNs     []uint32            `json:"hosting_asns,omitempty"`
-	OutsideOrigins  []NetworkFlowOrigin `json:"outside_origins,omitempty"`
-	ClearedFlows    []NetworkFlow       `json:"cleared_flows,omitempty"`
-	ClearanceUntil  int64               `json:"clearance_until,omitempty"`
+	Version           string              `json:"version"`
+	Policy            string              `json:"policy,omitempty"`
+	State             string              `json:"state"`
+	Reason            string              `json:"reason"`
+	Detail            string              `json:"detail,omitempty"`
+	Eligible          bool                `json:"eligible"`
+	Until             int64               `json:"until"`
+	Domain            string              `json:"domain,omitempty"`
+	Variant           string              `json:"variant,omitempty"`
+	Family            int                 `json:"family,omitempty"`
+	Provider          string              `json:"provider,omitempty"`
+	Providers         []string            `json:"providers,omitempty"`
+	ASN               uint32              `json:"asn,omitempty"`
+	Families          []int               `json:"families,omitempty"`
+	DomainsObserved   int                 `json:"domains_observed"`
+	HostingFlows      []NetworkFlow       `json:"hosting_flows,omitempty"`
+	SharedHosting     []SharedNetwork     `json:"shared_hosting,omitempty"`
+	UnresolvedHosting []SharedNetwork     `json:"unresolved_hosting,omitempty"`
+	SharedFlows       []NetworkFlow       `json:"shared_flows,omitempty"`
+	HostingASNs       []uint32            `json:"hosting_asns,omitempty"`
+	OutsideOrigins    []NetworkFlowOrigin `json:"outside_origins,omitempty"`
+	ClearedFlows      []NetworkFlow       `json:"cleared_flows,omitempty"`
+	ClearanceUntil    int64               `json:"clearance_until,omitempty"`
 }
 
 func (n NetworkVerdict) BlocksResidential() bool {
@@ -147,7 +150,6 @@ func networkRoundValid(r Report, hash string, now int64) bool {
 }
 
 type networkScan struct {
-	route                    Decision
 	verdict                  NetworkVerdict
 	domains                  map[string]bool
 	families                 map[int]bool
@@ -161,7 +163,7 @@ type networkScan struct {
 // Only the selected core can clear a previous adverse flow. Other attempts can
 // reveal a hosting observation or an unresolved observation of that same flow.
 type networkFlowEvidence struct {
-	selectedShared bool
+	selectedShared map[int]bool
 	unshared       bool
 	hosting        bool
 	unknown        bool
@@ -171,8 +173,8 @@ type networkFlowEvidence struct {
 	until          int64
 }
 
-// An individual Ads flow can prove hosting despite a broken second variant or
-// independent control. Attribution from such a failed attempt cannot grant access.
+// A hosting network and a separated route require independent evidence.
+// Confirm the same hosting attribution in two paired waves of one core attempt.
 func (scan *networkScan) observe(r Report, plan Plan, variantHashes map[string]string, connections map[string]int, seen map[string]bool, selected bool, now int64) {
 	if r.ResourcePressure || Cores[r.Core] == "" || Cores[r.Core] != r.CoreSHA || len(r.Checks) > 2 ||
 		(plan.Driver != "xray" && plan.Driver != "sing-box") || (r.Core == NativeID) != (plan.Driver == "sing-box") {
@@ -186,11 +188,20 @@ func (scan *networkScan) observe(r Report, plan Plan, variantHashes map[string]s
 		}
 		valid[c.Name] = c.Hash == hash && c.Core && routeHexBytes(c.RuntimeHash, 32) && (plan.Driver != "xray" || c.RuntimeHash == hash)
 	}
-	shared := ordinarySharedFlows(r, valid, connections, scan.route)
+	// Older attempt summaries omit Waves. Their individual observation labels
+	// remain bound to the original attempt and the three-wave protocol limit.
+	if !selected && r.Waves == 0 {
+		r.Waves = 3
+	}
+	if r.Waves < 1 || r.Waves > 3 {
+		return
+	}
+	controls := readOrdinaryControls(r, valid, connections)
+	hostingWaves := map[SharedNetwork]map[int]bool{}
+	var hostingOrder []SharedNetwork
 	for _, s := range r.Samples {
 		t, ok := targetFor(s.Domain)
-		if !ok || t.Role != "ads" || !s.ActualAds || !valid[s.Variant] || s.Wave < 1 || s.Wave > 3 ||
-			!validSource(s, r) || seen[s.Connection] {
+		if !ok || t.Role != "ads" || !s.ActualAds || !valid[s.Variant] || !routeValid(s, r) || seen[s.Connection] {
 			continue
 		}
 		seen[s.Connection] = true
@@ -201,36 +212,38 @@ func (scan *networkScan) observe(r Report, plan Plan, variantHashes map[string]s
 			evidence = &networkFlowEvidence{}
 			scan.flows[flow] = evidence
 		}
-		if shared[flow] {
-			evidence.selectedShared = evidence.selectedShared || selected
+		// A replay cannot prove either hosting or recovery.
+		path, kind := pathUnresolved, "unknown"
+		if connections[s.Connection] == 1 && verifiedAdsExchange(s) {
+			path = controls.path(s)
+			kind = networkKind(s, r.Finished, now)
+		}
+		if path == pathShared {
+			if selected {
+				if evidence.selectedShared == nil {
+					evidence.selectedShared = map[int]bool{}
+				}
+				evidence.selectedShared[s.Wave] = true
+			}
 		} else {
 			evidence.unshared = true
 		}
-		kind := networkKind(s, r.Finished, now)
-		// A replay cannot prove either hosting or recovery.
-		if connections[s.Connection] != 1 || !verifiedAdsExchange(s) {
-			kind = "unknown"
-		}
 		switch kind {
 		case "hosting":
-			if shared[flow] {
-				hit := SharedNetwork{flow, s.Network.Provider, s.Network.ASN}
+			hit := SharedNetwork{flow, s.Network.Provider, s.Network.ASN}
+			if path == pathShared {
 				if !slices.Contains(scan.verdict.SharedHosting, hit) {
 					scan.verdict.SharedHosting = append(scan.verdict.SharedHosting, hit)
 				}
 				continue
 			}
-			evidence.hosting = true
-			if !slices.Contains(scan.verdict.HostingASNs, s.Network.ASN) {
-				scan.verdict.HostingASNs = append(scan.verdict.HostingASNs, s.Network.ASN)
+			if hostingWaves[hit] == nil {
+				hostingWaves[hit] = map[int]bool{}
+				hostingOrder = append(hostingOrder, hit)
 			}
-			scan.providers[s.Network.Provider] = true
-			if !scan.hosting {
-				scan.verdict.Domain, scan.verdict.Variant, scan.verdict.Family = s.Domain, s.Variant, s.Family
-				scan.verdict.Provider, scan.verdict.ASN = s.Network.Provider, s.Network.ASN
-				scan.verdict.Detail = ""
+			if path == pathSeparated {
+				hostingWaves[hit][s.Wave] = true
 			}
-			scan.hosting = true
 		case "access", "outside":
 			if kind == "access" {
 				scan.providers[s.Network.Provider] = true
@@ -248,7 +261,7 @@ func (scan *networkScan) observe(r Report, plan Plan, variantHashes map[string]s
 			if kind == "outside" && !slices.Contains(evidence.outsideASNs, s.Network.ASN) {
 				evidence.outsideASNs = append(evidence.outsideASNs, s.Network.ASN)
 			}
-			if selected && s.Wave <= r.Waves {
+			if selected {
 				expires := min(s.Network.ValidUntil, s.At+EvidenceTTL)
 				if evidence.waves == nil {
 					evidence.waves = map[int]bool{}
@@ -278,10 +291,32 @@ func (scan *networkScan) observe(r Report, plan Plan, variantHashes map[string]s
 			scan.unknown = true
 		}
 	}
+	for _, hit := range hostingOrder {
+		evidence := scan.flows[hit.NetworkFlow]
+		if len(hostingWaves[hit]) < 2 {
+			evidence.unknown = true
+			scan.unknown = true
+			if !slices.Contains(scan.verdict.UnresolvedHosting, hit) {
+				scan.verdict.UnresolvedHosting = append(scan.verdict.UnresolvedHosting, hit)
+			}
+			continue
+		}
+		evidence.hosting = true
+		if !slices.Contains(scan.verdict.HostingASNs, hit.ASN) {
+			scan.verdict.HostingASNs = append(scan.verdict.HostingASNs, hit.ASN)
+		}
+		scan.providers[hit.Provider] = true
+		if !scan.hosting {
+			scan.verdict.Domain, scan.verdict.Variant, scan.verdict.Family = hit.Domain, hit.Variant, hit.Family
+			scan.verdict.Provider, scan.verdict.ASN = hit.Provider, hit.ASN
+			scan.verdict.Detail = ""
+		}
+		scan.hosting = true
+	}
 }
 
 func evaluateExitNetwork(r Report, p Plan, hash string, now int64, route Decision) NetworkVerdict {
-	verdict := NetworkVerdict{Version: NetworkVersion, State: "unknown", Reason: "ads_network_receipt_unbound"}
+	verdict := NetworkVerdict{Policy: NetworkPolicyVersion, Version: NetworkVersion, State: "unknown", Reason: "ads_network_receipt_unbound"}
 	if !networkRoundValid(r, hash, now) || !p.Complete || len(p.Variants) != 2 || len(r.Evidence) > 4 ||
 		p.Variants[0].Name != "raw" || p.Variants[1].Name != "template" {
 		return verdict
@@ -295,7 +330,7 @@ func evaluateExitNetwork(r Report, p Plan, hash string, now int64, route Decisio
 		hashes[v.Name] = v.Hash
 	}
 	scan := networkScan{
-		route: route, verdict: verdict, domains: map[string]bool{}, families: map[int]bool{},
+		verdict: verdict, domains: map[string]bool{}, families: map[int]bool{},
 		providers: map[string]bool{}, origins: map[string]*NetworkFact{},
 		flows: map[NetworkFlow]*networkFlowEvidence{}, conflictingSources: map[string]bool{},
 	}
@@ -328,7 +363,7 @@ func evaluateExitNetwork(r Report, p Plan, hash string, now int64, route Decisio
 				if flow == nil {
 					continue
 				}
-				if flow.selectedShared && !flow.unshared {
+				if len(flow.selectedShared) >= 2 && !flow.unshared {
 					d.SharedFlows = append(d.SharedFlows, key)
 					if d.ClearanceUntil == 0 {
 						d.ClearanceUntil = route.Until
@@ -370,6 +405,8 @@ func evaluateExitNetwork(r Report, p Plan, hash string, now int64, route Decisio
 		d.State, d.Reason = "mixed", "ads_mixed_exit"
 	case scan.hosting:
 		d.State, d.Reason = "hosting", "ads_hosting_exit"
+	case len(d.UnresolvedHosting) > 0:
+		d.Reason = "ads_hosting_route_unresolved"
 	case !scan.access || scan.unknown:
 		d.Reason = "ads_network_evidence_incomplete"
 	case !route.Eligible:

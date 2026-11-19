@@ -142,38 +142,56 @@ func TestEgressSourceCoverageTracksPublishedAndWithdrawn(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := app.Handler()
-	check := func(published, withdrawn int) {
+	type counts struct{ Residential, Published, WithdrawnAwaitingFirst int }
+	check := func(current int, global, outside counts, sources map[string]counts) {
 		t.Helper()
 		resp := exportRequest(t, h, "GET", "http://127.0.0.1:18191/api/egress/source-coverage")
 		var result struct {
 			Global  egressCoverageCounts
+			Outside counts `json:"outside_active_sources"`
 			Sources []egressSourceRow
 		}
 		if resp.Code != 200 || json.Unmarshal(resp.Body.Bytes(), &result) != nil || len(result.Sources) != 3 {
 			t.Fatal(resp.Code, resp.Body.String())
 		}
-		if result.Global.Published != published || result.Global.WithdrawnAwaitingFirst != withdrawn || result.Global.Current != 2 {
+		selectCounts := func(c egressCoverageCounts) counts {
+			return counts{c.Residential, c.Published, c.WithdrawnAwaitingFirst}
+		}
+		if result.Global.Current != current || selectCounts(result.Global) != global || result.Outside != outside {
 			t.Fatal(result)
 		}
 		for _, row := range result.Sources {
-			if row.ID == c {
-				if row.Published != published || row.WithdrawnAwaitingFirst != 0 {
-					t.Fatal(row)
-				}
-			} else if row.Published != 0 || row.WithdrawnAwaitingFirst != withdrawn {
+			want, exists := sources[row.ID]
+			if !exists || selectCounts(row.egressCoverageCounts) != want {
 				t.Fatal(row)
 			}
 		}
 	}
 	// A and B withdrew the same identity; C still lists it. It is globally
 	// counted once in both the current set and the separate withdrawal metric.
-	check(0, 1)
+	check(2, counts{WithdrawnAwaitingFirst: 1}, counts{}, map[string]counts{
+		a: {WithdrawnAwaitingFirst: 1}, b: {WithdrawnAwaitingFirst: 1}, c: {},
+	})
 	if err = s.CompleteEgress(ctx, egress.Completion{Job: *first, Report: syntheticEgress(*first)}); err != nil {
 		t.Fatal(err)
 	}
-	check(1, 0)
+	current := counts{Residential: 1, Published: 1}
+	check(2, current, counts{}, map[string]counts{a: {}, b: {}, c: current})
+	fillExportSource(t, s, a, sourceURI(87), sourceURI(88))
+	check(2, current, counts{}, map[string]counts{a: current, b: {}, c: current})
 	if _, err = s.db.Exec("UPDATE egress_country_policy SET allowed='[]'"); err != nil {
 		t.Fatal(err)
 	}
-	check(0, 0)
+	current.Published = 0
+	check(2, current, counts{}, map[string]counts{a: current, b: {}, c: current})
+	// A retained identity with no current active membership reconciles to the
+	// headline but does not count toward any source's current generation.
+	fillExportSource(t, s, a, sourceURI(88))
+	fillExportSource(t, s, c, sourceURI(88))
+	check(1, counts{}, current, map[string]counts{a: {}, b: {}, c: {}})
+	if _, err = s.db.Exec("UPDATE egress_network_results SET held=1 WHERE hash=?", first.Hash); err != nil {
+		t.Fatal(err)
+	}
+	fillExportSource(t, s, a, sourceURI(87), sourceURI(88))
+	check(2, counts{}, counts{}, map[string]counts{a: {}, b: {}, c: {}})
 }

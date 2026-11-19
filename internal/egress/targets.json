@@ -82,5 +82,21 @@
     "role": "control",
     "driver": "google-peer",
     "required": true
+  },
+  {
+    "domain": "ipv6.google.com",
+    "group": "google-search",
+    "role": "control",
+    "driver": "google-peer",
+    "required": false,
+    "when_ads_family": 6
+  },
+  {
+    "domain": "api6.ipify.org",
+    "group": "ipify",
+    "role": "control",
+    "driver": "ipify",
+    "required": false,
+    "when_ads_family": 6
   }
 ]

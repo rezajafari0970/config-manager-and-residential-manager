@@ -18,6 +18,7 @@ type egressCoverageCounts struct {
 	Awaiting               int `json:"awaiting"`
 	Excluded               int `json:"excluded"`
 	Missing                int `json:"missing_job"`
+	Residential            int `json:"residential"`
 	Published              int `json:"published"`
 	WithdrawnAwaitingFirst int `json:"withdrawn_awaiting_first"`
 }
@@ -46,8 +47,11 @@ SELECT * FROM (WITH page AS (
  SELECT id,name FROM sources WHERE enabled=1 ORDER BY id LIMIT ? OFFSET ?
 ), ids AS MATERIALIZED (
  SELECT DISTINCT m.artifact_id AS identity FROM sources s JOIN memberships m ON m.source_id=s.id WHERE s.enabled=1
-), states AS MATERIALIZED (
- SELECT k.identity, EXISTS(SELECT 1 FROM egress_export_eligible e WHERE e.hash=u.hash) AS published, ` + currentEgressBucket + ` AS bucket
+),
+ qualified AS MATERIALIZED (SELECT hash FROM egress_network_eligible),
+ exported AS MATERIALIZED (SELECT hash FROM egress_export_eligible),
+ states AS MATERIALIZED (
+ SELECT k.identity,u.hash IN qualified AS residential,u.hash IN exported AS published, ` + currentEgressBucket + ` AS bucket
  FROM ids k ` + currentEgressJoins + ` AND c.expires>?3
 ), withdrawn AS MATERIALIZED (
  SELECT b.source_id,u.identity FROM egress_first_backlog b
@@ -59,14 +63,16 @@ SELECT * FROM (WITH page AS (
  AND NOT EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=u.identity AND g.state='BLOCKED')
  AND NOT EXISTS(SELECT 1 FROM config_controls c WHERE c.id=u.identity AND c.action='deleted' AND c.expires>?3)
 )
-SELECT 0 AS scope,'' AS id,'' AS name,(SELECT count(*) FROM sources WHERE enabled=1),` + egressCoverageAggregates + `,(SELECT count(DISTINCT identity) FROM withdrawn) FROM states v
-UNION ALL SELECT 1,p.id,p.name,0,` + egressCoverageAggregates + `,(SELECT count(*) FROM withdrawn w WHERE w.source_id=p.id) FROM page p
+SELECT 0 AS scope,'' AS id,'' AS name,(SELECT count(*) FROM sources WHERE enabled=1),` + egressCoverageAggregates + `,(SELECT count(DISTINCT identity) FROM withdrawn),
+ (SELECT count(*) FROM qualified),(SELECT count(*) FROM exported) FROM states v
+UNION ALL SELECT 1,p.id,p.name,0,` + egressCoverageAggregates + `,(SELECT count(*) FROM withdrawn w WHERE w.source_id=p.id),0,0 FROM page p
  LEFT JOIN memberships m ON m.source_id=p.id LEFT JOIN states v ON v.identity=m.artifact_id
  GROUP BY p.id,p.name ORDER BY scope,id)`
 
 const egressCoverageAggregates = `count(v.identity),
  count(*) FILTER(WHERE v.bucket='tested'), count(*) FILTER(WHERE v.bucket='awaiting'),
- count(*) FILTER(WHERE v.bucket='excluded'), count(*) FILTER(WHERE v.bucket='missing'), count(*) FILTER(WHERE v.published=1)`
+ count(*) FILTER(WHERE v.bucket='excluded'), count(*) FILTER(WHERE v.bucket='missing'),
+ count(*) FILTER(WHERE v.residential=1), count(*) FILTER(WHERE v.published=1)`
 
 // A source may have a URL or a pasted configuration as its user-supplied
 // label. Return only short, human-readable labels; its opaque ID still
@@ -113,19 +119,20 @@ func (m egressModule) sourceCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	var totalSources int
+	var totalSources, outsideResidential, outsidePublished int
 	var global egressCoverageCounts
 	items := []egressSourceRow{}
 	for rows.Next() {
 		var row egressSourceRow
-		var scope, total int
-		if err = rows.Scan(&scope, &row.ID, &row.Name, &total, &row.Current, &row.Tested, &row.Awaiting, &row.Excluded, &row.Missing, &row.Published, &row.WithdrawnAwaitingFirst); err != nil {
+		var scope, total, qualified, published int
+		if err = rows.Scan(&scope, &row.ID, &row.Name, &total, &row.Current, &row.Tested, &row.Awaiting, &row.Excluded, &row.Missing, &row.Residential, &row.Published, &row.WithdrawnAwaitingFirst, &qualified, &published); err != nil {
 			failure(w, err)
 			return
 		}
 		row.Registered = row.Tested + row.Awaiting
 		if scope == 0 {
 			global, totalSources = row.egressCoverageCounts, total
+			outsideResidential, outsidePublished = qualified-global.Residential, published-global.Published
 		} else {
 			row.Name = coverageSourceName(row.Name)
 			items = append(items, row)
@@ -136,5 +143,6 @@ func (m egressModule) sourceCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, http.StatusOK, map[string]any{"as_of_ms": readStamp(ctx), "enabled_sources": totalSources,
-		"global": global, "sources": items, "offset": offset, "page_size": egressSourcePageSize})
+		"global": global, "outside_active_sources": map[string]int{"residential": outsideResidential, "published": outsidePublished},
+		"sources": items, "offset": offset, "page_size": egressSourcePageSize})
 }

@@ -9,11 +9,12 @@ import (
 var targetAssets embed.FS
 
 type Target struct {
-	Domain   string `json:"domain"`
-	Group    string `json:"group"`
-	Role     string `json:"role"`
-	Driver   string `json:"driver"`
-	Required bool   `json:"required"`
+	Domain        string `json:"domain"`
+	Group         string `json:"group"`
+	Role          string `json:"role"`
+	Driver        string `json:"driver"`
+	Required      bool   `json:"required"`
+	WhenAdsFamily int    `json:"when_ads_family,omitempty"`
 }
 
 // The compiled registry is authoritative. Helpers receive it in their request;
@@ -29,6 +30,9 @@ var registry = func() []Target {
 	}
 	seen := map[string]bool{}
 	for _, t := range targets {
+		if t.WhenAdsFamily != 0 && (t.WhenAdsFamily != 6 || t.Role != "control" || t.Required) {
+			panic("invalid conditional control")
+		}
 		if t.Domain == "" || seen[t.Domain] || (t.Role != "ads" && t.Role != "control") {
 			panic("invalid target registry")
 		}

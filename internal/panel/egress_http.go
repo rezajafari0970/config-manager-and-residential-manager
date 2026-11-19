@@ -161,7 +161,7 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("brief") == "1" {
 		reportColumn = "json_object('code',coalesce(json_extract(report,'$.code'),''))"
 	}
-	args := []any{}
+	args := []any{readStamp(ctx)}
 	if hash := r.URL.Query().Get("hash"); hash != "" {
 		if !validDigest(hash) {
 			failure(w, ErrInvalid)
@@ -176,10 +176,11 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 	// identity, while the latest assessment belongs to the exact tested bytes.
 	query := `SELECT j.hash,j.kind,j.state,j.reason,j.revision,j.tested,j.valid_until,j.format,j.decision,j.proof,
  CASE WHEN n.hash=j.hash AND n.candidate_hash=j.candidate_hash AND n.checked_at=j.tested THEN n.summary ELSE '{}' END,
- coalesce(n.held,0),coalesce(n.clean_rounds,0),CASE WHEN n.held=1 THEN n.last_adverse ELSE '{}' END,` + publicationFlags + `
- FROM (SELECT hash,candidate_hash,kind,state,reason,revision,tested,valid_until,format,decision,` + reportColumn + ` AS proof
+ coalesce(n.held,0),coalesce(n.clean_rounds,0),CASE WHEN n.held=1 THEN n.last_adverse ELSE '{}' END,
+ CASE WHEN v.identity IS NULL THEN '' WHEN v.attempts<2 OR (j.token!='' AND j.lease_until>?) THEN 'pending' ELSE 'inconclusive' END,` + publicationFlags + `
+ FROM (SELECT hash,candidate_hash,kind,state,reason,revision,tested,valid_until,format,token,lease_until,decision,` + reportColumn + ` AS proof
  FROM ` + table + ` WHERE state!='DELETED'` + filter + ` ORDER BY tested DESC,hash LIMIT 50 OFFSET ?) j
- LEFT JOIN egress_unique u ON u.hash=j.hash LEFT JOIN egress_network_results n ON n.identity=u.identity ORDER BY j.tested DESC,j.hash`
+ LEFT JOIN egress_unique u ON u.hash=j.hash LEFT JOIN egress_network_results n ON n.identity=u.identity LEFT JOIN egress_network_review v ON v.identity=u.identity ORDER BY j.tested DESC,j.hash`
 	rows, e = db.QueryContext(ctx, query, args...)
 	if e != nil {
 		failure(w, e)
@@ -187,11 +188,11 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 	}
 	entries := []map[string]any{}
 	for rows.Next() {
-		var h, kind, state, reason, format, decision, report, network, adverse string
+		var h, kind, state, reason, format, decision, report, network, adverse, review string
 		var held, eligible, published bool
 		var cleanRounds int
 		var rev, tested, until int64
-		if e = rows.Scan(&h, &kind, &state, &reason, &rev, &tested, &until, &format, &decision, &report, &network, &held, &cleanRounds, &adverse, &eligible, &published); e != nil {
+		if e = rows.Scan(&h, &kind, &state, &reason, &rev, &tested, &until, &format, &decision, &report, &network, &held, &cleanRounds, &adverse, &review, &eligible, &published); e != nil {
 			rows.Close()
 			failure(w, e)
 			return
@@ -223,6 +224,8 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 				if lastAdverse.State == "mixed" {
 					reason = "ads_mixed_exit"
 				}
+			case review != "":
+				reason = "ads_network_under_review"
 			case until <= readStamp(ctx):
 				reason = "ads_proof_expired"
 			default:
@@ -239,7 +242,7 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		assessment["until"], _ = json.Marshal(until)
 		assessment["published"], _ = json.Marshal(published)
 		entries = append(entries, map[string]any{"hash": h, "kind": kind, "state": state, "route_assessment": route,
-			"network": json.RawMessage(network), "network_held": held, "network_clean_rounds": cleanRounds, "last_adverse": json.RawMessage(adverse),
+			"network": json.RawMessage(network), "network_held": held, "network_review": review, "network_clean_rounds": cleanRounds, "last_adverse": json.RawMessage(adverse),
 			"residential_eligible": eligible, "published": published, "reason": reason, "revision": rev, "tested": tested, "valid_until": until, "format": format, "decision": assessment, "report": json.RawMessage(report)})
 	}
 	if e = rows.Err(); e != nil {
@@ -351,12 +354,17 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		failure(w, err)
 		return
 	}
+	var reviewPending, reviewInconclusive int
+	if e = db.QueryRowContext(ctx, `SELECT count(*) FILTER(WHERE pending),count(*) FILTER(WHERE NOT pending) FROM (SELECT v.attempts<2 OR (j.token!='' AND j.lease_until>?) AS pending FROM egress_network_review v JOIN egress_unique u ON u.identity=v.identity JOIN egress_inventory j ON j.hash=u.hash)`, readStamp(ctx)).Scan(&reviewPending, &reviewInconclusive); e != nil {
+		failure(w, e)
+		return
+	}
 	var dcRejected int
 	if e = db.QueryRowContext(ctx, "SELECT count(*) "+datacenterRejectedFrom).Scan(&dcRejected); e != nil {
 		failure(w, e)
 		return
 	}
-	respond(w, 200, map[string]any{"datacenter_rejections": map[string]any{"count": dcRejected, "raw_url": m.datacenterRejectedURL()}, "profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": recovery, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"target_5m": 500, "first_settled_5m": firstSettled5, "previously_settled_5m": previouslySettled5, "settlement_unknown_5m": conclusive5 - firstSettled5 - previouslySettled5, "unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": total, "pending": pending, "partial": partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "At least one complete Ads profile must pass the route and delivery checks in raw and template. A verified datacenter exit blocks publication unless the specific flow is proven to share the ordinary controls outside the qualifying profile. Shared hosting is reported separately. Unknown network ownership alone does not block it.", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
+	respond(w, 200, map[string]any{"datacenter_rejections": map[string]any{"count": dcRejected, "review_pending": reviewPending, "review_inconclusive": reviewInconclusive, "raw_url": m.datacenterRejectedURL()}, "profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": recovery, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"target_5m": 500, "first_settled_5m": firstSettled5, "previously_settled_5m": previouslySettled5, "settlement_unknown_5m": conclusive5 - firstSettled5 - previouslySettled5, "unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": total, "pending": pending, "partial": partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "At least one complete Ads profile must pass the route and delivery checks in raw and template. A hosting exit blocks publication when two waves independently separate that Ads flow from same-family ordinary Google and independent controls. Shared hosting and observations with insufficient comparisons are reported separately. An unresolved hosting observation withholds the affected profile. Unknown network ownership alone does not block it.", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
 }
 
 type egressExportEntry struct {

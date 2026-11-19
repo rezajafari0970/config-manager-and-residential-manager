@@ -168,6 +168,8 @@ def investigate(req,args,pool=None):
  discovery=req.get('discovery') is True
  probe_waves,first_timeout,probe_timeout=observation_budget(req)
  targets=sessions.target_registry(req.get('targets'));targets=targets if discovery else [t for t in targets if t.get('driver')!='https-reachability'];plan=req['plan'];r=dict(version='ads-egress.v9',hash=req['hash'],started=req['started'],finished=0,core='',core_sha='',infrastructure=False,code='driver_unavailable',checks=[],samples=[],health=[],delivery=[],attempts=[],evidence=[],wall_ms=0,waves=probe_waves)
+ conditional_controls=sum(bool(t.get('when_ads_family')) for t in targets)
+ base_targets=len(targets)-conditional_controls
  begin=time.monotonic();best=-1;before_resource_failures=resource_failures(args.prefix)
  if len(plan.get('variants',[]))!=2:return r
  for core,path,pin in (core_order(plan) if plan['driver']=='xray' else [NATIVE]):
@@ -198,10 +200,10 @@ def investigate(req,args,pool=None):
       code=lab.classify(box.logs(),'runtime_start_failed');check.update(core=False,code=code);break
      check.update(core=True,code='exact_runtime_started')
      def observe(start,waves,timeout):
-      result=box.net(['/usr/bin/python3',str(HERE/'egress-session.py')],input=json.dumps({'targets':targets,'variant':v['name'],'timeout':timeout,'first_timeout':first_timeout,'start_wave':start,'waves':waves,'sequential':sequential,'adaptive':not discovery}).encode(),timeout=scheduling.session_deadline(len(targets),waves,timeout,sequential))
+      result=box.net(['/usr/bin/python3',str(HERE/'egress-session.py')],input=json.dumps({'targets':targets,'variant':v['name'],'timeout':timeout,'first_timeout':first_timeout,'start_wave':start,'waves':waves,'sequential':sequential,'adaptive':not discovery}).encode(),timeout=scheduling.session_deadline(base_targets,waves,timeout,sequential,conditional_controls))
       if len(result.stdout)>131072:raise ValueError('session_output_limit')
       rows=json.loads(result.stdout)
-      if not isinstance(rows,list) or not min(waves,2)*len(targets)<=len(rows)<=waves*len(targets):raise ValueError('session_contract')
+      if not isinstance(rows,list) or not min(waves,2)*base_targets<=len(rows)<=waves*len(targets):raise ValueError('session_contract')
       return rows
      # Deep paired waves remain serial to avoid upstream connection saturation;
      # initial checks retain transport-specific overlap and the shared cap.

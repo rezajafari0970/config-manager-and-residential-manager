@@ -13,14 +13,19 @@ WINDOW_MS = 300_000
 CURRENT = """
 WITH members AS MATERIALIZED (
   SELECT source_id, artifact_id AS identity FROM memberships {member_filter}
+), qualified AS MATERIALIZED (
+  SELECT hash FROM egress_network_eligible
+), exported AS MATERIALIZED (
+  SELECT hash FROM egress_export_eligible
 ), states AS MATERIALIZED (
-  SELECT k.identity, CASE
+  SELECT k.identity,u.hash IN qualified AS residential,u.hash IN exported AS published, CASE
     WHEN x.identity IS NOT NULL OR g.state='BLOCKED' OR c.action='deleted' OR j.state='DELETED'
       THEN 'excluded'
     WHEN u.hash IS NULL OR j.hash IS NULL THEN 'missing_job'
     WHEN h.held=1 THEN 'network_held'
+    {review_cases}
     WHEN j.paused<>0 OR c.action='disabled' THEN 'paused'
-    WHEN EXISTS(SELECT 1 FROM egress_export_eligible p WHERE p.hash=j.hash) THEN 'published'
+    WHEN u.hash IN exported THEN 'published'
     WHEN j.token<>'' AND j.lease_until>:now THEN 'running'
     WHEN j.tested=0 AND j.first_completed=0 THEN 'awaiting_first'
     WHEN j.tested=0 THEN 'awaiting_recheck'
@@ -38,10 +43,12 @@ WITH members AS MATERIALIZED (
   LEFT JOIN egress_iran_guard g ON g.identity=k.identity
   LEFT JOIN config_controls c ON c.id=k.identity AND c.expires>:now
   LEFT JOIN egress_network_results h ON h.identity=k.identity
+  {review_join}
 )
-SELECT m.source_id, s.category, count(*) FROM members m JOIN states s USING(identity)
+SELECT m.source_id, s.category, count(*),count(*) FILTER(WHERE residential),count(*) FILTER(WHERE published)
+FROM members m JOIN states s USING(identity)
 GROUP BY m.source_id, s.category
-UNION ALL SELECT NULL, category, count(*) FROM states GROUP BY category
+UNION ALL SELECT NULL, category, count(*),count(*) FILTER(WHERE residential),count(*) FILTER(WHERE published) FROM states GROUP BY category
 """
 
 # Count a completed attempt once even if it is visible through several sources.
@@ -62,7 +69,7 @@ FROM per_hash p LEFT JOIN egress_settlements s USING(hash)
 
 
 def empty_counts(has_first_backlog):
-    return {"current_unique": 0, "current": {}, "staged_unique": 0,
+    return {"current_unique": 0, "residential": 0, "published": 0, "current": {}, "staged_unique": 0,
             "withdrawn_awaiting_first": 0 if has_first_backlog else None}
 
 
@@ -94,10 +101,21 @@ def collect(connection, source_id, timeout):
         raise ValueError("unknown source ID")
 
     global_counts = empty_counts(has_first_backlog)
-    for key, category, count in query(CURRENT.format(member_filter=member_filter), params):
+    # The final review lease is still pending until it finishes or expires.
+    # Mirrors the panel's network-review projection. Schemas 46–48 have no review ledger.
+    review_cases = """
+      WHEN v.identity IS NOT NULL AND (v.attempts<2 OR (j.token<>'' AND j.lease_until>:now))
+        THEN 'network_review_pending'
+      WHEN v.identity IS NOT NULL THEN 'network_review_inconclusive'
+    """ if schema >= 49 else ""
+    review_join = "LEFT JOIN egress_network_review v ON v.identity=k.identity" if schema >= 49 else ""
+    current_sql = CURRENT.format(member_filter=member_filter, review_cases=review_cases, review_join=review_join)
+    for key, category, count, residential, published in query(current_sql, params):
         target = global_counts if key is None else sources[key]
         target["current"][category] = count
         target["current_unique"] += count
+        target["residential"] += residential
+        target["published"] += published
 
     # Staged identities may also exist in the current committed generation.
     # Withdrawn-but-pending representatives stay attributed to their source

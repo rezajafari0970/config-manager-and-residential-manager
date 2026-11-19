@@ -11,7 +11,8 @@ import (
 const datacenterRejectedFrom = `FROM egress_network_results n
  CROSS JOIN egress_unique u ON u.identity=n.identity AND u.hash=n.hash
  CROSS JOIN egress_jobs j ON j.hash=u.hash
- WHERE n.held=1 AND j.paused=0 AND j.state!='DELETED'
+ WHERE n.held=1 AND n.policy=(SELECT value FROM metadata WHERE key='ads-exit-network-policy') AND j.paused=0 AND j.state!='DELETED'
+ AND NOT EXISTS(SELECT 1 FROM egress_network_review v WHERE v.identity=u.identity)
  AND (SELECT enabled FROM egress_settings WHERE id=1)=1
  AND NOT EXISTS(SELECT 1 FROM egress_owners o JOIN input_exclusions x ON x.identity=o.identity WHERE o.hash=u.hash)
  AND NOT EXISTS(SELECT 1 FROM egress_owners o JOIN egress_iran_guard g ON g.identity=o.identity WHERE o.hash=u.hash)
