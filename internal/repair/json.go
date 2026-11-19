@@ -183,18 +183,9 @@ func Analyze(b []byte) Report {
 			if s, ok := v["settings"]; ok && !object(s) {
 				r.add("expected_object", p+"/settings")
 			}
-			if protocol == "hysteria" && object(v["settings"]) {
-				var s map[string]json.RawMessage
-				_ = json.Unmarshal(v["settings"], &s)
-				var version int
-				_ = json.Unmarshal(s["version"], &version)
-				if version != 2 {
-					r.add("hysteria_version_unsupported", p+"/settings/version")
-				}
-				var address string
-				if json.Unmarshal(s["address"], &address) != nil || address == "" {
-					r.add("missing_hysteria_address", p+"/settings/address")
-				}
+			switch protocol {
+			case "hysteria", "hysteria1", "hysteria2", "hy", "hy1", "hy2":
+				r.add("protocol_disabled", p+"/protocol")
 			}
 		}
 	}

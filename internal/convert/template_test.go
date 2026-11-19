@@ -33,11 +33,11 @@ func fixtures() map[string]string {
 		"vmess":                    "vmess://" + base64.RawStdEncoding.EncodeToString([]byte(vm)),
 		"trojan":                   "trojan://synthetic%3Asecret@192.0.2.1:443?security=tls&sni=example.com",
 		"ss":                       "ss://" + base64.RawStdEncoding.EncodeToString([]byte("aes-128-gcm:synthetic")) + "@192.0.2.1:443",
-		"socks5":                   "socks5://user:synthetic@192.0.2.1:1080",
 		"wireguard":                "wireguard://" + key + "@192.0.2.1:51820?publickey=" + pub + "&address=10.0.0.2%2F32&reserved=1,2,3",
 		"wireguard-ini":            "[Interface]\nPrivateKey=" + key + "\nAddress=10.0.0.2/32\n[Peer]\nPublicKey=" + pub + "\nEndpoint=192.0.2.1:51820\nAllowedIPs=0.0.0.0/0",
 		"json":                     jsonConfig,
 		"custom-json":              "custom://" + base64.StdEncoding.EncodeToString([]byte(jsonConfig)),
+		"httpcustom-envelope":      "httpcustom://" + base64.StdEncoding.EncodeToString([]byte(jsonConfig)),
 		"json-envelope":            "json://" + base64.StdEncoding.EncodeToString([]byte(jsonConfig)),
 		"domain-bootstrap":         "trojan://synthetic@proxy.example:443?security=tls&sni=example.com",
 	}
@@ -48,6 +48,9 @@ func TestDisabledProtocolsHaveNoPreparedTemplate(t *testing.T) {
 		"hy2://synthetic@192.0.2.1:443",
 		`{"outbounds":[{"type":"hysteria2","server":"192.0.2.1"}]}`,
 		`{"outbounds":[{"protocol":"vless","streamSettings":{"network":"hysteria"}}]}`,
+		"socks5://user:synthetic@192.0.2.1:1080",
+		"tuic://synthetic@192.0.2.1:443",
+		"http://192.0.2.1:8080",
 	}
 	for _, raw := range blocked {
 		p := Prepare([]byte(raw))
@@ -147,9 +150,9 @@ func TestTemplatePreservesCredentialsTransportAndNumbers(t *testing.T) {
 func TestTemplateRejectsUnsupportedAmbiguityAndChains(t *testing.T) {
 	cases := map[string]string{
 
-		`{"outbounds":[{"tag":"a","protocol":"socks","settings":{}},{"tag":"b","protocol":"socks","settings":{}}]}`: "ambiguous_proxy_selection",
-		`{"outbounds":[{"tag":"proxy","protocol":"socks","settings":{},"proxySettings":{"tag":"missing"}}]}`:        "missing_proxy_dependency",
-		`{"outbounds":[{"tag":"proxy","protocol":"socks","settings":{},"proxySettings":{"tag":"proxy"}}]}`:          "cyclic_proxy_chain",
+		`{"outbounds":[{"tag":"a","protocol":"trojan","settings":{}},{"tag":"b","protocol":"trojan","settings":{}}]}`: "ambiguous_proxy_selection",
+		`{"outbounds":[{"tag":"proxy","protocol":"trojan","settings":{},"proxySettings":{"tag":"missing"}}]}`:         "missing_proxy_dependency",
+		`{"outbounds":[{"tag":"proxy","protocol":"trojan","settings":{},"proxySettings":{"tag":"proxy"}}]}`:           "cyclic_proxy_chain",
 	}
 	for raw, code := range cases {
 		p := Prepare([]byte(raw))
@@ -157,7 +160,7 @@ func TestTemplateRejectsUnsupportedAmbiguityAndChains(t *testing.T) {
 			t.Fatal(p.Code, code)
 		}
 	}
-	raw := []byte(`{"outbounds":[{"tag":"proxy","protocol":"socks","settings":{"address":"192.0.2.1","port":1080},"streamSettings":{"sockopt":{"dialerProxy":"exit"}}},{"tag":"exit","protocol":"trojan","settings":{"address":"192.0.2.2","port":443,"password":"secret"}}]}`)
+	raw := []byte(`{"outbounds":[{"tag":"proxy","protocol":"trojan","settings":{"address":"192.0.2.1","port":1080},"streamSettings":{"sockopt":{"dialerProxy":"exit"}}},{"tag":"exit","protocol":"trojan","settings":{"address":"192.0.2.2","port":443,"password":"secret"}}]}`)
 	p := Prepare(raw)
 	if len(p.Candidates) < 1 || !bytes.Contains(p.Candidates[0].Config, []byte(`"dialerProxy":"chain-1"`)) {
 		t.Fatal("chain lost", p.Code)

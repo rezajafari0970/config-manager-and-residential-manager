@@ -15,7 +15,6 @@ IP = '/usr/sbin/ip' if pathlib.Path('/usr/sbin/ip').exists() else '/usr/bin/ip'
 NFT = '/usr/sbin/nft'
 TARGET = 'v2rayng-2.3.15-lib40-xray-26.10.31-and-26.11.9'
 TESTS = [('https://www.gstatic.com/generate_204', 204), ('https://www.cloudflare.com/cdn-cgi/trace', 200)]
-ALLOWED_PROTOCOLS = {'vless','vmess','trojan','shadowsocks','wireguard','socks','http'}
 lock = threading.Lock()
 STOP = threading.Event()
 spec=importlib.util.spec_from_file_location("config_preflight",pathlib.Path(__file__).with_name("config-preflight.py"))
@@ -60,7 +59,7 @@ def endpoints(config):
     for ob in config.get('outbounds',[]):
         protocol=ob.get('protocol');s=ob.get('settings',{})
         if protocol in {'freedom','blackhole','dns','loopback'}: continue
-        if protocol not in ALLOWED_PROTOCOLS: raise ValueError('outbound_driver_pending')
+        if protocol not in preflight.PROXY_PROTOCOLS: raise ValueError('outbound_driver_pending')
         result.extend(download_endpoints(ob.get('streamSettings',{})))
         if protocol=='wireguard':
             for peer in s.get('peers',[]):
@@ -80,10 +79,28 @@ def endpoints(config):
             for server in servers: result.append((server['address'],int(server['port'])))
     relays=preflight.relay_endpoints(config)
     result=[relays.get((host,port),(host,port)) for host,port in result]
+    return resolve_endpoints(result, hopping)
+
+def native_endpoints(config):
+    preflight.require_enabled_config(config)
+    pairs = []
+    for ob in config.get('outbounds', []):
+        typ = ob.get('type')
+        if typ not in {'vless', 'vmess', 'trojan', 'shadowsocks'} or ob.get('detour') or ob.get('domain_resolver'):
+            raise ValueError('native_path_unsupported')
+        pairs.append((ob.get('server'), ob.get('server_port')))
+    for endpoint in config.get('endpoints', []):
+        if endpoint.get('type') != 'wireguard' or endpoint.get('system'):
+            raise ValueError('native_path_unsupported')
+        for peer in endpoint.get('peers', []):
+            pairs.append((peer.get('address'), peer.get('port')))
+    return resolve_endpoints(pairs, {})
+
+def resolve_endpoints(result, hopping):
     if not result: raise ValueError('no_proxy_endpoint')
     resolved={};answers={}
     for host,port in result:
-        if not isinstance(host,str) or not 1<=port<=65535: raise ValueError('invalid_proxy_endpoint')
+        if not isinstance(host,str) or not isinstance(port,int) or not 1<=port<=65535: raise ValueError('invalid_proxy_endpoint')
         # Resolver in a killable subprocess: a broken DNS lookup cannot stall the pool.
         helper='import socket,json,sys;print(json.dumps(sorted({x[4][0] for x in socket.getaddrinfo(sys.argv[1],None,socket.AF_UNSPEC,socket.SOCK_STREAM)})))'
         if host not in answers:
@@ -199,7 +216,7 @@ class Sandbox:
     def core_command(self,test):
         return ['/xray','run']+(['-test'] if test else [])+['-c','/config.json']
     def launch(self,b,test=False):
-        preflight.require_enabled_config(json.loads(b))
+        preflight.require_enabled_config(preflight.parse_runtime_config(b))
         (self.work/'config.json').write_bytes(b);os.chmod(self.work/'config.json',0o444)
         (self.work/'hosts').write_text('127.0.0.1 localhost\n'+''.join(ip+' '+host+'\n' for host,entry in getattr(self,'resolved',{}).items() for ip in entry['ips']))
         (self.work/'resolv.conf').write_text('nameserver 1.1.1.1\noptions timeout:2 attempts:1\n')
@@ -261,9 +278,9 @@ def test_candidate(box,candidate,timeout,validated_sha256=None):
             result.update(core='blocked' if blocked else 'failed',code=code);return result
     result['core']='passed'
     try:
-        config=json.loads(b);resolved=box.inspect(config)
+        config=preflight.parse_runtime_config(b);resolved=box.inspect(config)
     except (ValueError,TypeError,KeyError) as e:
-        code=str(e);result['code']=code if code in {'outbound_driver_pending','wireguard_endpoint_invalid','no_proxy_endpoint','invalid_proxy_endpoint','endpoint_dns_failed','nonpublic_endpoint_blocked','ipv6_only_probe_pending','ipv6_relay_unavailable','ipv6_endpoint_capacity','custom_dns_mapping_requires_review','invalid_download_settings','invalid_download_endpoint','transport_dependency_depth','port_hopping_invalid'} else 'probe_preparation_failed';return result
+        code=str(e);result['code']=code if code in {'protocol_disabled','outbound_driver_pending','wireguard_endpoint_invalid','no_proxy_endpoint','invalid_proxy_endpoint','endpoint_dns_failed','nonpublic_endpoint_blocked','ipv6_only_probe_pending','ipv6_relay_unavailable','ipv6_endpoint_capacity','custom_dns_mapping_requires_review','invalid_download_settings','invalid_download_endpoint','transport_dependency_depth','port_hopping_invalid'} else 'probe_preparation_failed';return result
     box.resolved=resolved
     # Explicit bootstrap DoH may reach its fixed resolver; app DNS stays routed.
     for server in config.get('dns',{}).get('servers',[]):

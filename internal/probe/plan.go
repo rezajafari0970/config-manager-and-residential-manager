@@ -110,7 +110,7 @@ func Prepare(raw []byte) (p Plan) {
 	default:
 		kind, _, _ := strings.Cut(s, "://")
 		switch strings.ToLower(kind) {
-		case "vless", "trojan", "ss", "hy2", "hysteria2", "socks", "socks5":
+		case "vless", "trojan", "ss":
 			d := (repair.URIUserinfoDriver{Protocol: strings.ToLower(kind)}).Propose(raw)
 			if len(d.Candidate) > 0 {
 				s = strings.TrimSpace(string(d.Candidate))
@@ -124,13 +124,9 @@ func Prepare(raw []byte) (p Plan) {
 		}
 		p.Kind = strings.ToLower(u.Scheme)
 		switch p.Kind {
-		case "socks", "socks5":
-			ob, err = socksURI(u)
 		case "wireguard", "wg":
 			ob, err = wireguardURI(u)
-		case "hysteria", "hy":
-			err = errors.New("hysteria1_unsupported_by_target_core")
-		case "json", "custom", "napsternet":
+		case "json", "custom", "httpcustom", "napsternet":
 			decoded, e := DecodeEnvelope(raw)
 			if e != nil {
 				p.Code = e.Error()
@@ -261,7 +257,7 @@ func strictObject(b []byte) (M, error) {
 
 func uri(u *url.URL) (M, error) {
 	kind := strings.ToLower(u.Scheme)
-	if kind != "vless" && kind != "trojan" && kind != "ss" && kind != "hy2" && kind != "hysteria2" {
+	if kind != "vless" && kind != "trojan" && kind != "ss" {
 		return nil, errors.New("protocol_driver_pending")
 	}
 	if kind == "ss" && u.User == nil {
@@ -301,7 +297,7 @@ func uri(u *url.URL) (M, error) {
 	if e != nil {
 		return nil, e
 	}
-	allowed := strings.Fields("type security encryption flow headerType host path sni fp alpn allowInsecure insecure allowinsecure pbk sid spx pqv ech vcn pcs serviceName authority mode extra xhttpMode xhttpExtra fm obfs obfs-password pinSHA256 mport x_padding_bytes cs packetEncoding support-x25519mlkem768")
+	allowed := strings.Fields("type security encryption flow headerType host path sni fp alpn allowInsecure insecure allowinsecure pbk sid spx pqv ech vcn pcs serviceName authority mode extra xhttpMode xhttpExtra fm x_padding_bytes cs packetEncoding support-x25519mlkem768")
 	for k, values := range q {
 		known := false
 		for _, a := range allowed {
@@ -368,40 +364,13 @@ func uri(u *url.URL) (M, error) {
 		protocol = "shadowsocks"
 		settings["method"] = method
 		settings["password"] = pass
-	case "hy2", "hysteria2":
-		protocol = "hysteria"
-		settings["version"] = 2
-		q.Set("type", "hysteria")
-		q.Set("alpn", "h3")
-		q.Set("security", "tls")
+
 	}
 	stream, e := transport(q, u.Hostname())
 	if e != nil {
 		return nil, e
 	}
-	if protocol == "hysteria" {
-		stream["hysteriaSettings"] = M{"version": 2, "auth": credential}
-		if q.Get("obfs") != "" && q.Get("obfs") != "salamander" {
-			return nil, errors.New("unsupported_hysteria_obfs")
-		}
-		if q.Get("obfs-password") != "" {
-			stream["finalmask"] = M{"udp": []any{M{"type": "salamander", "settings": M{"password": q.Get("obfs-password")}}}}
-		}
-		if q.Get("mport") != "" {
-			if _, err := portRanges(q.Get("mport")); err != nil {
-				return nil, err
-			}
-			fm, ok := stream["finalmask"].(M)
-			if !ok {
-				fm = M{}
-				stream["finalmask"] = fm
-			}
-			fm["quicParams"] = M{"udpHop": M{"ports": q.Get("mport"), "interval": "30"}}
-		}
-		if q.Get("pinSHA256") != "" {
-			stream["tlsSettings"].(M)["pinnedPeerCertSha256"] = q.Get("pinSHA256")
-		}
-	}
+
 	outbound := M{"tag": "proxy", "protocol": protocol, "settings": settings, "streamSettings": stream}
 	if len(annotations) > 0 {
 		outbound["__input_rule"] = shareCompatibilityVersion + ".subscription-metadata"
@@ -497,7 +466,6 @@ func transport(q url.Values, server string) (M, error) {
 		if hs := csv(host); len(hs) > 0 {
 			sniHost = hs[0]
 		}
-	case "hysteria":
 	default:
 		return nil, errors.New("transport_driver_pending")
 	}

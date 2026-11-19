@@ -10,7 +10,7 @@ import (
 )
 
 func TestImmutableAndExactJSON(t *testing.T) {
-	raw := []byte("{\n \"inbounds\":[], \"outbounds\":[{\"protocol\":\"blackhole\",\"settings\":{}}], \"routing\":{}\n}")
+	raw := []byte("{\n \"inbounds\":[], \"outbounds\":[{\"protocol\":\"trojan\",\"settings\":{\"address\":\"192.0.2.1\",\"port\":443,\"password\":\"synthetic\"}}], \"routing\":{}\n}")
 	saved := bytes.Clone(raw)
 	p := Prepare(raw)
 	if p.Code != "prepared" || len(p.Candidates) != 1 || !bytes.Equal(p.Candidates[0].Config, raw) || !bytes.Equal(saved, raw) {
@@ -62,7 +62,7 @@ func TestAmbiguityDoesNotGetGuessed(t *testing.T) {
 	}
 }
 func TestJSONStructuralRepairSeparately(t *testing.T) {
-	raw := []byte(`{"stats":[],"outbounds":[{"protocol":"freedom","settings":[]}],"dns":{"hosts":[]}}`)
+	raw := []byte(`{"stats":[],"outbounds":[{"protocol":"trojan","settings":{"address":"192.0.2.1","port":443,"password":"synthetic"}},{"protocol":"freedom","settings":[]}],"dns":{"hosts":[]}}`)
 	p := Prepare(raw)
 	if len(p.Candidates) != 1 || bytes.Equal(raw, p.Candidates[0].Config) {
 		t.Fatal(p.Code)

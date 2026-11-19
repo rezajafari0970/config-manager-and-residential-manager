@@ -11,6 +11,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/convert"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/native"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"io"
 	"strings"
@@ -229,7 +230,7 @@ func (s *Store) CompleteProbe(ctx context.Context, r probe.Result) error {
 	var ref blob.Ref
 	requires := false
 	if len(r.Candidate) > 0 {
-		if len(r.Candidate) > repair.MaxBytes || repair.Digest(r.Candidate) != r.SHA256 || !json.Valid(r.Candidate) {
+		if len(r.Candidate) > repair.MaxBytes || repair.Digest(r.Candidate) != r.SHA256 || !json.Valid(r.Candidate) || protocolpolicy.Disabled("", r.Candidate) {
 			return ErrInvalid
 		}
 		// Only this version's deterministic template candidates may be completed.

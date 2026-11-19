@@ -36,7 +36,7 @@ func DecodeEnvelope(raw []byte) ([]byte, error) {
 		s := string(b)
 		scheme, payload, wrapped := strings.Cut(s, "://")
 		switch strings.ToLower(scheme) {
-		case "json", "custom", "napsternet":
+		case "json", "custom", "httpcustom", "napsternet":
 			if wrapped {
 				mustJSON = true
 				s = strings.SplitN(payload, "#", 2)[0]

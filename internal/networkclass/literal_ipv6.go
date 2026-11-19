@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 )
 
 var IPv6 = Group{"ipv6", "IPv6 — آدرس مستقیم"}
@@ -13,14 +15,14 @@ var IPv6 = Group{"ipv6", "IPv6 — آدرس مستقیم"}
 // LiteralIPv6 examines configured server addresses only. It performs no DNS,
 // ASN or connectivity request, and never infers IPv6 from a name or SNI.
 func LiteralIPv6(raw []byte) bool {
-	if len(raw) > 4<<20 {
+	if len(raw) > 4<<20 || protocolpolicy.Disabled("", raw) {
 		return false
 	}
 	s := strings.TrimSpace(string(raw))
 	u, err := url.Parse(s)
 	if err == nil {
 		switch strings.ToLower(u.Scheme) {
-		case "vless", "trojan", "hysteria", "hy", "hysteria2", "hy2", "tuic", "wireguard", "wg", "socks", "socks5", "ss":
+		case "vless", "trojan", "wireguard", "wg", "ss":
 			if u.Scheme == "ss" && u.User == nil && !strings.ContainsAny(u.Host, ":[") {
 				break // Legacy whole-URI base64 uses the existing SS decoder below.
 			}

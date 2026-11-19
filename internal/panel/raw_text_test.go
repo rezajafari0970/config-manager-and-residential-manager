@@ -3,8 +3,7 @@ package panel
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/json"
+
 	"io"
 	"net/http/httptest"
 	"testing"
@@ -12,8 +11,14 @@ import (
 
 func TestRawAllPrintsOriginalBodiesAndRetiresZIP(t *testing.T) {
 	s := testStore(t)
-	addConversion(t, s, " \n"+conversionSample+"\n ")
-	addConversion(t, s, "vless://00000000-0000-4000-8000-000000000002@192.0.2.15:443?security=tls&sni=example.com")
+	_, first := addConversion(t, s, " \n"+conversionSample+"\n ")
+	if err := s.CompleteProbe(context.Background(), conversionResult(first, 0, true)); err != nil {
+		t.Fatal(err)
+	}
+	_, next := addConversion(t, s, "vless://00000000-0000-4000-8000-000000000002@192.0.2.15:443?security=tls&sni=example.com")
+	if err := s.CompleteProbe(context.Background(), conversionResult(next, 0, true)); err != nil {
+		t.Fatal(err)
+	}
 	var refs []Artifact
 	if e := s.WalkOutputs(context.Background(), func(a Artifact) error { refs = append(refs, a); return nil }); e != nil {
 		t.Fatal(e)
@@ -45,36 +50,37 @@ func TestRawAllPrintsOriginalBodiesAndRetiresZIP(t *testing.T) {
 }
 
 func TestRawSnapshotAllowsArrivalsButFencesInvalidatedMembers(t *testing.T) {
-	for _, mutation := range []string{"arrival", "disable", "delete", "expire", "representation"} {
+	for _, mutation := range []string{"arrival", "disable", "delete", "expire", "evidence"} {
 		t.Run(mutation, func(t *testing.T) {
 			s := testStore(t)
 			ctx := context.Background()
-			addConversion(t, s, conversionSample)
-			members := make(map[string]struct{})
-			before := sha256.New()
-			encoder := json.NewEncoder(before)
-			var captured Artifact
-			if e := s.WalkOutputs(ctx, func(a Artifact) error {
-				captured = a
-				members[a.ID] = struct{}{}
-				return encoder.Encode(a)
-			}); e != nil {
-				t.Fatal(e)
+			_, j := addConversion(t, s, conversionSample)
+			if err := s.CompleteProbe(ctx, conversionResult(j, 0, true)); err != nil {
+				t.Fatal(err)
 			}
-			addConversion(t, s, "vless://00000000-0000-4000-8000-000000000002@192.0.2.15:443?security=tls&sni=example.com")
+			before, err := s.verifiedRawEntries(ctx, s.read(ctx), rawScope{})
+			if err != nil || len(before) != 1 {
+				t.Fatal(before, err)
+			}
+			captured := before[0]
+			_, addition := addConversion(t, s, sourceURI(29))
+			if err := s.CompleteProbe(ctx, conversionResult(addition, 0, true)); err != nil {
+				t.Fatal(err)
+			}
 			var e error
 			switch mutation {
 			case "disable", "delete":
 				_, e = s.ManageConfigs(ctx, ConfigBatch{Action: mutation, IDs: []string{captured.ID}})
 			case "expire":
 				_, e = s.db.ExecContext(ctx, "UPDATE artifacts SET expires=1 WHERE id=?", captured.ID)
-			case "representation":
-				_, e = s.db.ExecContext(ctx, "UPDATE memberships SET size=size+1 WHERE artifact_id=?", captured.ID)
+			case "evidence":
+				_, e = s.db.ExecContext(ctx, "UPDATE conversion_results SET valid_until=0 WHERE hash=?", captured.Hash)
 			}
 			if e != nil {
 				t.Fatal(e)
 			}
-			valid, e := rawSnapshotCurrent(ctx, s.read(ctx), members, before.Sum(nil))
+			current, e := s.verifiedRawEntries(ctx, s.read(ctx), rawScope{})
+			valid := networkSnapshotCurrent(before, current)
 			if e != nil || valid != (mutation == "arrival") {
 				t.Fatal("snapshot admission", valid, e)
 			}

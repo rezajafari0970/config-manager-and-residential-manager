@@ -10,7 +10,7 @@ import (
 func TestAdditionalProtocolDrivers(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
 	pub := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
-	cases := []string{"socks5://user:secret@192.0.2.1:1080", "socks://192.0.2.1:1080", "socks://" + base64.RawStdEncoding.EncodeToString([]byte("user:password")) + "@192.0.2.1:1080", "wireguard://" + key + "@192.0.2.1:51820?publickey=" + pub + "&address=10.0.0.2%2F32&reserved=1,2,3", "[Interface]\nPrivateKey = " + key + "\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = " + pub + "\nEndpoint = [2001:db8::1]:51820\nAllowedIPs = 0.0.0.0/0\n[Peer]\nPublicKey = " + key + "\nEndpoint = 192.0.2.2:51820\nAllowedIPs = 10.0.0.0/8"}
+	cases := []string{"wireguard://" + key + "@192.0.2.1:51820?publickey=" + pub + "&address=10.0.0.2%2F32&reserved=1,2,3", "[Interface]\nPrivateKey = " + key + "\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = " + pub + "\nEndpoint = [2001:db8::1]:51820\nAllowedIPs = 0.0.0.0/0\n[Peer]\nPublicKey = " + key + "\nEndpoint = 192.0.2.2:51820\nAllowedIPs = 10.0.0.0/8"}
 	for _, raw := range cases {
 		p := Prepare([]byte(raw))
 		if p.Code != "prepared" || len(p.Candidates) == 0 {
@@ -25,7 +25,7 @@ func TestAdditionalProtocolDrivers(t *testing.T) {
 	}
 }
 func TestUnsupportedAndAmbiguousVariantsStayExplicit(t *testing.T) {
-	for raw, code := range map[string]string{"hysteria://secret@192.0.2.1:443": "protocol_disabled", "socks5://secret@192.0.2.1:1080": "socks_auth_invalid", "wireguard://key@192.0.2.1:10?publickey=x&wnoise=1": "wireguard_extension_unsupported", "[Interface]\nPrivateKey=x\nPrivateKey=y": "wireguard_duplicate_key"} {
+	for raw, code := range map[string]string{"hysteria://secret@192.0.2.1:443": "protocol_disabled", "socks5://secret@192.0.2.1:1080": "protocol_disabled", "wireguard://key@192.0.2.1:10?publickey=x&wnoise=1": "wireguard_extension_unsupported", "[Interface]\nPrivateKey=x\nPrivateKey=y\n[Peer]\nPublicKey=p": "wireguard_duplicate_key"} {
 		p := Prepare([]byte(raw))
 		if p.Code != code || len(p.Candidates) > 0 {
 			t.Fatal(raw, p.Code)
@@ -33,7 +33,7 @@ func TestUnsupportedAndAmbiguousVariantsStayExplicit(t *testing.T) {
 	}
 }
 func TestCustomEnvelope(t *testing.T) {
-	raw := `{"inbounds":[],"outbounds":[{"protocol":"blackhole","settings":{}}],"routing":{}}`
+	raw := `{"inbounds":[],"outbounds":[{"protocol":"trojan","settings":{"address":"192.0.2.1","port":443,"password":"synthetic"}}],"routing":{}}`
 	p := Prepare([]byte("custom://" + base64.StdEncoding.EncodeToString([]byte(raw))))
 	if p.Code != "prepared" || len(p.Candidates) != 1 || string(p.Candidates[0].Config) != raw {
 		t.Fatal("custom envelope did not preserve JSON", p.Code)

@@ -3,7 +3,7 @@
 Each job owns one isolated netns/cgroup. Core fallback never weakens TLS.
 """
 import concurrent.futures
-import argparse,base64,hashlib,hmac,secrets,fcntl,ipaddress,contextlib,copy,importlib.util,json,os,pathlib,re,signal,subprocess,sys,threading,time
+import argparse,base64,hashlib,hmac,secrets,fcntl,ipaddress,contextlib,importlib.util,json,os,pathlib,re,signal,subprocess,sys,threading,time
 HERE=pathlib.Path(__file__).resolve().parent
 def module(name,file):
  spec=importlib.util.spec_from_file_location(name,HERE/file);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
@@ -76,16 +76,14 @@ class ResourcePool:
 def runtime(config,driver):
  if driver=='xray':
   return scope.runtime(config,lab)
- lab.preflight.require_enabled_config(config)
- out=config['outbounds']
- if len(out)!=1 or out[0].get('detour') or out[0].get('server_ports') or out[0].get('domain_resolver'):raise ValueError('native_path_unsupported')
- ob=out[0];host=ob['server'];port=ob['server_port']
- resolved=lab.endpoints({'outbounds':[{'protocol':'socks','settings':{'servers':[{'address':host,'port':port}]}}]})
- obj=copy.deepcopy(config);previous=next((x for x in obj.get('inbounds',[]) if x.get('type')=='socks'),{})
- obj['inbounds']=[{'type':'socks','tag':previous.get('tag','socks'),'listen':'127.0.0.1','listen_port':10808}];obj['log']={'level':'warn'}
- obj['outbounds'][0]['server']=resolved[host]['ips'][0]
- obj['outbounds'][0].setdefault('tls',{}).setdefault('server_name',host)
- return resolved,obj
+ listeners=config.get('inbounds',[])
+ if not all(isinstance(x,dict) for x in listeners):raise ValueError('native_probe_listener_missing')
+ if not any(x.get('type')=='socks' and x.get('listen')=='127.0.0.1' and x.get('listen_port')==10808 for x in listeners):
+  raise ValueError('native_probe_listener_missing')
+ if any(x.get('listen')!='127.0.0.1' for x in listeners):
+  raise ValueError('nonloopback_listener_not_qualified')
+ return lab.native_endpoints(config),config
+
 def core_order(plan):
  # Known capability dispatch, not a network-failure guess or a TLS downgrade.
  # These exact public plaintext VLESS inputs are prohibited on the newer cores.
@@ -177,11 +175,11 @@ def investigate(req,args,pool=None):
     for v in plan['variants']:
      data=base64.b64decode(v['config'],validate=True)
      if len(data)>8*1024*1024 or lab.digest(data)!=v['hash']:raise ValueError('variant_hash_mismatch')
-     config=json.loads(data);box.policy({})
+     config=lab.preflight.parse_runtime_config(data);box.policy({})
      # Successful isolated runtime startup validates the exact bytes too. Avoid
      # spawning an identical -test core before every actual launch.
      check=dict(name=v['name'],hash=v['hash'],runtime_hash='',core=False,code='runtime_pending');checks.append(check)
-     resolved,obj=runtime(config,plan['driver']);body=data if plan['driver']=='xray' else json.dumps(obj,separators=(',',':')).encode();box.resolved=resolved;box.policy(resolved);check['runtime_hash']=lab.digest(body);mark(v['name']+'_resolve')
+     resolved,_=runtime(config,plan['driver']);body=data;box.resolved=resolved;box.policy(resolved);check['runtime_hash']=lab.digest(body);mark(v['name']+'_resolve')
      p=box.launch(body);ready=False
      for _ in range(30):
       if p.poll() is not None:break

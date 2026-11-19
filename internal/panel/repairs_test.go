@@ -66,8 +66,8 @@ func TestDerivedRepairLifecycleAndRawPreservation(t *testing.T) {
 		return w
 	}
 	w := get("/output/repaired/" + a.ID)
-	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), d.Candidate) || w.Header().Get("X-Original-SHA256") != a.Hash {
-		t.Fatal("wrong derived download", w.Code)
+	if w.Code != 404 || bytes.Contains(w.Body.Bytes(), d.Candidate) {
+		t.Fatal("unverified structural repair published", w.Code)
 	}
 	w = get("/api/repairs/" + a.ID)
 	var report repair.Diagnostic
@@ -134,7 +134,7 @@ func TestAutomaticRepairMixedSourceCannotBecomeWorkerFailure(t *testing.T) {
 			t.Fatal(e)
 		}
 		if source.FetchCount > 0 {
-			if source.State != "updated" || source.ContentState != "partial" || source.ConfigCount != 2 {
+			if source.State != "updated" || source.ContentState != "partial" || source.ConfigCount != 3 {
 				t.Fatal("mixed source worker failed", source.State, source.ErrorCode)
 			}
 			out, e := s.Outputs(ctx, "", 0, true)

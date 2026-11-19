@@ -12,7 +12,7 @@ ownership is materialized once per bounded batch, then preparation references ar
 committed together. Export still rechecks ownership and exact-candidate evidence
 before publishing, so batching does not retain access for revoked members.
 
-The received bytes remain immutable. `json://`, `custom://`, JSON strings,
+Individual eligible records retain their received bytes. A clean subscription keeps its original encoding. For a mixed subscription, the stored response contains only the eligible records. A response containing only excluded profiles has no downloadable or restorable body. `json://`, `custom://`, JSON strings,
 percent encoding and nested standard/URL-safe base64 are decoded with size and
 nesting limits. This is representation decoding, not cryptographic decryption.
 Encrypted formats requiring an unavailable key remain unsupported.
@@ -24,11 +24,10 @@ public key, UUID, short ID or SNI. Missing credentials, rejected server credenti
 unsupported extensions and inaccessible servers cannot be repaired by guessing.
 TLS certificate verification is never disabled to obtain a passing result.
 
-Hysteria 1 and 2 are disabled globally. Collection excludes these inputs before
-testing and publication, including JSON profiles containing a Hysteria outbound
-or transport. Independent entries in the same subscription remain eligible.
+Only VLESS, VMess, Trojan, Shadowsocks and WireGuard proxy profiles are admitted. Custom and JSON inputs pass the same protocol checks. Collection excludes other protocols before testing and publication,
+including JSON profiles containing a Hysteria outbound or transport. Independent entries in the same subscription remain eligible.
 
-Ordinary TUIC and supported WireGuard inputs use the pinned
+Supported WireGuard inputs and simple native JSON profiles use the pinned
 sing-box 1.14.4 driver. Native schemas have separate exports; they are not sent to
 V2RayNG's Xray import. WireGuard uses the userspace endpoint schema. An Xray
 WireGuard FinalMask that sing-box cannot represent retains its Xray path. Arbitrary
@@ -84,7 +83,10 @@ Residential or deletion guards. Network exports retain only eligible members. Te
 Network groups show full received inventory separately from usable raw and tested
 templates. Usable raw count equals Xray plus native template count; no second
 candidate-hash deduplication can silently drop a distinct canonical identity.
-`received.txt` preserves diagnostic inventory, including unverified items. Native
+`received.txt` serves the same verified members as the group raw link.
+`/input/raw/{id}` reconstructs the source’s verified members from their stored
+raw bytes. Private source archives retain allowed members and may include
+inputs still pending a connection test. Native
 profiles use their own sing-box links. Residential counts use the same eligible
 identity set for raw and tested templates, preserving all existing guards.
 

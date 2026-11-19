@@ -13,40 +13,6 @@ import (
 
 // These adapters preserve supplied authentication and endpoint semantics. Core
 // validation and a real connection, rather than successful mapping, approve them.
-func socksURI(u *url.URL) (M, error) {
-	if u.Hostname() == "" {
-		return nil, errors.New("missing_endpoint")
-	}
-	n, e := port(u.Port())
-	if e != nil {
-		return nil, e
-	}
-	if u.RawQuery != "" || u.Path != "" && u.Path != "/" {
-		return nil, errors.New("socks_extension_requires_review")
-	}
-	s := M{"address": u.Hostname(), "port": n}
-	if u.User != nil {
-		user := u.User.Username()
-		pass, ok := u.User.Password()
-		if !ok {
-			b, e := decode(user)
-			if e != nil {
-				return nil, errors.New("socks_auth_invalid")
-			}
-			user, pass, ok = strings.Cut(string(b), ":")
-			if !ok {
-				return nil, errors.New("socks_auth_invalid")
-			}
-		}
-		if user != "" {
-			s["user"] = user
-			s["pass"] = pass
-		} else if pass != "" {
-			return nil, errors.New("socks_auth_ambiguous")
-		}
-	}
-	return M{"tag": "proxy", "protocol": "socks", "settings": s}, nil
-}
 func wireguardURI(u *url.URL) (M, error) {
 	if u.User == nil || u.Hostname() == "" || u.Path != "" && u.Path != "/" {
 		return nil, errors.New("wireguard_endpoint_or_key_missing")
@@ -240,25 +206,4 @@ func label(raw []byte, kind string) string {
 		}
 	}
 	return strings.ToUpper(kind) + " · " + repair.Digest(raw)[:10]
-}
-
-func portRanges(s string) ([]string, error) {
-	out := csv(s)
-	if len(out) == 0 {
-		return nil, errors.New("hysteria_port_hopping_invalid")
-	}
-	for _, v := range out {
-		a, b, rangeOK := strings.Cut(v, "-")
-		lo, e := port(strings.TrimSpace(a))
-		if e != nil {
-			return nil, errors.New("hysteria_port_hopping_invalid")
-		}
-		if rangeOK {
-			hi, e := port(strings.TrimSpace(b))
-			if e != nil || hi < lo {
-				return nil, errors.New("hysteria_port_hopping_invalid")
-			}
-		}
-	}
-	return out, nil
 }

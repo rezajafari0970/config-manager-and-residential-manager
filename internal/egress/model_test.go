@@ -249,3 +249,16 @@ func singleProfileFixture() (Report, Plan, int64) {
 	}
 	return r, p, now
 }
+
+func TestNativeEgressUsesExactAllowedRawAndTemplate(t *testing.T) {
+	raw := []byte("  " + `{"inbounds":[{"type":"socks","listen":"127.0.0.1","listen_port":10808}],"outbounds":[{"tag":"upstream","type":"trojan","server":"192.0.2.1","server_port":443,"password":"synthetic","tls":{"enabled":true,"server_name":"example.com"}}],"route":{"final":"upstream"}}` + "\n")
+	p := Prepare(raw)
+	if !p.Complete || p.Driver != "sing-box" || len(p.Variants) != 2 || p.Variants[0].Hash != Hash(raw) {
+		t.Fatalf("native raw plan: driver=%s code=%s variants=%d", p.Driver, p.Code, len(p.Variants))
+	}
+	for _, v := range p.Variants {
+		if !json.Valid(v.Config) || Hash(v.Config) != v.Hash {
+			t.Fatal("invalid native variant")
+		}
+	}
+}

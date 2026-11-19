@@ -32,11 +32,12 @@ type Item struct {
 type Result struct {
 	State, ErrorCode, ETag, Modified       string
 	HTTPStatus                             int
-	DurationMS                             int64
+	DurationMS, ReceivedBytes              int64
 	Raw                                    blob.Ref
 	Items                                  []Item
 	Extracted                              int
 	Staged                                 bool
+	DiscardResponse                        bool
 	ContentState                           string
 	ValidCount, InvalidCount, UnknownCount int
 }

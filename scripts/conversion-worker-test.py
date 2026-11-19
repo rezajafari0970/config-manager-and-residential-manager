@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Isolated durable conversion queue and real sandbox acceptance, optional read-only canary."""
-import argparse,base64,hashlib,json,os,pathlib,secrets,sqlite3,subprocess,tempfile,time,urllib.request,urllib.parse
+import argparse,base64,hashlib,json,os,pathlib,secrets,subprocess,tempfile,time,urllib.request,urllib.parse
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 ORIGIN='http://127.0.0.1:18194'
 def get(url,production=False):
@@ -17,19 +17,16 @@ def main():
  with tempfile.TemporaryDirectory(prefix='p7-worker-',dir=ROOT/'.local') as tmp:
   work=pathlib.Path(tmp);os.chmod(work,0o700)
   key=base64.b64encode(bytes([1])*32).decode();pub=base64.b64encode(bytes([2])*32).decode()
-  samples=[b'socks5://user:synthetic@192.0.2.1:1080',f'wireguard://{key}@192.0.2.1:51820?publickey={pub}&address=10.0.0.2%2F32'.encode(),b'tuic://11111111-1111-4111-8111-111111111111:synthetic@192.0.2.1:443?sni=example.com',b'vless://00000000-0000-4000-8000-000000000001@192.0.2.1:443?security=tls&sni=example.com']
+  samples=[b'trojan://synthetic@192.0.2.1:443?sni=example.com',f'wireguard://{key}@192.0.2.1:51820?publickey={pub}&address=10.0.0.2%2F32'.encode(),b'ss://YWVzLTEyOC1nY206c3ludGhldGlj@192.0.2.1:443',b'vless://00000000-0000-4000-8000-000000000001@192.0.2.1:443?security=tls&sni=example.com']
   samples.append(('vless://00000000-0000-4000-8000-000000000002@192.0.2.1:443?security=reality&sni=example.com&fp=chrome&pbk='+base64.urlsafe_b64encode(bytes([2])*32).decode().rstrip('=')+'&sid=ab&support-x25519mlkem768=true').encode())
   samples.append(b'vless://00000000-0000-4000-8000-000000000003@vpn.example.com:443?security=none&type=tcp&headerType=http&host=example.com')
   if args.live_canary:
    records=[]
    for page in range(100):
-    state=json.loads(get('http://127.0.0.1:18191/api/state?page='+str(page),True));records.extend(x for x in state['outputs'] if not x['disabled'])
-    if len(state['outputs'])<100:break
-   # Prefer currently successful originals while still sampling protocol diversity.
-   db=sqlite3.connect('file:/var/lib/config-repair/panel.db?mode=ro',uri=True)
-   table='probe_results' if db.execute("SELECT count(*) FROM sqlite_master WHERE name='probe_results'").fetchone()[0] else 'conversion_results'
-   good={r[0] for r in db.execute('SELECT hash FROM '+table+" WHERE connection='passed'")};db.close()
-   records.sort(key=lambda x:(x['hash'] not in good,x['kind'],x['hash']))
+    state=json.loads(get('http://127.0.0.1:18191/api/conversions?healthy=1&page='+str(page),True))
+    rows=state['entries'];records.extend(rows)
+    if len(rows)<100:break
+   records.sort(key=lambda x:(x['kind'],x['hash']))
    picked=[];kinds=set()
    for x in records:
     if x['kind'] not in kinds:picked.append(x);kinds.add(x['kind'])

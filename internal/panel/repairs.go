@@ -133,14 +133,33 @@ func (s *Server) repaired(w http.ResponseWriter, r *http.Request) {
 		respond(w, 409, map[string]string{"error": "این کانفیگ غیرفعال است."})
 		return
 	}
-	var hash string
-	var size int64
-	e = s.store.db.QueryRowContext(r.Context(), "SELECT candidate_hash,size FROM repairs WHERE raw_hash=? AND status='repaired' AND candidate_hash!=''", a.Hash).Scan(&hash, &size)
-	if e != nil {
+	// The structural repair may have different bytes from the candidate that
+	// passed the worker. Publish the actual tested candidate for this identity.
+	rows, err := querySourceIdentityConversions(r.Context(), s.store.reader(), "", a.ID, 0, true)
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	if len(rows) != 1 || !rows[0].Healthy(readStamp(r.Context())) {
 		failure(w, ErrNotFound)
 		return
 	}
-	w.Header().Set("X-Original-SHA256", a.Hash)
-	w.Header().Set("X-Validation-Stage", "structural-only")
-	s.stream(w, r, hash, size, a.ID[:12]+"-repaired.json")
+	var repaired bool
+	err = s.store.reader().QueryRowContext(r.Context(), "SELECT EXISTS(SELECT 1 FROM repairs WHERE raw_hash=? AND status='repaired')", rows[0].Hash).Scan(&repaired)
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	if !repaired {
+		failure(w, ErrNotFound)
+		return
+	}
+	verified := r.Clone(r.Context())
+	query := verified.URL.Query()
+	query.Set("source", "")
+	query.Set("id", a.ID)
+	query.Set("engine", rows[0].Engine)
+	query.Set("single", "1")
+	verified.URL.RawQuery = query.Encode()
+	s.preparedExport(w, verified)
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/driver"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/transient"
 	"golang.org/x/sys/unix"
 	"io"
 	"net/url"
@@ -22,8 +23,7 @@ import (
 
 // Format drivers only extract. Raw files are never re-serialized or repaired.
 type Registry struct {
-	drivers         driver.Registry[FormatDriver]
-	inspectDocument func([]byte) error
+	drivers driver.Registry[FormatDriver]
 }
 
 func NewRegistry() *Registry {
@@ -90,6 +90,14 @@ func base64Alphabet(b []byte) bool {
 	}
 	return len(b) > 0
 }
+
+// A fully escaped URI or JSON value is a subscription envelope. Escapes
+// inside normal share parameters stay with the original URI.
+func escapedEnvelope(b []byte) bool {
+	prefix := bytes.ToLower(b[:min(96, len(b))])
+	return len(prefix) > 0 && (prefix[0] == '%' || bytes.Contains(prefix, []byte(":%2f%2f")) || bytes.Contains(prefix, []byte("%3a%2f%2f")) || bytes.Contains(prefix, []byte("%3a//")))
+}
+
 func kindOf(raw []byte) string {
 	if len(raw) > 4096 {
 		raw = raw[:4096]
@@ -100,9 +108,20 @@ func kindOf(raw []byte) string {
 		return ""
 	}
 	scheme = strings.ToLower(scheme)
-	switch scheme {
-	case "vless", "vmess", "trojan", "ss", "ssr", "hysteria", "hysteria1", "hysteria2", "hy1", "hy2", "hy", "tuic", "wireguard", "wg", "json", "custom", "socks", "socks5", "httpcustom", "napsternet":
+	if !protocolpolicy.DisabledKind(scheme) && scheme != "" {
 		return scheme
+	}
+	// Keep unapproved share URIs as excluded record boundaries in mixed
+	// subscriptions. They have no inspector, identity normalizer or driver.
+	for i, c := range scheme {
+		if c < 'a' || c > 'z' {
+			if i == 0 || (c < '0' || c > '9') && c != '.' && c != '+' && c != '-' {
+				return ""
+			}
+		}
+	}
+	if scheme != "" {
+		return "unsupported"
 	}
 	return ""
 }
@@ -153,25 +172,22 @@ func (d textFormat) Extract(ctx context.Context, path string, emit Emitter) erro
 		return e
 	}
 	defer unix.Munmap(data)
-	if d.registry != nil && d.registry.inspectDocument != nil {
-		if err := d.registry.inspectDocument(data); err != nil {
-			return err
-		}
-	}
-	_ = unix.Madvise(data, unix.MADV_SEQUENTIAL)
 	trim := bytes.TrimSpace(bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf}))
 	if len(trim) > 1 && trim[0] == '"' && json.Valid(trim) {
-		return emitJSONString(ctx, trim, emit)
+		return d.emitJSONString(ctx, trim, emit)
 	}
 	if len(trim) > 0 && (trim[0] == '{' || trim[0] == '[') && json.Valid(trim) {
 		if trim[0] == '{' {
 			keys, err := documentKeys(trim)
-			if (err == nil && configKeys(keys)) || protocolpolicy.Disabled("json", trim) {
+			if err == nil && configKeys(keys) {
 				return emit(ctx, &contextReader{ctx, bytes.NewReader(data)}, "json")
 			}
 			return err
 		}
-		return emitJSON(ctx, trim, emit)
+		return d.emitJSON(ctx, trim, emit)
+	}
+	if forbiddenClashProfile(ctx, trim) {
+		markUnclassified(ctx)
 	}
 	var contentErr error
 	for pos := 0; pos < len(data); {
@@ -242,7 +258,17 @@ func (d textFormat) Extract(ctx context.Context, path string, emit Emitter) erro
 				end++
 			}
 			span := data[pos:end]
-			if e = emitJSON(ctx, span, emit); e != nil {
+			if e = d.emitJSON(ctx, span, emit); e != nil {
+				if !IsContentError(e) {
+					return e
+				}
+				contentErr = e
+			}
+		} else if escapedEnvelope(trim) {
+			decoded, err := url.PathUnescape(string(trim))
+			if err != nil {
+				contentErr = errors.New("invalid_percent_envelope")
+			} else if e := d.extractTextReader(ctx, strings.NewReader(decoded), emit); e != nil {
 				if !IsContentError(e) {
 					return e
 				}
@@ -257,7 +283,7 @@ func (d textFormat) Extract(ctx context.Context, path string, emit Emitter) erro
 				contentErr = e
 			}
 		} else if len(trim) > 1 && trim[0] == '"' && json.Valid(trim) {
-			if e = emitJSONString(ctx, trim, emit); e != nil {
+			if e = d.emitJSONString(ctx, trim, emit); e != nil {
 				return e
 			}
 		}
@@ -297,10 +323,10 @@ func valueEnd(ctx context.Context, b []byte, start int) (int, error) {
 	}
 	return 0, errors.New("invalid_json")
 }
-func emitJSON(ctx context.Context, raw []byte, emit Emitter) error {
+func (d textFormat) emitJSON(ctx context.Context, raw []byte, emit Emitter) error {
 	b := bytes.TrimSpace(raw)
 	if !json.Valid(b) {
-		if looksLikeJSONConfig(b) || protocolpolicy.Disabled("json", b) {
+		if looksLikeJSONConfig(b) {
 			return emit(ctx, &contextReader{ctx, bytes.NewReader(raw)}, "json")
 		}
 		return errors.New("invalid_json")
@@ -310,7 +336,7 @@ func emitJSON(ctx context.Context, raw []byte, emit Emitter) error {
 	}
 	if b[0] == '{' {
 		keys, err := documentKeys(b)
-		if (err == nil && configKeys(keys)) || protocolpolicy.Disabled("json", b) {
+		if err == nil && configKeys(keys) {
 			return emit(ctx, &contextReader{ctx, bytes.NewReader(raw)}, "json")
 		}
 		return err
@@ -331,7 +357,7 @@ func emitJSON(ctx context.Context, raw []byte, emit Emitter) error {
 			if e != nil {
 				return e
 			}
-			if e = emitJSON(ctx, b[pos:end], emit); e != nil {
+			if e = d.emitJSON(ctx, b[pos:end], emit); e != nil {
 				return e
 			}
 			pos = end
@@ -355,7 +381,7 @@ func emitJSON(ctx context.Context, raw []byte, emit Emitter) error {
 					break
 				}
 			}
-			if e := emitJSONString(ctx, b[start:pos], emit); e != nil {
+			if e := d.emitJSONString(ctx, b[start:pos], emit); e != nil {
 				return e
 			}
 			continue
@@ -367,8 +393,13 @@ func emitJSON(ctx context.Context, raw []byte, emit Emitter) error {
 	return nil
 }
 
-func emitJSONString(ctx context.Context, b []byte, emit Emitter) error {
+func (d textFormat) emitJSONString(ctx context.Context, b []byte, emit Emitter) error {
 	reader := &jsonStringReader{data: b[1 : len(b)-1]}
+	// A JSON string can itself be a multiline subscription. Re-enter the
+	// neutral parser so forbidden siblings never hitch a ride on an allowed URI.
+	if bytes.Contains(b, []byte(`\n`)) || bytes.Contains(b, []byte(`\r`)) || bytes.Contains(b, []byte(`\u000`)) {
+		return d.extractTextReader(ctx, reader, emit)
+	}
 	prefix := make([]byte, 4096)
 	n, e := reader.Read(prefix)
 	if e != nil && e != io.EOF {
@@ -376,13 +407,32 @@ func emitJSONString(ctx context.Context, b []byte, emit Emitter) error {
 	}
 	kind := kindOf(prefix[:n])
 	trim := bytes.TrimSpace(prefix[:n])
-	if kind == "" && len(trim) > 0 && (trim[0] == '{' || trim[0] == '[') {
+	if kind == "" && len(trim) > 0 && trim[0] == '{' {
 		kind = "json"
 	}
+	full := io.MultiReader(bytes.NewReader(prefix[:n]), reader)
 	if kind != "" {
-		return emit(ctx, &contextReader{ctx, io.MultiReader(bytes.NewReader(prefix[:n]), reader)}, kind)
+		return emit(ctx, &contextReader{ctx, full}, kind)
+	}
+	if base64Prefix(trim) || escapedEnvelope(trim) || len(trim) > 1 && (trim[0] == '"' || trim[0] == '[') {
+		return d.extractTextReader(ctx, full, emit)
 	}
 	return nil
+}
+
+func (d textFormat) extractTextReader(ctx context.Context, in io.Reader, emit Emitter) error {
+	if d.depth >= maxEnvelopeDepth {
+		return errors.New("envelope_nesting_limit")
+	}
+	f, path, err := transient.NewFile()
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err = io.Copy(f, &contextReader{ctx, in}); err != nil {
+		return err
+	}
+	return d.registry.extract(ctx, path, emit, d.depth+1)
 }
 
 // JSON string envelopes are decoded as a stream; the full source body is also kept.
@@ -466,7 +516,13 @@ func (r *jsonStringReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 func configKeys(keys map[string]bool) bool {
-	return keys["outbounds"] || keys["outbound"] || keys["proxies"] || keys["protocol"]
+	for k := range keys {
+		switch strings.ToLower(k) {
+		case "outbounds", "outbound", "outbounddetour", "outbounddetours", "endpoints", "proxies", "protocol", "config", "configs", "profile", "profiles", "configuration", "custom_config", "customconfig", "custom", "json", "jsonconfig", "configjson", "outboundconfig":
+			return true
+		}
+	}
+	return keys["type"] && (len(keys) == 1 || keys["server"] || keys["server_port"] || keys["peers"] || keys["port"] || keys["password"])
 }
 func documentKeys(b []byte) (map[string]bool, error) {
 	if len(b) <= 1024*1024 {
@@ -586,9 +642,6 @@ func Fingerprint(sample []byte, complete bool, kind, rawHash string) string {
 	value := bytes.TrimSpace(bytes.TrimPrefix(sample, []byte{0xef, 0xbb, 0xbf}))
 	canonical := value
 	identityKind := kind
-	if kind == "hy2" {
-		identityKind = "hysteria2"
-	}
 	if kind == "wg" {
 		identityKind = "wireguard"
 	}
@@ -608,7 +661,7 @@ func Fingerprint(sample []byte, complete bool, kind, rawHash string) string {
 		if b, e := ssIdentity(string(value)); e == nil {
 			canonical = b
 		}
-	} else if strings.Contains(" vless trojan hysteria hysteria2 hy2 hy tuic wireguard wg ", " "+kind+" ") {
+	} else if kind == "vless" || kind == "trojan" || kind == "wireguard" || kind == "wg" {
 		if u, e := url.Parse(string(value)); e == nil && u.Scheme != "" && u.Host != "" {
 			u.Fragment = ""
 			u.RawFragment = ""
@@ -685,7 +738,7 @@ func canonicalJSON(b []byte, label string) ([]byte, error) {
 }
 
 func looksLikeJSONConfig(b []byte) bool {
-	for _, k := range []string{`"outbounds"`, `"outbound"`, `"proxies"`, `"protocol"`} {
+	for _, k := range []string{`"outbounds"`, `"outbound"`, `"outboundDetour"`, `"endpoints"`, `"proxies"`, `"protocol"`} {
 		if bytes.Contains(b, []byte(k)) {
 			return true
 		}

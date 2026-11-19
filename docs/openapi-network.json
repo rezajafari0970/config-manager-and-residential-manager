@@ -67,7 +67,7 @@
         }
       ],
       "get": {
-        "summary": "Verified raw/templates by canonical identity; received.txt is explicitly unverified diagnostic inventory",
+        "summary": "Export verified raw configurations or templates for allowed protocols. The legacy received.txt URL uses the verified raw selection.",
         "responses": {
           "200": {
             "description": "Exact group member(s); X-Config-Count, X-Content-SHA256, X-Network-Axis, X-Network-Group; next.json also X-Export-Cycle"

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/convert"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 )
 
@@ -85,6 +86,10 @@ func (s *Store) PrepareBatch(ctx context.Context) (int, error) {
 		if err != nil {
 			p.Candidates = nil
 			p.Code = "original_blob_unavailable"
+		}
+		if len(p.Candidates) > 0 && protocolpolicy.Disabled("", p.Candidates[0].Config) {
+			p.Candidates = nil
+			p.Code = protocolpolicy.Code
 		}
 		candidate := ""
 		engine := "xray"

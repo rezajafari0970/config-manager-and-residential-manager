@@ -23,7 +23,7 @@ func TestCandidateRepairsObservedPenguinDefectsWithoutOtherChanges(t *testing.T)
 	}
 }
 func TestCandidateAmbiguityAndUnknownFields(t *testing.T) {
-	for _, raw := range []string{`{"outbounds":[{"protocol":"vless","settings":[]}],"stats":[]}`, `{"outbounds":[{"protocol":"freedom","settings":[1]}]}`, `{"outbounds":[],"stats":[],"stats":{}}`, `{"outbounds":[{"protocol":"vless"}],"stats":[1]}`, `{"outbounds":[{"protocol":"hysteria","settings":{"version":1}}]}`, `{"outbounds":[`, `{"outbounds":[],}`, `{"outbounds":[{"protocol":"freedom","settings":{,}}]}`} {
+	for _, raw := range []string{`{"outbounds":[{"protocol":"vless","settings":[]}],"stats":[]}`, `{"outbounds":[{"protocol":"freedom","settings":[1]}]}`, `{"outbounds":[],"stats":[],"stats":{}}`, `{"outbounds":[{"protocol":"vless"}],"stats":[1]}`, `{"outbounds":[{"protocol":"","settings":[]}]}`, `{"outbounds":[`, `{"outbounds":[],}`, `{"outbounds":[{"protocol":"freedom","settings":{,}}]}`} {
 		d := (JSONDriver{}).Propose([]byte(raw))
 		if d.Status != "blocked" || len(d.Candidate) > 0 {
 			t.Fatal("unsafe ambiguous candidate", raw, d)

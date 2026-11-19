@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 )
 
 // Family is bounded diagnostic metadata, never credentials or health evidence.
@@ -20,9 +22,7 @@ func Family(body []byte) string {
 			continue
 		}
 		p, _ := ob["protocol"].(string)
-		switch p {
-		case "vless", "vmess", "trojan", "shadowsocks", "hysteria", "wireguard", "socks", "http":
-		default:
+		if !protocolpolicy.AllowedProtocol(p) {
 			continue
 		}
 		s, _ := ob["streamSettings"].(M)
@@ -57,9 +57,6 @@ func Family(body []byte) string {
 		if p == "wireguard" {
 			n = "udp"
 			sec = "native"
-		}
-		if p == "hysteria" {
-			p = "hysteria2"
 		}
 		if len(n) > 20 || len(sec) > 20 {
 			labels[p+"+unclassified"] = true

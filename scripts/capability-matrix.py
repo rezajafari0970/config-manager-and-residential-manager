@@ -12,7 +12,6 @@ def outbound(protocol,network,security):
     elif protocol=='trojan':settings=common|{'password':'synthetic-test-only'}
     elif protocol=='shadowsocks':settings=common|{'method':'aes-128-gcm','password':'synthetic-test-only'}
     elif protocol=='wireguard':settings={'secretKey':base64.b64encode(bytes(range(32))).decode(),'address':['10.23.0.2/32'],'noKernelTun':True,'peers':[{'endpoint':'203.0.113.81:443','publicKey':base64.b64encode(bytes(range(1,33))).decode()}]}
-    elif protocol in ('socks','http'):settings={'servers':[common]}
     else:settings=common
     stream={'network':network,'security':security}
     if security=='tls':stream['tlsSettings']={'serverName':'fixture.invalid'}
@@ -25,7 +24,7 @@ def cases():
     for p in ('vless','vmess','trojan','shadowsocks'):
         for n in ('tcp','raw','tcp-http','ws','xhttp','grpc','httpupgrade','kcp'):
             for s in ('none','tls','reality'):yield p,n,s,outbound(p,n,s)
-    for p,n,s in [('wireguard','native','native'),('socks','tcp','none'),('http','tcp','tls'),('tuic','quic','tls'),('vless','http','tls'),('vless','quic','tls')]:yield p,n,s,outbound(p,n,s)
+    for p,n,s in [('wireguard','native','native'),('vless','http','tls'),('vless','quic','tls')]:yield p,n,s,outbound(p,n,s)
 def run():
     parser=argparse.ArgumentParser();parser.add_argument('--template',action='store_true');parser.add_argument('--compiler',default=str(HERE.parent/'.local/config-probe-plan'));args=parser.parse_args()
     rows=[]

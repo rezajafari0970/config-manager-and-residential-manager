@@ -1,30 +1,82 @@
 """Static egress checks for exact final configs. Does not certify health."""
-import copy,ipaddress
+import copy,ipaddress,json
 VERSION='exact-runtime-preflight.v2'
 def fail(code):raise ValueError(code)
+PROXY_PROTOCOLS = {'vless', 'vmess', 'trojan', 'shadowsocks', 'wireguard'}
+ROUTING_PROTOCOLS = {'freedom', 'direct', 'blackhole', 'block', 'dns', 'loopback', 'selector', 'urltest'}
 DISABLED_PROTOCOLS = {'hy', 'hy1', 'hy2', 'hysteria', 'hysteria1', 'hysteria2'}
 
+def parse_runtime_config(data):
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                fail('protocol_disabled')
+            result[key] = value
+        return result
+    return json.loads(data, object_pairs_hook=unique_fields)
+
 def require_enabled_config(config):
-    """Enforce the manager protocol policy before a standalone helper starts a core."""
-    def walk(value, section=None):
+    """Enforce the upstream policy on exact runtime JSON before a core starts."""
+    routes = {'outbound', 'outbounds', 'outbounddetour', 'outbounddetours', 'endpoints', 'proxies'}
+    listeners = {'inbound', 'inbounds', 'inbounddetour', 'inbounddetours'}
+    local_types = {'socks', 'socks5', 'http', 'mixed', 'tun', 'dokodemo-door', 'tunnel', 'redirect', 'tproxy', 'direct'}
+    stream_keys = {'streamsettings', 'transport', 'downloadsettings'}
+    structure = routes | listeners
+    selectors = structure | stream_keys | {'type', 'protocol', 'network', 'net'}
+    local_types |= PROXY_PROTOCOLS
+
+    def walk(value, section):
         if isinstance(value, list):
-            for item in value:
-                walk(item, section)
-        elif isinstance(value, dict):
-            for key, item in value.items():
-                key = key.casefold()
-                if section is not None and isinstance(item, str):
-                    selector = key in {'protocol', 'type', 'network', 'net', 'transport'}
-                    if (selector or key == 'method' and section == 'stream') and item.strip().casefold() in DISABLED_PROTOCOLS:
+            found = False
+            for child in value:
+                if walk(child, section):
+                    found = True
+            return found
+        if not isinstance(value, dict):
+            if section in ('outbound', 'inbound'):
+                fail('protocol_disabled')
+            return False
+        found = declared = False
+        seen = set()
+        for field, child in value.items():
+            key = field.strip().casefold()
+            if section != 'ignored' and key in selectors:
+                if key in seen:
+                    fail('protocol_disabled')
+                seen.add(key)
+            selector = child.strip().casefold() if isinstance(child, str) else ''
+            if section in ('outbound', 'inbound') and key in ('protocol', 'type'):
+                if declared:
+                    fail('protocol_disabled')
+                declared = True
+                if section == 'outbound':
+                    if selector in PROXY_PROTOCOLS:
+                        found = True
+                    elif selector not in ROUTING_PROTOCOLS:
                         fail('protocol_disabled')
-                child = None
-                if key in {'inbound', 'inbounds', 'outbound', 'outbounds', 'endpoints', 'proxies'}:
-                    child = 'proxy'
-                elif key in {'streamsettings', 'transport', 'downloadsettings'}:
-                    child = 'stream'
-                if isinstance(item, (list, dict)):
-                    walk(item, child)
-    walk(config, 'proxy')
+                elif selector not in local_types:
+                    fail('protocol_disabled')
+            if section in ('root', 'inbound', 'outbound', 'stream'):
+                if (key in ('network', 'net', 'transport') or section == 'stream' and key in ('type', 'method')) and selector in DISABLED_PROTOCOLS:
+                    fail('protocol_disabled')
+                if key in ('hysteriasettings', 'hysteria1settings', 'hysteria2settings', 'hy2settings') and child:
+                    fail('protocol_disabled')
+            if isinstance(child, (list, dict)) or section == 'root' and key in structure:
+                next_section = 'ignored'
+                if section == 'root' and key in routes:
+                    next_section = 'outbound'
+                elif section == 'root' and key in listeners:
+                    next_section = 'inbound'
+                elif key in stream_keys:
+                    next_section = 'stream'
+                if walk(child, next_section):
+                    found = True
+        if section in ('outbound', 'inbound') and not declared:
+            fail('protocol_disabled')
+        return found
+    if not isinstance(config, dict) or not walk(config, 'root'):
+        fail('protocol_disabled')
 
 def relay_tcp_mask(value,network):
     # Same narrow driver as internal/compat: only a TCP Fragment wrapper;

@@ -78,7 +78,12 @@ func TestDisableHysteriaReconcilesLegacySubscriptionsAndRetainedProfiles(t *test
 	count(1, "SELECT count(*) FROM conversion_results WHERE hash IN(SELECT raw_hash FROM memberships WHERE source_id=?)", source)
 	count(0, "SELECT count(*) FROM conversion_jobs WHERE hash IN(?,?)", uri, retained)
 	count(0, "SELECT count(*) FROM egress_inventory WHERE hash IN(?,?)", uri, retained)
-	count(2, "SELECT count(*) FROM egress_jobs WHERE hash IN(?,?) AND paused=1 AND reason='protocol_disabled' AND token=''", uri, retained)
+	count(2, "SELECT count(*) FROM egress_jobs WHERE hash IN(?,?) AND paused=1 AND state='DELETED' AND reason='protocol_disabled' AND ever_accepted=0 AND candidate_hash='' AND token=''", uri, retained)
+	for _, blocked := range []string{uri, retained} {
+		if kept, err := s.Referenced(ctx, blocked); err != nil || kept {
+			t.Fatalf("ineligible profile kept alive in vault: kept=%t, err=%v", kept, err)
+		}
+	}
 	count(1, "SELECT count(*) FROM conversion_inputs WHERE hash IN(SELECT raw_hash FROM memberships WHERE source_id=?)", good)
 	count(0, "SELECT count(*) FROM conversion_results WHERE candidate_hash=?", template)
 	count(0, "SELECT count(*) FROM network_rotation_queue WHERE candidate_hash=?", template)
@@ -101,8 +106,8 @@ func TestRestoredHysteriaCandidateIsWithheldAndRetired(t *testing.T) {
 	if err = s.reconcileDisabledProtocols(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.unknownProtocolHashes.Load(hash); !ok {
-		t.Fatal("missing candidate was not scheduled for admission on restore")
+	if s.allowedProtocols.contains(hash) {
+		t.Fatal("missing candidate entered the allowlist")
 	}
 	ref, err := s.vault.Put(ctx, strings.NewReader(raw))
 	if err != nil {
@@ -125,5 +130,59 @@ func TestRestoredHysteriaCandidateIsWithheldAndRetired(t *testing.T) {
 			t.Fatal("obsolete candidate remained eligible for rotation")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestNewBlobsMustPassPolicyOnFirstRead(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for _, raw := range []string{
+		"socks5://proxy.example:1080",
+		`{"outbounds":[{"type":"tuic","server":"example.org"}]}`,
+		`{"outbounds":[{"protocol":"vmess"},{"protocol":"hysteria"}]}`,
+		`{"outbound":{"protocol":"trojan"},"outboundDetour":[{"protocol":"hysteria"}]}`,
+	} {
+		ref, err := s.vault.Put(ctx, strings.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.vault.Release(ref.Hash)
+		body, err := s.openExportBlob(ref.Hash)
+		if body != nil {
+			body.Close()
+			t.Fatalf("new unsupported bytes became readable: %s", raw)
+		}
+		if err != ErrNotFound || s.allowedProtocols.contains(ref.Hash) {
+			t.Fatalf("admission returned %v", err)
+		}
+	}
+	raw := sourceURI(23)
+	ref, err := s.vault.Put(ctx, strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.vault.Release(ref.Hash)
+	body, err := s.openExportBlob(ref.Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.Close()
+	if !s.allowedProtocols.contains(ref.Hash) {
+		t.Fatal("allowed immutable bytes not memoized")
+	}
+}
+
+func TestRetireOlderDisabledQuarantineWithoutVaultBytes(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	h := repair.Digest([]byte("retired unavailable profile"))
+	if _, err := s.db.Exec("INSERT INTO egress_jobs(hash,kind,size,first_seen,last_seen,state,reason,paused,ever_accepted) VALUES(?,'json',2,1,1,'QUARANTINED','protocol_disabled',1,1)", h); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcileDisabledProtocols(); err != nil {
+		t.Fatal(err)
+	}
+	if retained, err := s.Referenced(ctx, h); err != nil || retained {
+		t.Fatalf("older quarantine retained: %t, %v", retained, err)
 	}
 }

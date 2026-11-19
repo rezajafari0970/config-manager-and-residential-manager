@@ -111,19 +111,7 @@ class NativeBox(lab.Sandbox):
         return out
     def core_command(self,test):return ['/xray','check' if test else 'run','-c','/config.json']
     def inspect(self,config):
-        mapped=[]
-        for ob in config.get('outbounds',[]):
-            if ob.get('type') != 'tuic':raise ValueError('outbound_driver_pending')
-            settings={'address':ob.get('server'),'port':ob.get('server_port',443)}
-            item={'protocol':'socks','settings':settings}
-            if ob.get('server_ports'):
-                ports=','.join(str(p).replace(':','-') for p in ob['server_ports'])
-                item['streamSettings']={'finalmask':{'quicParams':{'udpHop':{'ports':ports}}}}
-            mapped.append(item)
-        for endpoint in config.get('endpoints',[]):
-            if endpoint.get('type')!='wireguard' or endpoint.get('system'):raise ValueError('outbound_driver_pending')
-            for peer in endpoint.get('peers',[]):mapped.append({'protocol':'socks','settings':{'address':peer.get('address'),'port':peer.get('port')}})
-        return lab.endpoints({'outbounds':mapped})
+        return lab.native_endpoints(config)
 
 def main():
     global OWN

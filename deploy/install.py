@@ -40,7 +40,11 @@ def sandbox_check(source,core):
     required={'cpu','memory','pids'}
     if required-current:controllers.write_text(' '.join('+'+v for v in sorted(required-current)))
     with mod.Sandbox(core,secrets.token_hex(3),8192,prefix='ctf') as box:
-        p=box.launch(b'{"log":{"loglevel":"none"},"outbounds":[{"protocol":"blackhole","tag":"deny"}]}',True)
+        # The sandbox runs Xray's configuration check without opening a connection.
+        fixture = {"protocol": "shadowsocks", "settings": {"servers": [{
+            "address": "127.0.0.1", "port": 9, "method": "aes-128-gcm", "password": "sandbox-check"
+        }]}}
+        p=box.launch(json.dumps({"log":{"loglevel":"none"},"outbounds":[fixture]}).encode(), True)
         p.wait(timeout=20)
         if p.returncode:raise RuntimeError('Kernel sandbox test failed: namespaces/cgroups/nftables/bubblewrap are required')
 def main():

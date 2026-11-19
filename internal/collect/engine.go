@@ -251,7 +251,7 @@ func (e *Engine) runJobWithBudgets(parent context.Context, job Job, fetchTimeout
 		return
 	}
 	defer spool.Close()
-	_, err = io.Copy(spool, &contextReader{ctx, response.Body})
+	result.ReceivedBytes, err = io.Copy(spool, &contextReader{ctx, response.Body})
 	if err != nil && errors.Is(err, io.ErrUnexpectedEOF) && response.Chunked && response.Status >= 200 && response.Status < 300 && ctx.Err() == nil {
 		if recovery, ok := e.fetch.(BodyRecoveryDriver); ok {
 			_ = response.Body.Close()
@@ -272,7 +272,7 @@ func (e *Engine) runJobWithBudgets(parent context.Context, job Job, fetchTimeout
 					result.ErrorCode = "incomplete_body"
 					return
 				}
-				_, err = io.Copy(spool, &contextReader{ctx, response.Body})
+				result.ReceivedBytes, err = io.Copy(spool, &contextReader{ctx, response.Body})
 				if err == nil {
 					log.Printf("collector body recovery driver=%s rule=%s", e.fetch.Name(), response.RecoveryRule)
 				}
@@ -292,99 +292,76 @@ func (e *Engine) runJobWithBudgets(parent context.Context, job Job, fetchTimeout
 	defer func() {
 		log.Printf("collector phases fetch_ms=%d processing_ms=%d extracted=%d code=%s", fetchMS, time.Since(started).Milliseconds()-fetchMS, result.Extracted, result.ErrorCode)
 	}()
-	if _, err = spool.Seek(0, io.SeekStart); err != nil {
-		result.ErrorCode = "storage_error"
-		return
-	}
-	raw, err := e.vault.Put(ctx, &contextReader{ctx, spool})
-	if err != nil {
-		result.ErrorCode = phaseError(phase, err)
-		return
-	}
-	pins = append(pins, raw.Hash)
-	result.Raw = raw
-	if response.Status < 200 || response.Status >= 300 {
-		result.ErrorCode = "http_error"
-		result.ContentState = "http_error"
-		return
-	}
-	unique := 0
-	var skippedDisabled bool
+	httpOK := response.Status >= 200 && response.Status < 300
 	batch := newStageBuffer(e.repo, e.vault, job)
 	defer batch.release()
-	result.Staged = true
-	err = e.formats.Extract(ctx, spoolPath, func(ctx context.Context, r io.Reader, kind string) error {
-		if protocolpolicy.DisabledKind(kind) {
-			skippedDisabled = true
-			return nil
-		}
-		sample := &sampleWriter{}
-		ref, err := e.vault.Put(ctx, io.TeeReader(r, sample))
-		if err != nil {
-			return err
-		}
-		complete := ref.Size <= int64(len(sample.data))
-		var disabled bool
-		if complete {
-			disabled = protocolpolicy.Disabled(kind, sample.data)
-		} else {
-			var whole io.ReadCloser
-			whole, err = e.vault.Open(ref.Hash)
-			if err == nil {
-				disabled, err = protocolpolicy.DisabledReader(kind, &contextReader{ctx, whole})
-				whole.Close()
+	result.Staged = httpOK
+	var accept acceptRecord
+	if httpOK {
+		accept = func(ctx context.Context, kind string, rec sourceRecord) (bool, error) {
+			quality := e.inspectors.Inspect(rec.sample, rec.complete, kind)
+			diagnostic := e.repairs.Propose(rec.sample, rec.complete, kind, quality)
+			if len(diagnostic.Candidate) > 0 && protocolpolicy.Disabled(kind, diagnostic.Candidate) {
+				return false, nil
 			}
-		}
-		if disabled || err != nil {
-			e.vault.Release(ref.Hash)
-			skippedDisabled = skippedDisabled || disabled
-			return err
-		}
-		quality := e.inspectors.Inspect(sample.data, complete, kind)
-		diagnostic := e.repairs.Propose(sample.data, complete, kind, quality)
-		if len(diagnostic.Candidate) > 0 && protocolpolicy.Disabled(kind, diagnostic.Candidate) {
-			e.vault.Release(ref.Hash)
-			skippedDisabled = true
-			return nil
-		}
-		batch.pin(ref.Hash)
-		identity := Fingerprint(sample.data, complete, kind, ref.Hash)
-		switch quality {
-		case "valid":
-			result.ValidCount++
-		case "invalid":
-			result.InvalidCount++
-		default:
-			result.UnknownCount++
-		}
-		result.Extracted++
-		var candidate blob.Ref
-		if len(diagnostic.Candidate) > 0 {
-			if e.inspectors.Inspect(diagnostic.Candidate, true, kind) != "valid" {
-				diagnostic.Status = "blocked"
-				diagnostic.Candidate = nil
-				diagnostic.CandidateSHA256 = ""
-			} else {
-				candidate, err = e.vault.Put(ctx, bytes.NewReader(diagnostic.Candidate))
-				if err != nil {
+			ref, err := e.vault.Put(ctx, rec)
+			if err != nil {
+				return false, err
+			}
+			batch.pin(ref.Hash)
+			identity := Fingerprint(rec.sample, rec.complete, kind, ref.Hash)
+			switch quality {
+			case "valid":
+				result.ValidCount++
+			case "invalid":
+				result.InvalidCount++
+			default:
+				result.UnknownCount++
+			}
+			result.Extracted++
+			var candidate blob.Ref
+			if len(diagnostic.Candidate) > 0 {
+				if e.inspectors.Inspect(diagnostic.Candidate, true, kind) != "valid" {
 					diagnostic.Status = "blocked"
 					diagnostic.Candidate = nil
 					diagnostic.CandidateSHA256 = ""
 				} else {
-					batch.pin(candidate.Hash)
+					candidate, err = e.vault.Put(ctx, bytes.NewReader(diagnostic.Candidate))
+					if err != nil {
+						diagnostic.Status = "blocked"
+						diagnostic.Candidate = nil
+						diagnostic.CandidateSHA256 = ""
+					} else {
+						batch.pin(candidate.Hash)
+					}
 				}
 			}
+			diagnostic.OriginalSHA256 = ref.Hash
+			diagnostic.Candidate = nil // Persisted separately; never retain payloads in the metadata batch.
+			return true, batch.add(ctx, Item{Ref: ref, Identity: identity, Kind: kind, Quality: quality, Repair: diagnostic, Candidate: candidate})
 		}
-		diagnostic.OriginalSHA256 = ref.Hash
-		diagnostic.Candidate = nil // Persisted separately; never retain payloads in the metadata batch.
-		return batch.add(ctx, Item{Ref: ref, Identity: identity, Kind: kind, Quality: quality, Repair: diagnostic, Candidate: candidate})
-	})
+	}
+	raw, changed, err := filterSource(ctx, e.formats, e.vault, spool, spoolPath, blob.Ref{}, accept)
+	if raw.Hash != "" {
+		pins = append(pins, raw.Hash)
+		result.Raw = raw
+	}
+	result.DiscardResponse = changed && raw.Hash == ""
+	if !httpOK {
+		if err != nil && !IsContentError(err) {
+			result.ErrorCode = phaseError(phase, err)
+			return
+		}
+		result.ErrorCode = "http_error"
+		result.ContentState = "http_error"
+		return
+	}
 	if err == nil || IsContentError(err) {
 		if flushErr := batch.flush(ctx); flushErr != nil {
 			err = flushErr
 		}
 	}
-	unique = batch.unique
+	unique := batch.unique
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
@@ -400,7 +377,7 @@ func (e *Engine) runJobWithBudgets(parent context.Context, job Job, fetchTimeout
 		}
 	}
 	result.ContentState = ContentState(spoolPath, result.ValidCount, result.InvalidCount, result.UnknownCount)
-	if skippedDisabled && result.Extracted == 0 && err == nil {
+	if result.DiscardResponse && result.Extracted == 0 && err == nil {
 		result.ContentState = "empty"
 	}
 	result.State = "updated"
@@ -419,19 +396,6 @@ func (e *Engine) runJobWithBudgets(parent context.Context, job Job, fetchTimeout
 
 }
 
-type sampleWriter struct{ data []byte }
-
-func (w *sampleWriter) Write(p []byte) (int, error) {
-	n := len(p)
-	remaining := 1024*1024 - len(w.data)
-	if remaining > 0 {
-		if len(p) > remaining {
-			p = p[:remaining]
-		}
-		w.data = append(w.data, p...)
-	}
-	return n, nil
-}
 func errorCode(err error) string {
 	if errors.Is(err, ErrBlocked) {
 		return "blocked_destination"

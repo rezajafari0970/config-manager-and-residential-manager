@@ -300,16 +300,13 @@ func normalize(ob M) error {
 	}
 	protocol, _ := ob["protocol"].(string)
 	switch protocol {
-	case "vless", "vmess", "trojan", "shadowsocks", "socks", "hysteria", "wireguard", "http":
+	case "vless", "vmess", "trojan", "shadowsocks", "wireguard":
 	default:
 		return errors.New("unsupported_template_protocol")
 	}
 	s, ok := ob["settings"].(M)
 	if !ok {
 		return errors.New("missing_protocol_settings")
-	}
-	if protocol == "hysteria" && s["version"] != json.Number("2") {
-		return errors.New("hysteria1_unsupported_by_target_core")
 	}
 	// An absent VLESS encryption field has the unambiguous standard value
 	// "none". This supplies syntax only; it does not add TLS or remote support.

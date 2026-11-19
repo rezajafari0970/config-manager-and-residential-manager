@@ -64,16 +64,16 @@ func querySourceConversions(ctx context.Context, db conversionQuerier, source st
 }
 
 func querySourceIdentityConversions(ctx context.Context, db conversionQuerier, source, identity string, page int, all bool) ([]Conversion, error) {
-	return queryScopedConversions(ctx, db, source, identity, "", page, all)
+	return queryScopedConversions(ctx, db, source, identity, "", page, all, false)
 }
 
 func querySourceCandidateConversions(ctx context.Context, db conversionQuerier, source, candidate string) ([]Conversion, error) {
-	return queryScopedConversions(ctx, db, source, "", candidate, 0, true)
+	return queryScopedConversions(ctx, db, source, "", candidate, 0, true, false)
 }
 
-func queryScopedConversions(ctx context.Context, db conversionQuerier, source, identity, candidate string, page int, all bool) ([]Conversion, error) {
-	now := time.Now().UnixMilli()
-	q := conversionQuery + " ORDER BY id"
+func queryScopedConversions(ctx context.Context, db conversionQuerier, source, identity, candidate string, page int, all, healthyOnly bool) ([]Conversion, error) {
+	now := readStamp(ctx)
+	q := conversionQuery
 	args := []any{convert.Version, now, convert.Version, now, now, now}
 	filter := ""
 	if source != "" {
@@ -97,6 +97,11 @@ func queryScopedConversions(ctx context.Context, db conversionQuerier, source, i
 	if candidate != "" {
 		args = append(args, candidate)
 	}
+	if healthyOnly {
+		q += " AND current=1 AND core='passed' AND connection='passed' AND valid_until>? AND length(candidate_hash)=64 AND candidate_hash NOT GLOB '*[^0-9a-f]*'"
+		args = append(args, now)
+	}
+	q += " ORDER BY id"
 	if !all {
 		q += " LIMIT 100 OFFSET ?"
 		args = append(args, max(0, page)*100)
@@ -227,7 +232,7 @@ func (m conversionModule) Register(mux *http.ServeMux) {
 			failure(w, e)
 			return
 		}
-		entries, e := querySourceConversions(r.Context(), s.store.reader(), source, page, false)
+		entries, e := queryScopedConversions(r.Context(), s.store.reader(), source, "", "", page, false, r.URL.Query().Get("healthy") == "1")
 		if e != nil {
 			failure(w, e)
 			return
@@ -265,18 +270,28 @@ func (m conversionModule) Register(mux *http.ServeMux) {
 			failure(w, e)
 			return
 		}
-		rows, e := querySourceConversions(r.Context(), s.store.reader(), source, 0, true)
+		scope := rawScope{source: source, id: r.PathValue("id")}
+		rows, e := querySourceIdentityConversions(r.Context(), s.store.reader(), source, scope.id, 0, true)
 		if e != nil {
 			failure(w, e)
 			return
 		}
 		for _, c := range rows {
-			if c.ID != r.PathValue("id") {
+			if !c.Available {
 				continue
 			}
 			b, e := s.store.conversionBytes(c)
 			if e != nil {
 				_ = s.store.retryConversionBlob(r.Context(), c)
+				failure(w, ErrNotFound)
+				return
+			}
+			current, err := s.store.verifiedSnapshotCurrent(r.Context(), scope, []networkEntry{{Conversion: c}})
+			if err != nil {
+				failure(w, err)
+				return
+			}
+			if !current {
 				failure(w, ErrNotFound)
 				return
 			}
@@ -316,7 +331,7 @@ func (s *Server) writeJSONLines(w http.ResponseWriter, r *http.Request, source s
 	}
 	defer out.Close()
 	out.array = strings.HasSuffix(r.URL.Path, "/configs.json")
-	count := 0
+	var delivered []networkEntry
 	for _, c := range rows {
 		if r.Context().Err() != nil {
 			return
@@ -333,7 +348,17 @@ func (s *Server) writeJSONLines(w http.ResponseWriter, r *http.Request, source s
 			failure(w, e)
 			return
 		}
-		count++
+		delivered = append(delivered, networkEntry{Conversion: c})
+	}
+	current, e := s.store.verifiedSnapshotCurrent(r.Context(), rawScope{source: source}, delivered)
+	if e != nil {
+		failure(w, e)
+		return
+	}
+	if !current {
+		w.Header().Set("Retry-After", "1")
+		failure(w, ErrConflict)
+		return
 	}
 	if e = out.Rewind(); e != nil {
 		failure(w, e)
@@ -345,7 +370,7 @@ func (s *Server) writeJSONLines(w http.ResponseWriter, r *http.Request, source s
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	}
 	w.Header().Set("Content-Disposition", "inline")
-	w.Header().Set("X-Config-Count", strconv.Itoa(count))
+	w.Header().Set("X-Config-Count", strconv.Itoa(len(delivered)))
 	w.Header().Set("X-Android-Import", "not-run")
 	w.Header().Set("X-Verification-Scope", "exact-target-core; https-dns-tcp-udp-verified; android-not-run")
 	_, _ = out.WriteTo(w)

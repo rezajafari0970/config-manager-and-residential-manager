@@ -40,7 +40,7 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{}
 	r.Register(JSONDriver{})
-	for _, kind := range []string{"vless", "trojan", "ss", "hy2", "hysteria2", "socks", "socks5"} {
+	for _, kind := range []string{"vless", "trojan", "ss"} {
 		r.Register(URIUserinfoDriver{Protocol: kind})
 	}
 	return r

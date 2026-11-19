@@ -97,8 +97,8 @@ func TestEndpointDriversAndSpoofing(t *testing.T) {
 	}{
 		{string(raw("3.1.2.3")), "3.1.2.3", true},
 		{`vmess://` + base64.StdEncoding.EncodeToString([]byte(`{"v":"2","add":"5.9.1.2","port":"443","id":"11111111-1111-4111-8111-111111111111","net":"ws","host":"cloudflare.com","tls":"tls"}`)), "5.9.1.2", true},
-		{`hysteria://3.1.2.3:443?peer=cloudflare.com`, "3.1.2.3", true},
-		{`{"dns":{"servers":["1.1.1.1"]},"outbounds":[{"type":"hysteria2","server":"5.9.1.2"},{"type":"direct"}]}`, "5.9.1.2", true},
+		{`hysteria://3.1.2.3:443?peer=cloudflare.com`, "", false},
+		{`{"dns":{"servers":["1.1.1.1"]},"outbounds":[{"type":"trojan","server":"5.9.1.2"},{"type":"direct"}]}`, "5.9.1.2", true},
 		{`{"outbounds":[{"protocol":"wireguard","settings":{"peers":[{"endpoint":"[2606:4700::1]:443"}]}}]}`, "2606:4700::1", true},
 		{`{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"3.1.2.3"}]},"streamSettings":{"sockopt":{"dialerProxy":"other"}}}]}`, "", false},
 		{`{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"3.1.2.3"}]},"streamSettings":{"xhttpSettings":{"extra":{"downloadSettings":{"address":"5.9.1.2"}}}}}]}`, "", false},

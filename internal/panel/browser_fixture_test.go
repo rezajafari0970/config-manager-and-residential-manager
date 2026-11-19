@@ -3,6 +3,7 @@ package panel
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/collect"
@@ -20,6 +21,7 @@ import (
 )
 
 const browserURI = "vless://00000000-0000-4000-8000-000000000001@192.0.2.1:443?security=tls&sni=vpn.example#Original%20Label\r\n"
+const browserUnreachable = "trojan://fixture@192.0.2.3:443?sni=failed.example#FixtureFailed\n"
 const browserJSON = "{ \"outbounds\" : [{\"protocol\":\"vless\",\"settings\":{\"address\":\"vpn.example\",\"port\":443,\"id\":\"00000000-0000-4000-8000-000000000002\"}}], \"stats\" : [], \"opaque\" : 9007199254740993 }\r\n"
 
 type browserDriver struct{}
@@ -40,7 +42,8 @@ func (browserDriver) Fetch(ctx context.Context, job collect.Job) (collect.Respon
 	}
 	body := browserURI
 	if strings.Contains(job.URL, "Verde") {
-		body = browserURI + browserURI + browserJSON
+		blockedProfile := base64.RawStdEncoding.EncodeToString([]byte(`{"outbounds":[{"protocol":"hysteria2","settings":{"address":"blocked.invalid","port":443}}]}`))
+		body = browserURI + browserURI + browserJSON + browserUnreachable + "hy2://fixture@blocked.invalid:443\njson://" + blockedProfile + "\n"
 	}
 	if strings.Contains(job.URL, "Empty") {
 		body = "\n"
@@ -96,9 +99,7 @@ func TestBrowserFixtureServer(t *testing.T) {
 				if len(convert.Prepare(j.Raw).Candidates) == 0 {
 					continue
 				}
-				r := conversionResult(*j, 0, true)
-				// Synthetic connection evidence for the UI harness only.
-				r.Code = "https_payload_verified" // synthetic UI receipt only; no network measurement
+				r := conversionResult(*j, 0, !bytes.Contains(j.Raw, []byte("#FixtureFailed")))
 				_ = store.CompleteProbe(ctx, r)
 			}
 		}

@@ -14,6 +14,7 @@ func TestHysteriaPolicyAcrossRepresentations(t *testing.T) {
 	late := `{"remarks":"` + strings.Repeat("x", 2*1024*1024) + `","outbounds":[{"type":"hy2"}]}`
 	for _, raw := range []string{
 		" hy://host:443 ", "HYSTERIA1://host", "HY1://host", "hy2://host", "HYSTERIA2://host",
+		`{"remarks":"hysteria2","outbounds":[{"protocol":"trojan","tag":"hy","streamSettings":{"network":"tcp","hysteriaSettings":{"version":2}}}]}`,
 		mixed, late, `{"outbounds":[{"type":"hysteria2"}]}`, `{"proxies":[{"type":"hysteria"}]}`,
 		`{"outbound":{"protocol":"hysteria"}}`,
 		`{"outbounds":[{"settings":{"address":"host",},"protocol":"hysteria"}]}`,
@@ -33,8 +34,7 @@ func TestHysteriaPolicyAcrossRepresentations(t *testing.T) {
 	for _, raw := range []string{
 		"vless://user@host?type=tcp#hy2", "trojan://hysteria@hy2.example:443",
 		"vless://user@host?path=hysteria", "wireguard://key@host:2000",
-		"vmess://" + b64(`{"net":"ws","ps":"hysteria2"}`),
-		`{"remarks":"hysteria2","outbounds":[{"protocol":"trojan","tag":"hy","streamSettings":{"network":"tcp","hysteriaSettings":{"version":2}}}]}`,
+		"vmess://" + b64(`{"add":"example.com","id":"test","net":"ws","ps":"hysteria2"}`),
 		`{"outbounds":[{"protocol":"vless","streamSettings":{"wsSettings":{"headers":{"type":"hysteria"}}}}],"routing":{"rules":[{"outboundTag":"hy2"}]}}`,
 		`{"outbounds":[{"protocol":"shadowsocks","settings":{"method":"hysteria"}}]}`,
 	} {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""All current unique inputs: exact builds; bounded representatives: live traffic.
+"""Current inventory statuses and exact builds of publicly verified inputs.
 No raw bytes, addresses, credentials or subscription tokens are written to receipts.
 Uses the existing isolated core sandbox. This audit does not grant publication.
 """
@@ -19,7 +19,6 @@ def family(config):
   sec=stream.get('security','none') or 'none'
   if n=='tcp' and stream.get('rawSettings',stream.get('tcpSettings',{})).get('header',{}).get('type')=='http':n='tcp-http'
   if p=='wireguard':n,sec='udp','native'
-  if p=='hysteria':p='hysteria'+str(ob.get('settings',{}).get('version','?'))
   labels.add('+'.join(map(safe_label,(p,n,sec))))
  return ','.join(sorted(labels))[:500] or 'unknown'
 def raw_family(raw,kind):
@@ -45,9 +44,14 @@ def run(a):
   if len(rows)<100:break
  records=[];candidates={};raw_seen=set()
  def prepare(e):
+  if not e.get('available'):
+   return e,'',{'code':'unverified_output'},safe_label(e['kind'])+'+unparsed'
   try:
    raw=fetch('/output/raw/'+e['id']+'?preview=1')
-   h=lab.digest(raw);plan=json.loads(subprocess.run([a.compiler,'--template'],input=raw,capture_output=True,check=True,timeout=12).stdout)
+   h=lab.digest(raw)
+   if h!=e['hash']:
+    return e,'',{'code':'snapshot_changed'},safe_label(e['kind'])+'+unparsed'
+   plan=json.loads(subprocess.run([a.compiler,'--template'],input=raw,capture_output=True,check=True,timeout=12).stdout)
    return e,h,plan,raw_family(raw,e['kind'])
   except urllib.error.HTTPError as ex:return e,'',{'code':'snapshot_http_'+str(ex.code)},safe_label(e['kind'])+'+unparsed'
   except Exception as ex:return e,'',{'code':'snapshot_or_prepare_'+type(ex).__name__},safe_label(e['kind'])+'+unparsed'
@@ -55,7 +59,7 @@ def run(a):
   for e,h,plan,f in pool.map(prepare,entries):
    if h and h in raw_seen:continue
    raw_seen.add(h)
-   row={'identity':e['id'],'raw_sha256':h,'family':f,'prepare':plan.get('code'),'normal':'not_run','connection':'not_run'}
+   row={'identity':e['id'],'raw_sha256':h,'family':f,'prepare':plan.get('code'),'normal':'not_run','connection':'not_run','inventory_state':e['state'],'inventory_code':e['code']}
    records.append(row)
    for c in plan.get('candidates',[]):
     data=base64.b64decode(c['config'],validate=True);assert lab.digest(data)==c['sha256']
@@ -66,7 +70,8 @@ def run(a):
  slots=queue.Queue()
  for i in range(3):slots.put(i)
  pins=[('/opt/config-repair/core-26.10.31/xray',driver.CLIENT_CORE_SHA),('/opt/config-repair/core-26.11.9/xray',driver.CORE_SHA)]
- for path,sha in pins:assert lab.digest(pathlib.Path(path).read_bytes())==sha
+ if candidates:
+  for path,sha in pins:assert lab.digest(pathlib.Path(path).read_bytes())==sha
  def build(item):
   slot=slots.get()
   try:
@@ -119,7 +124,7 @@ def run(a):
  summary=[]
  for f in sorted({x['family'] for x in records}):
   rows=[x for x in records if x['family']==f]
-  summary.append({'family':f,'inputs':len(rows),'build_passed':sum(x['normal']=='passed' for x in rows),'prepare_rejected':sum(x['normal']=='not_run' and not str(x['prepare']).startswith('snapshot_') for x in rows),'snapshot_unavailable':sum(str(x['prepare']).startswith('snapshot_') for x in rows),'build_rejected':sum(x['normal']=='rejected' for x in rows),'connection_samples':sum(x['family']==f for x in selected),'connected_samples':sum(x['family']==f and x.get('result',{}).get('connection')=='passed' for x in selected),'native_ping_passed':sum(x['family']==f and x.get('native',{}).get('ok') is True for x in selected)})
+  summary.append({'family':f,'inputs':len(rows),'build_passed':sum(x['normal']=='passed' for x in rows),'unverified_output':sum(x['prepare']=='unverified_output' for x in rows),'prepare_rejected':sum(x['normal']=='not_run' and x['prepare']!='unverified_output' and not str(x['prepare']).startswith('snapshot_') for x in rows),'snapshot_unavailable':sum(str(x['prepare']).startswith('snapshot_') for x in rows),'build_rejected':sum(x['normal']=='rejected' for x in rows),'connection_samples':sum(x['family']==f for x in selected),'connected_samples':sum(x['family']==f and x.get('result',{}).get('connection')=='passed' for x in selected),'native_ping_passed':sum(x['family']==f and x.get('native',{}).get('ok') is True for x in selected)})
  report={'version':'template-audit.v1','tested':int(time.time()),'template':'v7','target':'v2rayNG2.3.15','android_apk':'not_run','carriers':'not_run','inputs':len(records),'unique_candidates':len(candidates),'per_family':a.per_family,'families':summary,'records':records,'native_samples':[{'family':x['family'],'sha256':x['candidate']['sha256'],**x.get('native',{})} for x in selected]}
  pathlib.Path(a.report).write_text(json.dumps(report,indent=2));print(json.dumps({'stage':'complete','families':summary,'report':a.report}),flush=True)
 if __name__=='__main__':

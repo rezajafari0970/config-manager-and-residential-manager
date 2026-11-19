@@ -10,15 +10,15 @@ import (
 
 // Reconcile before any API or worker is admitted. Scan only referenced immutable
 // inputs and derived candidates, including Residential identities without a source.
-// Raw upstream responses are mixed subscriptions, handled at their output boundary.
+// Mixed subscription archives are sanitized separately before this pass.
 func (s *Store) reconcileDisabledProtocols() error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT hash,max(kind) FROM (
- SELECT hash,kind FROM artifacts
+	rows, err := tx.Query(`SELECT hash,max(kind),max(previously_disabled) FROM (
+ SELECT refs.*,0 AS previously_disabled FROM (SELECT hash,kind FROM artifacts
  UNION ALL SELECT raw_hash,kind FROM memberships
  UNION ALL SELECT hash,kind FROM staged
  UNION ALL SELECT hash,kind FROM egress_inventory
@@ -27,6 +27,8 @@ func (s *Store) reconcileDisabledProtocols() error {
  UNION ALL SELECT candidate_hash,'' FROM template_preparations WHERE candidate_hash!=''
  UNION ALL SELECT candidate_hash,'' FROM conversion_results WHERE candidate_hash!=''
  UNION ALL SELECT candidate_hash,'' FROM conversion_receipts WHERE valid_until>CAST(unixepoch('subsec')*1000 AS INTEGER)
+ ) AS refs
+ UNION ALL SELECT hash,'',1 FROM egress_jobs WHERE reason='protocol_disabled' AND state!='DELETED'
  ) WHERE hash!='' GROUP BY hash`)
 	if err != nil {
 		return err
@@ -34,19 +36,25 @@ func (s *Store) reconcileDisabledProtocols() error {
 	var disabled []string
 	for rows.Next() {
 		var hash, kind string
-		if err := rows.Scan(&hash, &kind); err != nil {
+		var previouslyDisabled bool
+		if err := rows.Scan(&hash, &kind, &previouslyDisabled); err != nil {
 			rows.Close()
 			return err
 		}
-		if protocolpolicy.DisabledKind(kind) {
+		if previouslyDisabled || protocolpolicy.DisabledKind(kind) {
 			disabled = append(disabled, hash)
 			continue
 		}
-		blocked, err := s.inspectProtocolBlob(hash, kind)
+		blocked, err := s.inspectProtocolBlob(hash)
 		if err != nil {
-			s.unknownProtocolHashes.Store(hash, kind)
-		} else if blocked {
+			// Missing or corrupt bytes cannot be published. If restored, their
+			// first read still requires positive admission by openExportBlob.
+			continue
+		}
+		if blocked {
 			disabled = append(disabled, hash)
+		} else {
+			s.allowedProtocols.add(hash)
 		}
 	}
 	err = rows.Err()
@@ -62,13 +70,13 @@ func (s *Store) reconcileDisabledProtocols() error {
 
 // Drain the vault even if parsing stopped early. The final encrypted chunk
 // verifies the immutable content hash and catches interrupted reads.
-func (s *Store) inspectProtocolBlob(hash, kind string) (bool, error) {
+func (s *Store) inspectProtocolBlob(hash string) (bool, error) {
 	r, err := s.vault.Open(hash)
 	if err != nil {
 		return false, err
 	}
 	defer r.Close()
-	blocked, err := protocolpolicy.DisabledReader(kind, r)
+	blocked, err := protocolpolicy.DisabledReader("", r)
 	if err != nil {
 		return false, err
 	}
@@ -142,8 +150,9 @@ func deactivateProtocolHashes(tx *sql.Tx, hashes []string) error {
  UPDATE egress_jobs SET state='PENDING',reason='implementation_changed',revision=revision+1,token='',lease_until=0,claimed_at=0,
  valid_until=0,tested=0,next_run=0,candidate_hash='',candidate_size=0
  WHERE state!='DELETED' AND candidate_hash IN disabled_protocol_hashes AND hash NOT IN disabled_protocol_hashes;
- UPDATE egress_jobs SET paused=1,state='QUARANTINED',reason='protocol_disabled',revision=revision+1,token='',claimed_at=0,lease_until=0,valid_until=0
- WHERE state!='DELETED' AND reason!='protocol_disabled' AND hash IN disabled_protocol_hashes;
+ UPDATE egress_jobs SET paused=1,state='DELETED',reason='protocol_disabled',revision=revision+1,token='',claimed_at=0,lease_until=0,
+ ever_accepted=0,valid_until=0,candidate_hash='',candidate_size=0,next_run=0
+ WHERE state!='DELETED' AND hash IN disabled_protocol_hashes;
  DELETE FROM egress_unique WHERE hash IN disabled_protocol_hashes;
  -- Preserve a live allowed representative if an older fingerprint grouped
  -- distinct raw bytes. Its own health proof and country gates remain mandatory.
@@ -155,7 +164,7 @@ func deactivateProtocolHashes(tx *sql.Tx, hashes []string) error {
  -- egress_metric_unique counts an insertion; swapping bytes for an existing
  -- identity must not count a new registration.
  UPDATE egress_metrics SET registered=registered-changes() WHERE id=1 AND changes()>0;
- UPDATE egress_run_members SET status='excluded',state='QUARANTINED',completed_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
+ UPDATE egress_run_members SET status='excluded',state='DELETED',completed_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
  WHERE status='pending' AND hash IN disabled_protocol_hashes;
  DROP TABLE protocol_representatives;
  DROP TABLE protocol_sources;

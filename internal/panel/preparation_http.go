@@ -91,25 +91,29 @@ func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (comp
 	}
 	healthy := true // Public output always requires current exact-byte connection proof.
 	single := r.URL.Query().Get("single") == "1"
+	targetID := r.URL.Query().Get("id")
+	rotate := single && targetID == ""
 	scope := source + "/" + engine + "/" + strconv.FormatBool(healthy) + "/" + axis + "/" + group
-	unlock, e := s.store.lockRotation(r.Context(), "prepared/"+scope)
-	if e != nil {
-		failure(w, e)
-		return
+	if rotate {
+		unlock, err := s.store.lockRotation(r.Context(), "prepared/"+scope)
+		if err != nil {
+			failure(w, err)
+			return
+		}
+		defer unlock()
 	}
-	defer unlock()
 	cursor := ""
 	var cycle int64
-	if single {
+	if rotate {
 		_ = s.store.reader().QueryRowContext(r.Context(), "SELECT cursor,cycle FROM prepared_rotation WHERE scope=?", scope).Scan(&cursor, &cycle)
 	}
 	eligible := []preparedEntry{}
 	for _, v := range entries {
-		if v.Candidate != "" && (!healthy || v.Healthy) && (r.URL.Query().Get("id") == "" || r.URL.Query().Get("id") == v.ID) {
+		if v.Candidate != "" && (!healthy || v.Healthy) && (targetID == "" || targetID == v.ID) {
 			eligible = append(eligible, v)
 		}
 	}
-	if single && len(eligible) > 0 {
+	if rotate && len(eligible) > 0 {
 		chosen := eligible[0]
 		for _, v := range eligible {
 			if v.ID > cursor {
@@ -160,7 +164,12 @@ func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (comp
 		return
 	}
 	defer tx.Rollback()
-	if _, e = tx.ExecContext(r.Context(), "INSERT INTO prepared_rotation(scope,cursor) VALUES(?,'') ON CONFLICT DO NOTHING", scope); e != nil {
+	if rotate {
+		_, e = tx.ExecContext(r.Context(), "INSERT INTO prepared_rotation(scope,cursor) VALUES(?,'') ON CONFLICT DO NOTHING", scope)
+	} else {
+		_, e = tx.ExecContext(r.Context(), "UPDATE metadata SET value=value WHERE key='key-check'")
+	}
+	if e != nil {
 		failure(w, e)
 		return
 	}
@@ -179,7 +188,7 @@ func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (comp
 			return false
 		}
 	}
-	if single {
+	if rotate {
 		if _, e = tx.ExecContext(r.Context(), "UPDATE prepared_rotation SET cursor=?,cycle=? WHERE scope=?", written[0].ID, cycle, scope); e != nil {
 			failure(w, e)
 			return
@@ -198,8 +207,10 @@ func (s *Server) tryPreparedExport(w http.ResponseWriter, r *http.Request) (comp
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	}
 	w.Header().Set("X-Config-Count", strconv.Itoa(len(written)))
-	if single {
+	if rotate {
 		w.Header().Set("X-Export-Cycle", strconv.FormatInt(cycle, 10))
+	}
+	if single {
 		w.Header().Set("X-Content-SHA256", written[0].Candidate)
 	} else {
 		w.Header().Set("X-Content-SHA256", out.Hash())

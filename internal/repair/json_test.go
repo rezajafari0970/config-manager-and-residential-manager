@@ -46,7 +46,7 @@ func TestDepthAndSizeLimits(t *testing.T) {
 	}
 }
 func TestReportsMultipleIndependentProblems(t *testing.T) {
-	r := Analyze([]byte(`{"stats":[],"policy":[],"inbounds":{},"outbounds":[{"protocol":"hysteria","settings":{"version":1}}],"routing":{}}`))
+	r := Analyze([]byte(`{"stats":[],"policy":[],"inbounds":{},"outbounds":[{"protocol":null,"settings":[]}],"routing":{}}`))
 	if len(r.Findings) < 5 || r.Publishable {
 		t.Fatalf("%+v", r)
 	}

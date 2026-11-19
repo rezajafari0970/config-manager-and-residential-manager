@@ -109,7 +109,7 @@ func TestTrafficPolicyCoversFlatNestedChainsAndPools(t *testing.T) {
 		t.Fatal("not idempotent", e)
 	}
 	for _, policy := range []string{"allow", "skip", "unexpected"} {
-		single := M{"outbounds": []any{M{"protocol": "socks", "settings": M{"address": "192.0.2.1", "port": 1080}, "mux": M{"enabled": false, "xudpProxyUDP443": policy}}}}
+		single := M{"outbounds": []any{M{"protocol": "trojan", "settings": M{"address": "192.0.2.1", "port": 1080}, "mux": M{"enabled": false, "xudpProxyUDP443": policy}}}}
 		candidate, e := Apply(encode(t, single))
 		if policy == "unexpected" {
 			if e == nil {
@@ -124,7 +124,7 @@ func TestTrafficPolicyCoversFlatNestedChainsAndPools(t *testing.T) {
 }
 
 func TestTrafficPolicyPreservesNullMux(t *testing.T) {
-	raw := []byte(`{"outbounds":[{"protocol":"socks","settings":{"address":"192.0.2.1","port":1080},"mux":null}]}`)
+	raw := []byte(`{"outbounds":[{"protocol":"trojan","settings":{"address":"192.0.2.1","port":1080},"mux":null}]}`)
 	b, e := Apply(raw)
 	if e != nil || !bytes.Contains(b, []byte(`"mux":null`)) {
 		t.Fatal("null mux must remain disabled", e)

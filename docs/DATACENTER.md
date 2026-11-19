@@ -66,7 +66,7 @@ access policy applies. See `openapi-network.json` for the additive API contract.
 
 `GET /subscription/network/{axis}/{group}/{token}/raw.txt` preserves original
 healthy configuration bodies and separates them with a newline. `received.txt`
-is the explicitly unverified diagnostic inventory. `next.json` returns one current,
+serves the same verified members for compatibility. `next.json` returns one current,
 healthy stored Xray template; `native-next.json` returns one native sing-box template.
 `configs.json` and `native.jsonl` expose all verified templates for their engine.
 Usable raw count equals Xray plus native template count. The scopes have independent
@@ -107,7 +107,7 @@ JSON/json://, VMess and native protocol formats use their actual entry fields.
 This is a local syntax predicate cached by immutable raw hash (at most 8192
 booleans). It has no DNS queries, provider requests, queue, background workers,
 expiry or persistent classification records. Existing health results are reused
-for raw, all-template and rotating exports; received.txt remains diagnostic.
+for raw, all-template and rotating exports, including the legacy received.txt URL.
 Counts and final writer checks use the same canonical input selection.
 
 The former four-family UI/API/routes and DNS-family workers are removed. Startup

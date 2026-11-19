@@ -29,7 +29,7 @@ module.exports=async function(context,origin){
  assert.match(await page.locator('.source-count').first().textContent(),/۱۴۸/);
  assert.match(await page.locator('.source-error').first().textContent(),/موجودی قبلی/);
  await page.unroute('**/api/state*');
- const list=await(await context.request.get(origin+'/api/conversions')).json();
+ const list=await(await context.request.get(origin+'/api/conversions?healthy=1')).json();
  const item=list.entries.find(e=>e.candidate_hash);assert(item);
  let phase='valid',observed=0;
  await page.route('**/api/conversion/evidence/*',async route=>{

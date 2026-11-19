@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/driver"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"io"
 	"net/url"
 	"os"
@@ -45,10 +46,14 @@ func InspectConfig(raw []byte, complete bool, kind string) string {
 			proxy := false
 			for _, o := range outbounds {
 				var protocol string
-				if json.Unmarshal(o["protocol"], &protocol) != nil || protocol == "" {
+				name := o["protocol"]
+				if name == nil {
+					name = o["type"]
+				}
+				if json.Unmarshal(name, &protocol) != nil || protocol == "" {
 					return "invalid"
 				}
-				if protocol != "freedom" && protocol != "blackhole" && protocol != "dns" {
+				if protocolpolicy.AllowedProtocol(protocol) {
 					proxy = true
 				}
 				for _, key := range []string{"settings", "streamSettings"} {
@@ -103,7 +108,7 @@ func InspectConfig(raw []byte, complete bool, kind string) string {
 		}
 	}
 	switch kind {
-	case "vless", "trojan", "hysteria", "hysteria2", "hy2", "tuic", "wireguard", "wg", "socks", "socks5":
+	case "vless", "trojan", "wireguard", "wg":
 		u, e := url.Parse(string(b))
 		if e != nil || u.Hostname() == "" {
 			return "invalid"
@@ -134,7 +139,7 @@ func IsContentError(err error) bool {
 		return true
 	}
 	switch err.Error() {
-	case "invalid_json", "ambiguous_json", "invalid_json_string", "orphan_wireguard_section", "invalid_base64_envelope", "envelope_nesting_limit":
+	case "invalid_json", "ambiguous_json", "invalid_json_string", "orphan_wireguard_section", "invalid_base64_envelope", "invalid_percent_envelope", "envelope_nesting_limit":
 		return true
 	}
 	return false
@@ -200,7 +205,7 @@ func (d basicInspector) Inspect(raw []byte, complete bool) string {
 }
 func NewInspectionRegistry() *InspectionRegistry {
 	r := &InspectionRegistry{}
-	for _, kind := range []string{"json", "vless", "vmess", "trojan", "ss", "hysteria", "hysteria2", "hy2", "tuic", "wireguard", "wg", "socks", "socks5"} {
+	for _, kind := range []string{"json", "vless", "vmess", "trojan", "ss", "wireguard", "wg"} {
 		r.Register(basicInspector{kind})
 	}
 	return r

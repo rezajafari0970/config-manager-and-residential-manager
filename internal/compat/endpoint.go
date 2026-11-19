@@ -19,7 +19,7 @@ func NormalizeEndpointLiterals(root M) []Change {
 			continue
 		}
 		switch ob["protocol"] {
-		case "vless", "vmess", "trojan", "shadowsocks", "socks", "http", "hysteria":
+		case "vless", "vmess", "trojan", "shadowsocks":
 		default:
 			continue
 		}

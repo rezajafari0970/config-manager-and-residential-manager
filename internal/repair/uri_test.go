@@ -7,7 +7,7 @@ import (
 )
 
 func TestURIUserinfoRepairPreservesExactCredentialAndOriginal(t *testing.T) {
-	for _, protocol := range []string{"vless", "trojan", "ss", "hy2", "hysteria2", "socks", "socks5"} {
+	for _, protocol := range []string{"vless", "trojan", "ss"} {
 		raw := []byte(protocol + "://user+name%25:two words @192.0.2.1:443?security=tls&sni=example.com#name\n")
 		before := bytes.Clone(raw)
 		d := NewRegistry().Propose(raw, true, protocol, "invalid")

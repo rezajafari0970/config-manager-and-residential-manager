@@ -366,7 +366,13 @@ func (s *Store) Complete(ctx context.Context, job collect.Job, result collect.Re
 	if _, e = tx.ExecContext(ctx, "DELETE FROM responses WHERE expires<=?", stamp); e != nil {
 		return e
 	}
-	if result.Raw.Hash != "" {
+	if result.DiscardResponse {
+		if _, e = tx.ExecContext(ctx, "DELETE FROM responses WHERE source_id=?", job.ID); e != nil {
+			return e
+		}
+		result.Raw = blob.Ref{}
+		result.ETag, result.Modified = "", ""
+	} else if result.Raw.Hash != "" {
 		_, e = tx.ExecContext(ctx, "INSERT INTO responses VALUES (?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET hash=excluded.hash,size=excluded.size,created=CASE WHEN responses.hash=excluded.hash THEN responses.created ELSE excluded.created END,expires=CASE WHEN responses.hash=excluded.hash THEN responses.expires ELSE excluded.expires END", job.ID, result.Raw.Hash, result.Raw.Size, stamp, expiry)
 		if e != nil {
 			return e
@@ -530,7 +536,11 @@ func (s *Store) Complete(ctx context.Context, job collect.Job, result collect.Re
 		if _, e = tx.ExecContext(ctx, "UPDATE sources SET receipt_unique=?,receipt_new=?,receipt_at=? WHERE id=?", unique, newCount, stamp, job.ID); e != nil {
 			return e
 		}
-		_, e = tx.ExecContext(ctx, "UPDATE sources SET content_state=?,valid_count=?,invalid_count=?,unknown_count=?,received_count=?,response_bytes=? WHERE id=?", result.ContentState, result.ValidCount, result.InvalidCount, result.UnknownCount, result.Extracted, result.Raw.Size, job.ID)
+		receivedBytes := result.ReceivedBytes
+		if receivedBytes == 0 {
+			receivedBytes = result.Raw.Size
+		}
+		_, e = tx.ExecContext(ctx, "UPDATE sources SET content_state=?,valid_count=?,invalid_count=?,unknown_count=?,received_count=?,response_bytes=? WHERE id=?", result.ContentState, result.ValidCount, result.InvalidCount, result.UnknownCount, result.Extracted, receivedBytes, job.ID)
 		if e != nil {
 			return e
 		}
@@ -562,7 +572,8 @@ func (s *Store) Complete(ctx context.Context, job collect.Job, result collect.Re
 	if e != nil {
 		return e
 	}
-	_, e = tx.ExecContext(ctx, "UPDATE sources SET state=?,error_code=?,last_fetch=?,last_success=CASE WHEN ? THEN ? ELSE last_success END,http_status=?,duration_ms=?,fetch_count=fetch_count+1,duplicates=?,generation=?,error_streak=CASE WHEN ? THEN 0 ELSE error_streak+1 END,lease_token='',lease_until=0,next_run=?,etag=CASE WHEN ? THEN ? ELSE etag END,modified=CASE WHEN ? THEN ? ELSE modified END WHERE id=? AND revision=? AND lease_token=?", result.State, result.ErrorCode, stamp, success, stamp, result.HTTPStatus, result.DurationMS, duplicates, generation, success || result.State == "filtered", next.UnixNano(), (result.HTTPStatus >= 200 && result.HTTPStatus < 300) || result.ErrorCode == "cache_missing", result.ETag, (result.HTTPStatus >= 200 && result.HTTPStatus < 300) || result.ErrorCode == "cache_missing", result.Modified, job.ID, job.Revision, job.Token)
+	updateValidators := (result.HTTPStatus >= 200 && result.HTTPStatus < 300) || result.ErrorCode == "cache_missing" || result.DiscardResponse
+	_, e = tx.ExecContext(ctx, "UPDATE sources SET state=?,error_code=?,last_fetch=?,last_success=CASE WHEN ? THEN ? ELSE last_success END,http_status=?,duration_ms=?,fetch_count=fetch_count+1,duplicates=?,generation=?,error_streak=CASE WHEN ? THEN 0 ELSE error_streak+1 END,lease_token='',lease_until=0,next_run=?,etag=CASE WHEN ? THEN ? ELSE etag END,modified=CASE WHEN ? THEN ? ELSE modified END WHERE id=? AND revision=? AND lease_token=?", result.State, result.ErrorCode, stamp, success, stamp, result.HTTPStatus, result.DurationMS, duplicates, generation, success || result.State == "filtered", next.UnixNano(), updateValidators, result.ETag, updateValidators, result.Modified, job.ID, job.Revision, job.Token)
 	if e != nil {
 		return e
 	}

@@ -112,7 +112,7 @@ func TestEgressWorkerFixture(t *testing.T) {
 		}
 		original.Close()
 		if benchmark == 0 {
-			raws = append(raws, sourceURI(241), "tuic://11111111-1111-4111-8111-111111111111:synthetic@192.0.2.242:443?sni=example.com")
+			raws = append(raws, sourceURI(241), "wireguard://AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=@192.0.2.242:51820?publickey=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=&address=10.0.0.2%2F32")
 		}
 		if benchmark > 0 {
 			// Use real committed membership so the benchmark exercises identity admission.

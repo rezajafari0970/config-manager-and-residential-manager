@@ -4,11 +4,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
 	"net"
-	"net/url"
 	"sort"
 	"strings"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 )
 
 // Endpoints reads transport destinations, never display names, TLS SNI, Host,
@@ -16,6 +17,9 @@ import (
 func Endpoints(raw []byte) ([]string, error) {
 	if len(raw) > 4<<20 {
 		return nil, errors.New("oversized endpoint")
+	}
+	if protocolpolicy.Disabled("", raw) {
+		return nil, errors.New(protocolpolicy.Code)
 	}
 	s := strings.TrimSpace(string(raw))
 	lower := strings.ToLower(s)
@@ -31,13 +35,6 @@ func Endpoints(raw []byte) ([]string, error) {
 	}
 	var root map[string]any
 	if json.Unmarshal([]byte(s), &root) != nil {
-		// Hysteria 1 is not an Xray candidate, but its entry URI is unambiguous.
-		if strings.HasPrefix(lower, "hysteria://") || strings.HasPrefix(lower, "hy://") {
-			u, e := url.Parse(s)
-			if e == nil && u.Hostname() != "" {
-				return []string{u.Hostname()}, nil
-			}
-		}
 		p := probe.Prepare(raw)
 		if len(p.Candidates) == 0 {
 			return nil, errors.New("unsupported endpoint")
@@ -86,8 +83,8 @@ func Endpoints(raw []byte) ([]string, error) {
 		switch proto {
 		case "freedom", "blackhole", "dns", "direct", "block":
 			continue
-		case "vless", "vmess", "trojan", "shadowsocks", "socks", "http", "wireguard", "hysteria", "hysteria2", "tuic":
-		default:
+		}
+		if !protocolpolicy.AllowedProtocol(proto) {
 			bad = true
 			continue
 		}

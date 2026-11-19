@@ -15,7 +15,7 @@ import (
 func samples() []string {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
 	return []string{
-		"tuic://11111111-1111-4111-8111-111111111111:secret@192.0.2.1:443?sni=example.com",
+		`{"outbounds":[{"type":"trojan","tag":"native","server":"192.0.2.1","server_port":443,"password":"synthetic","tls":{"enabled":true,"server_name":"example.com"}}]}`,
 		"wireguard://" + key + "@192.0.2.1:51820?publickey=" + key + "&address=10.0.0.2%2F32&reserved=1,2,3&keepalive=25&dns=1.1.1.1",
 	}
 }
@@ -50,6 +50,21 @@ func TestNativeTemplatesAndPinnedCore(t *testing.T) {
 			out, e := exec.Command(core, "check", "-c", path).CombinedOutput()
 			if e != nil {
 				t.Fatalf("native schema: %s", out)
+			}
+		}
+	}
+}
+
+func TestNativePolicyPrecedesDriverSelection(t *testing.T) {
+	for _, src := range []string{
+		"hy2://synthetic@192.0.2.1:443",
+		`{"outbounds":[{"type":"trojan","server":"192.0.2.1"},{"type":"hysteria2","server":"192.0.2.2"}]}`,
+		`{"outbounds":[{"type":"tuic","server":"192.0.2.1"}]}`,
+	} {
+		for _, raw := range []string{src, "custom://" + base64.StdEncoding.EncodeToString([]byte(src))} {
+			p, ok := Prepare([]byte(raw))
+			if !ok || p.Code != "protocol_disabled" || len(p.Candidates) != 0 {
+				t.Fatalf("unexpected native plan: code=%s candidates=%d", p.Code, len(p.Candidates))
 			}
 		}
 	}

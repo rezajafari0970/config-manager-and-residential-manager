@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"io"
 	"time"
@@ -227,6 +228,9 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	var candidateHash string
 	var candidateSize int64
 	if d.Eligible {
+		if protocolpolicy.Disabled("", plan.Variants[1].Config) {
+			return ErrInvalid
+		}
 		ref, e := s.vault.Put(ctx, bytes.NewReader(plan.Variants[1].Config))
 		if e != nil {
 			return e

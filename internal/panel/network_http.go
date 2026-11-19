@@ -2,13 +2,9 @@ package panel
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/networkclass"
-	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
 )
 
@@ -134,125 +130,29 @@ func (s *Server) networkExport(w http.ResponseWriter, r *http.Request) {
 	copy.URL = &url
 	s.preparedExport(w, copy)
 }
-func networkFingerprint(entries []networkEntry) string {
-	type pair struct{ ID, Hash string }
-	v := []pair{}
-	for _, n := range entries {
-		v = append(v, pair{n.ID, n.Hash})
-	}
-	b, _ := json.Marshal(v)
-	return repair.Digest(b)
-}
 
-// New arrivals join the next download. Every captured identity and raw body
-// must remain eligible in the same group at the final admission point.
+// Both selections are ordered by canonical ID. Arrivals may join a later
+// download, but each captured raw and tested candidate must remain eligible.
 func networkSnapshotCurrent(before, current []networkEntry) bool {
-	captured := map[string]bool{}
-	for _, n := range before {
-		captured[n.ID] = true
-	}
-	retained := []networkEntry{}
+	next := 0
 	for _, n := range current {
-		if captured[n.ID] {
-			retained = append(retained, n)
+		if next == len(before) {
+			return true
 		}
+		captured := before[next]
+		if n.ID != captured.ID {
+			continue
+		}
+		if n.Hash != captured.Hash || n.CandidateHash != captured.CandidateHash {
+			return false
+		}
+		next++
 	}
-	return networkFingerprint(before) == networkFingerprint(retained)
+	return next == len(before)
 }
 
 func (s *Server) networkRaw(w http.ResponseWriter, r *http.Request, axis, group string) {
-	for range 2 {
-		if s.tryNetworkRaw(w, r, axis, group) || r.Context().Err() != nil {
-			return
-		}
-	}
-	w.Header().Set("Retry-After", "1")
-	http.Error(w, "group changed; retry", http.StatusServiceUnavailable)
-}
-
-func (s *Server) tryNetworkRaw(w http.ResponseWriter, r *http.Request, axis, group string) (complete bool) {
-	complete = true
-	ctx := r.Context()
-	snapshot, done, e := s.store.readSnapshot(ctx)
-	if e != nil {
-		failure(w, e)
-		return
-	}
-	entries, e := s.store.networkEntries(snapshot, s.store.read(snapshot), axis, group)
-	if r.PathValue("file") != "received.txt" {
-		entries = healthyNetworkEntries(entries, readStamp(snapshot))
-	}
-	done()
-	if e != nil {
-		failure(w, e)
-		return
-	}
-	if len(entries) == 0 {
-		w.Header().Set("X-Config-Count", "0")
-		w.WriteHeader(204)
-		return
-	}
-	spool, e := newExportSpool()
-	if e != nil {
-		failure(w, e)
-		return
-	}
-	defer spool.Close()
-	size := 0
-	for _, n := range entries {
-		if ctx.Err() != nil {
-			return
-		}
-		body, err := s.store.openExportBlob(n.Hash)
-		if err != nil {
-			http.Error(w, "raw body unavailable; retry", 503)
-			return
-		}
-		b, err := io.ReadAll(io.LimitReader(body, repair.MaxBytes+1))
-		body.Close()
-		size += len(b) + 1
-		if err != nil || len(b) > repair.MaxBytes || size > 256<<20 || repair.Digest(b) != n.Hash {
-			http.Error(w, "raw body validation failed; retry", 503)
-			return
-		}
-		if e = spool.Line(b); e != nil {
-			failure(w, e)
-			return
-		}
-	}
-	tx, e := s.store.outputTransaction(ctx)
-	if e != nil {
-		failure(w, e)
-		return
-	}
-	defer tx.Rollback()
-	if _, e = tx.ExecContext(ctx, "UPDATE metadata SET value=value WHERE key='key-check'"); e != nil {
-		failure(w, e)
-		return
-	}
-	current, e := s.store.networkEntries(ctx, tx, axis, group)
-	if r.PathValue("file") != "received.txt" {
-		current = healthyNetworkEntries(current, readStamp(ctx))
-	}
-	if e != nil {
-		failure(w, e)
-		return
-	}
-	if !networkSnapshotCurrent(entries, current) {
-		return false
-	}
-	if e = tx.Commit(); e != nil {
-		failure(w, e)
-		return
-	}
-	if e = spool.Rewind(); e != nil {
-		failure(w, e)
-		return
-	}
-	w.Header().Set("X-Config-Count", strconv.Itoa(len(entries)))
-	w.Header().Set("X-Content-SHA256", spool.Hash())
-	spool.WriteTo(w)
-	return
+	s.verifiedRaw(w, r, rawScope{axis: axis, group: group})
 }
 
 // Network rotations have their own tables and locks; global and per-source

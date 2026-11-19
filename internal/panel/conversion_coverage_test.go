@@ -79,7 +79,7 @@ func TestMixedNativeNetworkIdentityCoverage(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	newExportSource(t, s, "xray", strings.Replace(sourceURI(33), "192.0.2.33", "[2001:db8::33]", 1))
-	_, j := addConversion(t, s, "tuic://11111111-1111-4111-8111-111111111111:synthetic@[2001:db8::55]:443?sni=example.com")
+	_, j := addConversion(t, s, "wireguard://AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=@[2001:db8::55]:51820?publickey=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=&address=10.0.0.2%2F32")
 	c := convert.Prepare(j.Raw).Candidates[0]
 	evidence := syntheticCompatibilityEvidence()
 	evidence["native_core"] = "passed"

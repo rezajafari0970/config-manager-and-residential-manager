@@ -2,13 +2,12 @@ package panel
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
-	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/collect"
-	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/transient"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 )
 
 type outputModule struct{ s *Server }
@@ -24,211 +23,188 @@ func (m outputModule) Register(mux *http.ServeMux) {
 		http.Redirect(w, r, "/output/raw.txt", http.StatusPermanentRedirect)
 	})
 }
-func (s *Server) stream(w http.ResponseWriter, r *http.Request, hash string, size int64, filename string) {
-	body, e := s.store.openExportBlob(hash)
-	if e != nil {
-		failure(w, ErrNotFound)
-		return
-	}
-	defer body.Close()
-	writeOriginal(w, r, body, hash, size, filename)
-}
-func writeOriginal(w http.ResponseWriter, r *http.Request, body io.Reader, hash string, size int64, filename string) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.Header().Set("X-Content-SHA256", hash)
-	if r.URL.Query().Get("preview") != "1" {
-		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	}
-	_, _ = io.Copy(w, body)
-}
 func (s *Server) raw(w http.ResponseWriter, r *http.Request) {
-	a, e := s.store.Output(r.Context(), r.PathValue("id"))
-	if e != nil {
-		failure(w, e)
-		return
-	}
-	if a.Disabled && r.URL.Query().Get("preview") != "1" {
-		respond(w, 409, map[string]string{"error": "این کانفیگ غیرفعال است."})
-		return
-	}
-	ext := "txt"
-	if a.Kind == "json" {
-		ext = "json"
-	}
-	s.stream(w, r, a.Hash, a.Size, a.ID[:12]+"."+ext)
-}
-func (s *Server) response(w http.ResponseWriter, r *http.Request) {
-	ref, e := s.store.Response(r.Context(), r.PathValue("id"))
-	if e != nil {
-		failure(w, e)
-		return
-	}
-	// The encrypted source response is independent of current memberships.
-	// Inspect it before setting download headers, including on old source
-	// snapshots. Subscriptions can contain nested base64 or JSON envelopes.
-	body, e := s.store.vault.Open(ref.Hash)
-	if e != nil {
+	id := r.PathValue("id")
+	if id == "" {
 		failure(w, ErrNotFound)
 		return
 	}
-	defer body.Close()
-	spool, path, e := transient.NewFile()
-	if e != nil {
-		failure(w, e)
-		return
-	}
-	defer spool.Close()
-	n, e := io.Copy(spool, body)
-	if e != nil || n != ref.Size {
-		http.Error(w, "source response unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	blocked, e := collect.SourceResponseDisabled(r.Context(), path)
-	if blocked {
-		respond(w, http.StatusConflict, map[string]string{
-			"error":      "این پاسخ شامل کانفیگ غیرفعال است. کانفیگ‌های قابل انتشار در خروجی همین منبع در دسترس‌اند.",
-			"export_url": s.exportURL(r.PathValue("id"), false),
-		})
-		return
-	}
-	if e != nil && !collect.IsContentError(e) {
-		failure(w, e)
-		return
-	}
-	if _, e = spool.Seek(0, io.SeekStart); e != nil {
-		failure(w, e)
-		return
-	}
-	writeOriginal(w, r, spool, ref.Hash, ref.Size, "original-response.txt")
+	s.verifiedRaw(w, r, rawScope{id: id})
 }
 
-// rawAll prints immutable original bodies; no ZIP, wrapper or JSON rewriting.
+func (s *Server) response(w http.ResponseWriter, r *http.Request) {
+	source := r.PathValue("id")
+	if _, err := s.store.exportSourceName(r.Context(), source); err != nil {
+		failure(w, err)
+		return
+	}
+	// Source archives can contain pending inputs. Reconstruct public downloads
+	// from the current verified members belonging to the requested source.
+	s.verifiedRaw(w, r, rawScope{source: source})
+}
+
 func (s *Server) rawAll(w http.ResponseWriter, r *http.Request) {
-	index, e := newExportSpool()
-	if e != nil {
-		failure(w, e)
-		return
+	s.verifiedRaw(w, r, rawScope{})
+}
+
+type rawScope struct {
+	source, id, axis, group string
+}
+
+func (s *Store) verifiedRawEntries(ctx context.Context, q readQuerier, scope rawScope) ([]networkEntry, error) {
+	if scope.axis != "" {
+		all, err := s.networkEntries(ctx, q, scope.axis, scope.group)
+		return healthyNetworkEntries(all, readStamp(ctx)), err
 	}
-	defer index.Close()
-	before := sha256.New()
-	members := make(map[string]struct{})
-	encoder := json.NewEncoder(io.MultiWriter(index.file, before))
-	if e = s.store.WalkOutputs(r.Context(), func(a Artifact) error {
-		members[a.ID] = struct{}{}
-		return encoder.Encode(a)
-	}); e != nil {
-		failure(w, e)
-		return
+	rows, err := querySourceIdentityConversions(ctx, q, scope.source, scope.id, 0, true)
+	if err != nil {
+		return nil, err
 	}
-	if e = index.Rewind(); e != nil {
-		failure(w, e)
-		return
-	}
-	output, e := newExportSpool()
-	if e != nil {
-		failure(w, e)
-		return
-	}
-	defer output.Close()
-	decoder := json.NewDecoder(index.file)
-	count := 0
-	var size int64
-	writer := io.MultiWriter(output.file, output.digest)
-	for {
-		var a Artifact
-		e = decoder.Decode(&a)
-		if e == io.EOF {
-			break
+	var eligible []networkEntry
+	for _, c := range rows {
+		if c.Healthy(readStamp(ctx)) {
+			eligible = append(eligible, networkEntry{Conversion: c})
 		}
-		if e != nil {
-			failure(w, e)
+	}
+	return eligible, nil
+}
+
+func (s *Server) verifiedRaw(w http.ResponseWriter, r *http.Request, scope rawScope) {
+	for range 2 {
+		if s.tryVerifiedRaw(w, r, scope) || r.Context().Err() != nil {
 			return
 		}
-		if r.Context().Err() != nil {
-			return
+	}
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, "raw membership changed; retry", http.StatusServiceUnavailable)
+}
+
+func (s *Server) tryVerifiedRaw(w http.ResponseWriter, r *http.Request, scope rawScope) bool {
+	ctx := r.Context()
+	snapshot, done, err := s.store.readSnapshot(ctx)
+	if err != nil {
+		failure(w, err)
+		return true
+	}
+	entries, err := s.store.verifiedRawEntries(snapshot, s.store.read(snapshot), scope)
+	done()
+	if err != nil {
+		failure(w, err)
+		return true
+	}
+	if len(entries) == 0 {
+		rawEmpty(w, scope)
+		return true
+	}
+	spool, err := newExportSpool()
+	if err != nil {
+		failure(w, err)
+		return true
+	}
+	defer spool.Close()
+	writer := io.MultiWriter(spool.file, spool.digest)
+	size := 0
+	delivered := make([]networkEntry, 0, len(entries))
+	for _, n := range entries {
+		if ctx.Err() != nil {
+			return true
 		}
-		if size+a.Size+1 > 256<<20 {
-			http.Error(w, "raw output size limit", 503)
-			return
+		body, err := s.store.openExportBlob(n.Hash)
+		if errors.Is(err, ErrNotFound) {
+			continue
 		}
-		body, err := s.store.openExportBlob(a.Hash)
 		if err != nil {
-			http.Error(w, "raw body unavailable; retry", 503)
-			return
+			http.Error(w, "verified input unavailable; retry", 503)
+			return true
 		}
-		if count > 0 {
-			if _, e = writer.Write([]byte{'\n'}); e != nil {
-				body.Close()
-				failure(w, e)
-				return
+		b, err := io.ReadAll(io.LimitReader(body, repair.MaxBytes+1))
+		body.Close()
+		if err != nil || len(b) > repair.MaxBytes || repair.Digest(b) != n.Hash {
+			http.Error(w, "invalid input; retry", 503)
+			return true
+		}
+		if len(delivered) > 0 {
+			if _, err = writer.Write([]byte{'\n'}); err != nil {
+				failure(w, err)
+				return true
 			}
 			size++
 		}
-		n, err := io.Copy(writer, body)
-		body.Close()
-		if err != nil || n != a.Size {
-			http.Error(w, "raw body incomplete; retry", 503)
-			return
+		delivered = append(delivered, n)
+		size += len(b)
+		if size > 256<<20 {
+			http.Error(w, "raw output size limit", 503)
+			return true
 		}
-		size += n
-		count++
+		if _, err = writer.Write(b); err != nil {
+			failure(w, err)
+			return true
+		}
 	}
-	if count == 0 {
-		http.Error(w, "no current raw configurations", 503)
-		return
+	if len(delivered) == 0 {
+		rawEmpty(w, scope)
+		return true
 	}
-	// Vault I/O is complete before taking the serialized admission transaction.
-	tx, e := s.store.db.BeginTx(r.Context(), nil)
-	if e != nil {
-		failure(w, e)
-		return
+	if scope.axis != "" {
+		if _, err = writer.Write([]byte{'\n'}); err != nil {
+			failure(w, err)
+			return true
+		}
+		size++
 	}
-	defer tx.Rollback()
-	if _, e = tx.ExecContext(r.Context(), "UPDATE metadata SET value=value WHERE key='key-check'"); e != nil {
-		failure(w, e)
-		return
+	current, err := s.store.verifiedSnapshotCurrent(ctx, scope, delivered)
+	if err != nil {
+		failure(w, err)
+		return true
 	}
-	valid, e := rawSnapshotCurrent(r.Context(), tx, members, before.Sum(nil))
-	if e != nil {
-		failure(w, e)
-		return
+	if !current {
+		return false
 	}
-	if !valid {
-		http.Error(w, "raw membership changed; retry", 503)
-		return
-	}
-	if e = tx.Commit(); e != nil {
-		failure(w, e)
-		return
-	}
-	if e = output.Rewind(); e != nil {
-		failure(w, e)
-		return
+	if err = spool.Rewind(); err != nil {
+		failure(w, err)
+		return true
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", "inline")
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.Header().Set("X-Content-SHA256", output.Hash())
-	w.Header().Set("X-Config-Count", strconv.Itoa(count))
-	w.Header().Set("X-Raw-Framing", "original-bytes; one-LF-between-members")
-	if r.Method != http.MethodHead {
-		_, _ = output.WriteTo(w)
+	w.Header().Set("Content-Length", strconv.Itoa(size))
+	w.Header().Set("X-Content-SHA256", spool.Hash())
+	w.Header().Set("X-Config-Count", strconv.Itoa(len(delivered)))
+	framing := "original-bytes; one-LF-between-members"
+	if scope.axis != "" {
+		framing += "; final-LF"
 	}
+	w.Header().Set("X-Raw-Framing", framing)
+	w.Header().Set("X-Verification-Scope", "verified-current-source-members")
+	if r.Method != http.MethodHead {
+		_, _ = spool.WriteTo(w)
+	}
+	return true
 }
 
-// New arrivals belong to the next request. Every captured member must still
-// have the same current representation and lifetime at serialized admission.
-func rawSnapshotCurrent(ctx context.Context, q databaseQuery, members map[string]struct{}, before []byte) (bool, error) {
-	after := sha256.New()
-	verify := json.NewEncoder(after)
-	if e := walkOutputs(ctx, q, func(a Artifact) error {
-		if _, ok := members[a.ID]; !ok {
-			return nil
-		}
-		return verify.Encode(a)
-	}); e != nil {
-		return false, e
+func (s *Store) verifiedSnapshotCurrent(ctx context.Context, scope rawScope, delivered []networkEntry) (bool, error) {
+	if len(delivered) == 0 {
+		return true, nil
 	}
-	return equal(string(before), string(after.Sum(nil))), nil
+	tx, err := s.outputTransaction(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "UPDATE metadata SET value=value WHERE key='key-check'"); err != nil {
+		return false, err
+	}
+	current, err := s.verifiedRawEntries(ctx, tx, scope)
+	if err != nil || !networkSnapshotCurrent(delivered, current) {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func rawEmpty(w http.ResponseWriter, scope rawScope) {
+	w.Header().Set("X-Config-Count", "0")
+	if scope.id != "" {
+		failure(w, ErrNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
