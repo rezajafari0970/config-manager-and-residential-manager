@@ -49,6 +49,7 @@ func (s *Store) migrateV33() error {
 const egressInventoryCandidates = `SELECT u.hash FROM (SELECT DISTINCT artifact_id FROM memberships) m CROSS JOIN egress_unique u ON u.identity=m.artifact_id
  UNION SELECT u.hash FROM egress_network_review v CROSS JOIN egress_unique u ON u.identity=v.identity
  UNION SELECT hash FROM egress_first_backlog
+ UNION SELECT hash FROM egress_compatibility_queue
  UNION SELECT hash FROM egress_retirement_sources
  UNION SELECT hash FROM egress_first_history WHERE phase='active'
  UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1

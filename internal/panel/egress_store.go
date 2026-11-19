@@ -27,6 +27,7 @@ const egressClaimCandidates = `WITH history_head(hash) AS MATERIALIZED (SELECT `
  UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1
  UNION SELECT u.hash FROM egress_network_review v CROSS JOIN egress_unique u ON u.identity=v.identity
  UNION SELECT hash FROM egress_first_backlog
+ UNION SELECT hash FROM egress_compatibility_queue
  UNION SELECT hash FROM egress_retirement_sources
  UNION SELECT hash FROM history_head WHERE hash IS NOT NULL
  UNION SELECT u.hash FROM egress_iran_guard g JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'
@@ -351,14 +352,15 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	// Attribution belongs to the membership at completion. A safety decision
 	// below can remove that membership in this same transaction.
 	var firstScope string
+	var compatibility bool
 	e = tx.QueryRowContext(ctx, `SELECT ever_accepted,failures,last_failure,claimed_at,retry_streak,first_completed,
  CASE WHEN first_completed!=0 THEN '' WHEN EXISTS (
    SELECT 1 FROM egress_unique u JOIN memberships m ON m.artifact_id=u.identity WHERE u.hash=egress_jobs.hash
  ) THEN 'current' WHEN EXISTS (
    SELECT 1 FROM egress_first_history h WHERE h.hash=egress_jobs.hash AND h.phase='active'
- ) THEN 'historical' ELSE 'withdrawn' END
+ ) THEN 'historical' ELSE 'withdrawn' END, EXISTS(SELECT 1 FROM egress_compatibility_queue p WHERE p.hash=egress_jobs.hash)
  FROM egress_jobs WHERE hash=? AND revision=? AND token=? AND lease_until>? AND paused=0 AND state!='DELETED'
- AND EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash)`, j.Hash, j.Revision, j.Token, now).Scan(&accepted, &failures, &last, &claimed, &streak, &firstCompleted, &firstScope)
+ AND EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash)`, j.Hash, j.Revision, j.Token, now).Scan(&accepted, &failures, &last, &claimed, &streak, &firstCompleted, &firstScope, &compatibility)
 	if errors.Is(e, sql.ErrNoRows) {
 		return ErrConflict
 	}
@@ -368,13 +370,13 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	if r.Started < claimed-2000 || r.Finished < r.Started || r.Finished > now+2000 {
 		return ErrConflict
 	}
-	if firstCompleted == 0 && !accepted {
+	if !accepted && (firstCompleted == 0 || compatibility) {
 		if reason := unmeasuredFirstReason(r, d.Reason); reason != "" {
 			report, err := json.Marshal(r)
 			if err != nil {
 				return err
 			}
-			if _, err = tx.ExecContext(ctx, `UPDATE egress_jobs SET state='PENDING',reason=?,report=?,token='',lease_until=0,
+			if _, err = tx.ExecContext(ctx, `UPDATE egress_jobs SET state=CASE WHEN first_completed=1 THEN 'UNKNOWN' ELSE 'PENDING' END,reason=?,report=?,token='',lease_until=0,
  retry_streak=retry_streak+1,next_run=? WHERE hash=?`, reason, string(report), now+initialRecoveryDelay(j.Hash, streak+1), j.Hash); err != nil {
 				return err
 			}
@@ -648,6 +650,12 @@ func (s *Store) manageEgress(ctx context.Context, tx *sql.Tx, action string, all
 	return nil
 }
 func (s *Store) expireEgress(ctx context.Context, tx *sql.Tx, now int64) error {
+	// Fence an expired final compatibility grant even if ordinary membership
+	// still keeps this representative in inventory.
+	if _, err := tx.ExecContext(ctx, `UPDATE egress_jobs SET token='',lease_until=0,revision=revision+1
+ WHERE token!='' AND lease_until<=? AND attempts>=3 AND hash IN (SELECT hash FROM egress_compatibility_queue)`, now); err != nil {
+		return err
+	}
 	// Park an interrupted final review without granting another automatic lease.
 	if _, err := tx.ExecContext(ctx, `UPDATE egress_jobs SET token='',lease_until=0,revision=revision+1,
  next_run=max(next_run,?+(SELECT health_minutes*60000 FROM egress_lifecycle WHERE id=1)) WHERE token!='' AND lease_until<=? AND EXISTS(SELECT 1 FROM egress_unique u JOIN egress_network_review v ON v.identity=u.identity WHERE u.hash=egress_jobs.hash AND v.attempts=2)`, now, now); err != nil {

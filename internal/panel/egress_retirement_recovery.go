@@ -112,11 +112,14 @@ func (s *Store) migrateV54() error {
 	if err != nil {
 		return err
 	}
+	if err = s.recoverCompatibleReceipts(tx); err != nil {
+		return err
+	}
 	// Keep the existing eligibility and network safety views. Change only
 	// worker custody for a bounded, sourced confirmation.
 	for _, v := range []struct{ name, old, replacement string }{
-		{"egress_inventory", "OR j.ever_accepted=1", "OR j.ever_accepted=1 OR EXISTS(SELECT 1 FROM egress_retirement_work p WHERE p.hash=j.hash)"},
-		{"egress_work", "OR (g.identity IS NULL AND j.retry_streak<3 AND EXISTS(SELECT 1 FROM egress_retirements", "OR (g.identity IS NULL AND EXISTS(SELECT 1 FROM egress_retirement_work p WHERE p.hash=j.hash)) OR (g.identity IS NULL AND j.ever_accepted=1 AND j.retry_streak<3 AND EXISTS(SELECT 1 FROM egress_retirements"},
+		{"egress_inventory", "OR j.ever_accepted=1", "OR j.ever_accepted=1 OR EXISTS(SELECT 1 FROM egress_retirement_work p WHERE p.hash=j.hash) OR EXISTS(SELECT 1 FROM egress_compatibility_work p WHERE p.hash=j.hash)"},
+		{"egress_work", "OR (g.identity IS NULL AND j.retry_streak<3 AND EXISTS(SELECT 1 FROM egress_retirements", "OR (g.identity IS NULL AND EXISTS(SELECT 1 FROM egress_compatibility_work p WHERE p.hash=j.hash)) OR (g.identity IS NULL AND EXISTS(SELECT 1 FROM egress_retirement_work p WHERE p.hash=j.hash)) OR (g.identity IS NULL AND j.ever_accepted=1 AND j.retry_streak<3 AND EXISTS(SELECT 1 FROM egress_retirements"},
 	} {
 		var definition string
 		if err = tx.QueryRow("SELECT sql FROM sqlite_schema WHERE name=?", v.name).Scan(&definition); err != nil {

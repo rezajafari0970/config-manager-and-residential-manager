@@ -47,7 +47,7 @@ var egressViewBody = regexp.MustCompile(`(?i)\bAS\s+(?:SELECT|WITH)\b`)
 func freezeEgress(ctx context.Context, q databaseQuery) (databaseQuery, error) {
 	stamp := strconv.FormatInt(readStamp(ctx), 10)
 	rows, err := q.QueryContext(ctx, `SELECT name,sql FROM sqlite_schema WHERE type='view' AND name IN
- ('egress_eligible','egress_network_eligible','egress_geo_eligible','egress_export_eligible','egress_inventory','egress_work','egress_retirement_work')`)
+ ('egress_eligible','egress_network_eligible','egress_geo_eligible','egress_export_eligible','egress_inventory','egress_work','egress_retirement_work','egress_compatibility_work')`)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func freezeEgress(ctx context.Context, q databaseQuery) (databaseQuery, error) {
 		}
 		body := strings.TrimSuffix(strings.TrimSpace(definition[match[0]+2:]), ";")
 		body = strings.ReplaceAll(body, "CAST(unixepoch('subsec')*1000 AS INTEGER)", stamp)
-		if name == "egress_retirement_work" {
+		if name == "egress_retirement_work" || name == "egress_compatibility_work" {
 			queue = append(queue, name+" AS NOT MATERIALIZED ("+body+")")
 		} else if egressPresentationScope.MatchString(name) {
 			// The work view reads inventory. Both must use the same clock, but
@@ -79,7 +79,7 @@ func freezeEgress(ctx context.Context, q databaseQuery) (databaseQuery, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(queue) != 3 || len(eligibility) != 4 {
+	if len(queue) != 4 || len(eligibility) != 4 {
 		return nil, fmt.Errorf("incomplete residential snapshot views")
 	}
 	return egressSnapshotReader{q: q, eligibility: "WITH " + strings.Join(eligibility, ",") + " ", queue: strings.Join(queue, ",")}, nil
