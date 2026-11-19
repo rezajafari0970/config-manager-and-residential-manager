@@ -4,6 +4,7 @@ The snapshot builder owns origin and usage data. Workers open immutable snapshot
 read-only and do indexed longest-prefix lookups without sending source IPs out.
 """
 import hashlib
+import importlib
 import ipaddress
 import json
 import os
@@ -69,9 +70,35 @@ USAGE_QUERIES = {
     for family, width in ((4, 32), (6, 128))
 }
 ORIGIN_QUERIES = {
-    family: prefix_lookup_query("origins", "t.asn", width)
+    family: prefix_lookup_query("origins", "t.asn,t.length", width)
     for family, width in ((4, 32), (6, 128))
 }
+
+
+def hosting_coverage_until(db, now):
+    # Read the same registry that built the immutable index. V45 snapshots
+    # already retain each feed's last successful refresh and parsed row count.
+    builder = importlib.import_module("egress-network-update")
+    feeds = [feed for feed in builder.FEEDS if feed.kind == "hosting"]
+    earliest = None
+    for feed in feeds:
+        row = db.execute("SELECT status,checked_at,records,sha256 FROM feed_status WHERE source=?",
+                         (feed.source,)).fetchone()
+        if row is None:
+            return 0
+        status, checked, count, digest = row
+        if (status not in ("current", "last-good") or type(count) is not int or count < feed.minimum
+                or type(checked) is not int or not now - builder.TTL < checked <= now + 2000
+                or not isinstance(digest, str) or not DIGEST.fullmatch(digest)):
+            return 0
+        expires = checked + builder.TTL
+        earliest = expires if earliest is None else min(earliest, expires)
+    return earliest or 0
+
+
+def public_origin(asn):
+    return (type(asn) is int and 0 < asn < 4_200_000_000 and asn != 23456
+            and not 64496 <= asn <= 65551)
 
 
 def prefix_candidates(ip):
@@ -216,6 +243,12 @@ class NetworkRegistry:
                     or not SLUG.fullmatch(meta.get("origin_source", ""))):
                 raise ValueError("invalid network metadata")
             meta["origin_valid_until"] = int(meta["origin_valid_until"])
+            # Incomplete coverage disables negative range evidence only. Positive
+            # ownership remains independently usable for supported snapshots.
+            try:
+                meta["hosting_coverage_until"] = hosting_coverage_until(self.db, time.time_ns() // 1_000_000)
+            except (ImportError, sqlite3.Error):
+                meta["hosting_coverage_until"] = 0
             self.meta = meta
             self.key = key
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
@@ -233,7 +266,7 @@ class NetworkRegistry:
             if usage is None:
                 usage = self.licensed.lookup(ip, at)
                 if usage is None:
-                    return unknown("network_usage_unverified", at)
+                    return self.unclassified_origin(ip, args, at)
                 dataset = hashlib.sha256((dataset + self.licensed.digest).encode()).hexdigest()
             prefix_len, kind, provider, expected_asn, usage_source, until = usage
             if kind not in ("hosting", "access"):
@@ -267,6 +300,26 @@ class NetworkRegistry:
             "checked_at": at,
             "valid_until": min(at + PROOF_TTL_MS, until, self.meta["origin_valid_until"]),
         }
+
+    def unclassified_origin(self, ip, args, at):
+        result = unknown("network_usage_unverified", at)
+        until = min(self.meta["origin_valid_until"], self.meta["hosting_coverage_until"], at + PROOF_TTL_MS)
+        if until <= at or self.meta["origin_source"] != "ripe-ris":
+            return result
+        origin = self.db.execute(ORIGIN_QUERIES[ip.version], args).fetchone()
+        if not origin:
+            return result
+        asn, length = origin
+        if not public_origin(asn) or not 0 < length <= ip.max_prefixlen:
+            return result
+        if self.db.execute("SELECT 1 FROM hosting_asns WHERE asn=?", (asn,)).fetchone():
+            return result
+        # This only supports comparison to a previously observed hosting ASN on
+        # the same Ads flow. A fresh, unmatched ASN does not identify an ISP.
+        result.update(origin_outside_hosting=True, origin_source=self.meta["origin_source"],
+                      asn=asn, family=ip.version, prefix_len=length,
+                      dataset=self.meta["dataset"], valid_until=until)
+        return result
 
     def attach(self, rows):
         observed = [row for row in rows if all(row.get(k) is True for k in

@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
+	"slices"
 	"strings"
 
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 )
 
 // Network eligibility is residential-only. egress_eligible is also an ordinary
@@ -60,6 +63,34 @@ func (s *Store) migrateV45() error {
 	return tx.Commit()
 }
 
+// Route, health, Iran and country evidence retain their original deadlines.
+// Ownership data only vetoes a positively observed hosting exit on an Ads flow.
+func (s *Store) migrateV46() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var version int
+	if err = tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version >= 46 {
+		return err
+	}
+	_, err = tx.Exec(`
+ DROP VIEW egress_network_eligible;
+ CREATE VIEW egress_network_eligible AS
+ SELECT e.*, e.valid_until AS network_valid_until FROM egress_eligible e
+ JOIN egress_unique u ON u.hash=e.hash
+ WHERE NOT EXISTS (SELECT 1 FROM egress_network_results n WHERE n.identity=u.identity AND n.held=1);
+ PRAGMA user_version=46;`)
+	if err != nil {
+		return err
+	}
+	if err = s.reassessFreshLegacyHolds(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // A new network evaluator only invalidates its own proofs. In particular it
 // must not advance the egress route epoch, which would withdraw ordinary data.
 func (s *Store) reconcileEgressNetworkPolicy() error {
@@ -85,10 +116,132 @@ func (s *Store) reconcileEgressNetworkPolicy() error {
 	return tx.Commit()
 }
 
-// Called with the writer reservation and validated claim. An old worker or an
-// incomplete attempt can withdraw publication, never erase a prior hosting
-// observation. Access evidence is tied to this specific representative/template.
-func saveEgressNetwork(ctx context.Context, tx *sql.Tx, r egress.Report, d egress.Decision, candidate string, now int64) (bool, error) {
+// Keep every positively observed hosting flow until the identity recovers. V45
+// persisted just the first adverse flow in Domain, Variant and Family.
+func mergeHostingFlows(current, previous egress.NetworkVerdict) egress.NetworkVerdict {
+	seen := make(map[egress.NetworkFlow]bool)
+	for _, flow := range current.HostingFlows {
+		seen[flow] = true
+	}
+	previousFlows := previous.HostingFlows
+	if len(previousFlows) == 0 && previous.Domain != "" {
+		previousFlows = []egress.NetworkFlow{{Domain: previous.Domain, Variant: previous.Variant, Family: previous.Family}}
+	}
+	for _, flow := range previousFlows {
+		if !seen[flow] {
+			current.HostingFlows = append(current.HostingFlows, flow)
+			seen[flow] = true
+		}
+	}
+	asns := append(slices.Clone(previous.HostingASNs), previous.ASN, current.ASN)
+	for _, asn := range asns {
+		if asn != 0 && !slices.Contains(current.HostingASNs, asn) {
+			current.HostingASNs = append(current.HostingASNs, asn)
+		}
+	}
+	slices.Sort(current.HostingASNs)
+	return current
+}
+
+// Bound startup work to the freshest current routes. Remaining legacy
+// identities use the same replay at their next previously scheduled renewal.
+func (s *Store) reassessFreshLegacyHolds(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT n.hash FROM egress_network_results n
+ JOIN egress_eligible e ON e.hash=n.hash JOIN egress_unique u ON u.hash=e.hash AND u.identity=n.identity
+ WHERE n.held=1 AND n.state IN ('hosting','mixed') AND n.checked_at=e.tested
+ AND n.candidate_hash=e.candidate_hash AND n.last_adverse=n.summary
+ AND json_type(n.last_adverse,'$.hosting_flows') IS NULL ORDER BY e.valid_until DESC,n.hash LIMIT 256`)
+	if err != nil {
+		return err
+	}
+	var hashes []string
+	for rows.Next() {
+		var hash string
+		if err = rows.Scan(&hash); err != nil {
+			rows.Close()
+			return err
+		}
+		hashes = append(hashes, hash)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, hash := range hashes {
+		reader, err := s.vault.Open(hash)
+		if err != nil {
+			continue // Missing original bytes never clear a hold.
+		}
+		raw, err := io.ReadAll(io.LimitReader(reader, repair.MaxBytes+1))
+		reader.Close()
+		if err != nil || len(raw) > repair.MaxBytes || egress.Hash(raw) != hash {
+			continue
+		}
+		n, replayed, err := replayLegacyHosting(context.Background(), tx, hash, egress.Prepare(raw))
+		if err != nil {
+			return err
+		}
+		if replayed {
+			summary, err := json.Marshal(n)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(`UPDATE egress_network_results SET held=?,state=?,reason=?,summary=?,valid_until=?,
+ clean_rounds=0,clean_until=0,last_adverse=CASE WHEN ? THEN ? ELSE last_adverse END WHERE hash=? AND held=1
+ AND identity=(SELECT identity FROM egress_unique WHERE hash=?)`, n.BlocksResidential(), n.State, n.Reason, string(summary), n.Until, n.BlocksResidential(), string(summary), hash, hash)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// V45 stored one adverse scope. Only its exact original receipt can correct
+// that decision in-place. Other, newer measurements use normal confirmation.
+func replayLegacyHosting(ctx context.Context, tx *sql.Tx, hash string, plan egress.Plan) (egress.NetworkVerdict, bool, error) {
+	var empty egress.NetworkVerdict
+	if len(plan.Variants) != 2 || !plan.Complete {
+		return empty, false, nil
+	}
+	var report, lastAdverse []byte
+	var checkedAt, finished int64
+	err := tx.QueryRowContext(ctx, `SELECT j.report,n.last_adverse,n.checked_at,n.last_finished FROM egress_jobs j
+ JOIN egress_unique u ON u.hash=j.hash JOIN egress_network_results n ON n.identity=u.identity
+ WHERE j.hash=? AND n.hash=j.hash AND n.checked_at=j.tested AND n.last_adverse=n.summary AND n.held=1
+ AND n.candidate_hash=j.candidate_hash AND j.candidate_hash=? AND n.state IN ('hosting','mixed')`, hash, plan.Variants[1].Hash).Scan(&report, &lastAdverse, &checkedAt, &finished)
+	if errors.Is(err, sql.ErrNoRows) {
+		return empty, false, nil
+	}
+	if err != nil {
+		return empty, false, err
+	}
+	var r egress.Report
+	var prior egress.NetworkVerdict
+	if json.Unmarshal(report, &r) != nil || json.Unmarshal(lastAdverse, &prior) != nil || !prior.BlocksResidential() || len(prior.HostingFlows) != 0 || r.Finished != finished {
+		return empty, false, nil
+	}
+	d := egress.Evaluate(r, plan, hash, checkedAt)
+	n := d.Network
+	flow := egress.NetworkFlow{Domain: prior.Domain, Variant: prior.Variant, Family: prior.Family}
+	original := egress.SharedNetwork{NetworkFlow: flow, Provider: prior.Provider, ASN: prior.ASN}
+	provenShared := d.Eligible && !d.CountryConflict && slices.Contains(n.SharedFlows, flow) && slices.Contains(n.SharedHosting, original)
+	if n.BlocksResidential() {
+		if !provenShared {
+			n = mergeHostingFlows(n, prior)
+		}
+		return n, true, nil
+	}
+	if provenShared && n.SharedHostingOnly() {
+		return n, true, nil
+	}
+	return empty, false, nil
+}
+
+// Called with the writer reservation and validated claim. A failed or unknown
+// observation cannot erase an existing hosting veto or create a new one.
+func saveEgressNetwork(ctx context.Context, tx *sql.Tx, r egress.Report, plan egress.Plan, d egress.Decision, candidate string, now int64) (bool, error) {
 	var identity string
 	if err := tx.QueryRowContext(ctx, "SELECT identity FROM egress_unique WHERE hash=?", r.Hash).Scan(&identity); err != nil {
 		return false, err
@@ -110,19 +263,50 @@ func saveEgressNetwork(ctx context.Context, tx *sql.Tx, r egress.Report, d egres
 	if err != nil {
 		return false, err
 	}
-	until := int64(0)
-	clean := d.Eligible && !d.CountryConflict && n.Version == egress.NetworkVersion && n.State == "access" && n.Eligible && n.Until > now && candidate != ""
+	var previous egress.NetworkVerdict
+	if held {
+		if err = json.Unmarshal([]byte(lastAdverse), &previous); err != nil {
+			return false, err
+		}
+		if len(previous.HostingFlows) == 0 && previousHash == r.Hash {
+			replay, matched, err := replayLegacyHosting(ctx, tx, r.Hash, plan)
+			if err != nil {
+				return false, err
+			}
+			if matched && !replay.BlocksResidential() {
+				held, cleanRounds, cleanUntil = false, 0, 0
+				previous = egress.NetworkVerdict{}
+			} else {
+				if matched {
+					previous = replay
+				} else {
+					previous = mergeHostingFlows(previous, previous)
+				}
+				adverse, err := json.Marshal(previous)
+				if err != nil {
+					return false, err
+				}
+				lastAdverse = string(adverse)
+			}
+		}
+	}
+	until := n.Until
+	clean := held && d.Eligible && !d.CountryConflict && candidate != "" &&
+		n.ClearanceUntil > now && n.ClearsHosting(previous)
 	switch {
-	case n.Version == egress.NetworkVersion && (n.State == "hosting" || n.State == "mixed"):
-		held, cleanRounds, cleanUntil, lastAdverse = true, 0, 0, string(b)
+	case n.BlocksResidential():
+		adverse, err := json.Marshal(mergeHostingFlows(n, previous))
+		if err != nil {
+			return false, err
+		}
+		held, cleanRounds, cleanUntil, lastAdverse = true, 0, 0, string(adverse)
 	case clean:
-		until = min(n.Until, d.Until)
 		if cleanUntil <= now || previousHash != r.Hash || previousCandidate != candidate || previousPolicy != n.Version {
 			cleanRounds = 0
 		}
-		if held && r.Started > lastFinished {
+		if r.Started > lastFinished {
 			cleanRounds++
-			cleanUntil = until
+			cleanUntil = min(d.Until, n.ClearanceUntil)
 			if cleanRounds >= 2 {
 				held = false
 			}

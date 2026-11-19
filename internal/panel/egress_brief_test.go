@@ -116,13 +116,15 @@ func TestResidentialPageSeparatesHostedAndUnattributedSplit(t *testing.T) {
 		Network     egress.NetworkVerdict
 		LastAdverse egress.NetworkVerdict `json:"last_adverse"`
 	}
-	var state struct {
+	type response struct {
 		Eligible   int
 		Entries    []entry
 		Counts     map[string]int
 		Accounting struct{ Publication map[string]int }
 	}
+	var state response
 	read := func(path string) {
+		state = response{}
 		t.Helper()
 		rr := httptest.NewRecorder()
 		egressModule{app}.state(rr, httptest.NewRequest("GET", path, nil))
@@ -132,9 +134,9 @@ func TestResidentialPageSeparatesHostedAndUnattributedSplit(t *testing.T) {
 	}
 	read("/api/egress?brief=1&view=diagnostics")
 	p := state.Accounting.Publication
-	if len(state.Entries) != 3 || state.Eligible != 1 || state.Counts["ADS_SPLIT"] != 2 ||
-		p["route_verified"] != 3 || p["hosting"] != 1 || p["network_unverified"] != 1 ||
-		p["eligible"] != 1 || p["published"] != 1 || p["country_filtered"] != 0 {
+	if len(state.Entries) != 3 || state.Eligible != 2 || state.Counts["RESIDENTIAL"] != 2 || state.Counts["ADS_SPLIT"] != 1 ||
+		p["route_verified"] != 3 || p["hosting"] != 1 || p["eligible_network_unattributed"] != 1 || p["network_unverified"] != 0 ||
+		p["eligible"] != 2 || p["published"] != 2 || p["country_filtered"] != 0 {
 		t.Fatal("network and route accounting confused", state)
 	}
 	byNetwork := map[string]entry{}
@@ -143,29 +145,40 @@ func TestResidentialPageSeparatesHostedAndUnattributedSplit(t *testing.T) {
 	}
 	h := byNetwork["hosting"]
 	if !h.NetworkHeld || h.LastAdverse.Provider != "vultr" || h.LastAdverse.ASN != 20473 ||
-		h.LastAdverse.Domain == "" || h.State != "ADS_SPLIT" || h.Published || byNetwork["unknown"].Published ||
+		h.LastAdverse.Domain == "" || h.State != "ADS_SPLIT" || h.Published || !byNetwork["unknown"].Published ||
 		h.Decision.State != "ADS_SPLIT" || h.Decision.Eligible || h.Decision.Reason != "ads_hosting_exit" ||
 		h.Decision.Until != 0 || h.ValidUntil != 0 || len(h.Decision.Qualified) != 6 ||
 		h.Route.State != "ADS_SPLIT" || !h.Route.Qualified || h.Route.Until == 0 {
 		t.Fatal("missing hosting reason or false publication", byNetwork)
 	}
 	read("/api/egress?brief=1")
-	if len(state.Entries) != 1 || !state.Entries[0].Published || state.Entries[0].Network.State != "access" {
+	if len(state.Entries) != 2 {
 		t.Fatal("public list diverged", state.Entries)
 	}
-	verified := state.Entries[0]
-	if !verified.Decision.Eligible || !verified.Decision.Published || verified.Decision.State != "RESIDENTIAL" ||
-		verified.Decision.Until != verified.ValidUntil || verified.ValidUntil <= 0 {
-		t.Fatal("access proof deadline or publication flags diverged", verified)
+	for _, row := range state.Entries {
+		if !row.Published || !row.Decision.Eligible || !row.Decision.Published || row.Decision.State != "RESIDENTIAL" ||
+			row.Decision.Until != row.ValidUntil || row.ValidUntil != row.Route.Until || row.ValidUntil <= 0 || row.Decision.Reason == "ads_access_verified" {
+			t.Fatal("expected the original route reason and deadline for admitted entries", row)
+		}
 	}
 	if _, err := s.db.Exec("UPDATE egress_country_policy SET allowed='[]'"); err != nil {
 		t.Fatal(err)
 	}
 	read("/api/egress?view=diagnostics")
 	for _, row := range state.Entries {
-		if row.Network.State == "access" && (!row.Decision.Eligible || row.Decision.Published || row.Published) {
+		if row.Network.State != "hosting" && (!row.Decision.Eligible || row.Decision.Published || row.Published) {
 			t.Fatal("selected country must only alter publication", row)
 		}
+	}
+	// When every remaining qualifying route has confirmed hosting evidence,
+	// the panel must explain a zero without attributing it to the country filter.
+	if _, err := s.db.Exec("UPDATE egress_jobs SET paused=1 WHERE hash IN (SELECT hash FROM egress_network_results WHERE held=0)"); err != nil {
+		t.Fatal(err)
+	}
+	read("/api/egress?brief=1")
+	p = state.Accounting.Publication
+	if len(state.Entries) != 0 || p["route_verified"] != 1 || p["hosting"] != 1 || p["eligible"] != 0 || p["published"] != 0 || p["country_filtered"] != 0 {
+		t.Fatal("all hosted routes must be excluded with the hosting reason", p)
 	}
 	var base string
 	if err := s.db.QueryRow("SELECT json_extract(j.decision,'$.state') FROM egress_jobs j JOIN egress_network_results n ON n.hash=j.hash WHERE n.state='hosting'").Scan(&base); err != nil || base != "RESIDENTIAL" {

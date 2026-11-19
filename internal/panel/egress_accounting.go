@@ -39,12 +39,14 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	}
 	// Count holds by the last credible adverse observation. A later incomplete
 	// receipt does not release a hold. Scope the partition to current split proofs.
-	var hosting, mixed int
+	var hosting, mixed, access, shared int
 	err = q.QueryRowContext(ctx, `SELECT
- coalesce(sum(json_extract(n.last_adverse,'$.state')='hosting'),0),
- coalesce(sum(json_extract(n.last_adverse,'$.state')='mixed'),0)
+ coalesce(sum(n.held=1 AND json_extract(n.last_adverse,'$.state')='hosting'),0),
+ coalesce(sum(n.held=1 AND json_extract(n.last_adverse,'$.state')='mixed'),0),
+ coalesce(sum(n.held=0 AND n.state='access' AND n.hash=e.hash AND n.candidate_hash=e.candidate_hash AND n.checked_at=e.tested AND n.valid_until>?),0),
+ coalesce(sum(n.held=0 AND n.hash=e.hash AND n.candidate_hash=e.candidate_hash AND n.checked_at=e.tested AND json_array_length(n.summary,'$.shared_hosting')>0),0)
  FROM egress_eligible e JOIN egress_unique u ON u.hash=e.hash
- JOIN egress_network_results n ON n.identity=u.identity WHERE n.held=1`).Scan(&hosting, &mixed)
+ LEFT JOIN egress_network_results n ON n.identity=u.identity`, now).Scan(&hosting, &mixed, &access, &shared)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +69,7 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 		"queue":   map[string]int{"paused": paused, "running": running, "due": due, "scheduled": scheduled, "cached": cached},
 		"renewal": map[string]int{"paused": renewalPaused, "running": renewalRunning, "due": renewalDue, "scheduled": renewalScheduled, "cached": renewalCached},
 		"publication": map[string]int{"retained": retained, "awaiting_proof": retained - routeEligible, "route_verified": routeEligible, "eligible": eligible,
-			"hosting": hosting, "mixed": mixed, "network_unverified": routeEligible - eligible - hosting - mixed,
+			"hosting": hosting, "mixed": mixed, "network_unverified": routeEligible - eligible - hosting - mixed, "eligible_network_unattributed": eligible - access, "eligible_with_shared_hosting": shared,
 			"country_unknown": eligible - known, "country_filtered": known - published, "published": published, "raw_count": published, "template_count": published, "tested_template_count": published, "distinct_templates": templates, "identities": identities},
 	}, nil
 }

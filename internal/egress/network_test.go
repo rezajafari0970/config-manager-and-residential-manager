@@ -1,6 +1,9 @@
 package egress
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func networkFixture() (Report, Plan, int64) {
 	r, p, now := fixture()
@@ -35,15 +38,15 @@ func TestExitNetworkSeparateFromRouteAndOrdinaryHealth(t *testing.T) {
 	}
 	r.Samples[0].Network = nil
 	d = Evaluate(r, p, r.Hash, now)
-	if !d.Eligible || d.Network.Eligible || d.Network.Reason != "ads_network_evidence_incomplete" || d.Network.Domain != r.Samples[0].Domain {
+	if !d.Eligible || d.Network.BlocksResidential() || d.Network.Eligible || d.Network.Reason != "ads_network_evidence_incomplete" || d.Network.Domain != r.Samples[0].Domain {
 		t.Fatal(d.Network)
 	}
 	for i := range r.Samples {
 		r.Samples[i].Network = nil
 	}
 	d = Evaluate(r, p, r.Hash, now)
-	if !d.Eligible || d.Network.State != "unknown" || d.Network.Eligible {
-		t.Fatal("legacy route evidence published or misclassified", d.Network)
+	if !d.Eligible || d.Network.BlocksResidential() || d.Network.State != "unknown" || d.Network.Eligible {
+		t.Fatal("legacy split-route must pass without an access claim", d.Network)
 	}
 }
 
@@ -55,7 +58,7 @@ func TestVultrWithSplitControlsAndMixedTemplateIPv6(t *testing.T) {
 		}
 	}
 	d := Evaluate(r, p, r.Hash, now)
-	if !d.Eligible || d.Network.Eligible || d.Network.State != "hosting" || d.Network.Provider != "vultr" || d.Network.ASN != 20473 {
+	if !d.Eligible || !d.Network.BlocksResidential() || d.Network.Eligible || d.Network.State != "hosting" || d.Network.Provider != "vultr" || d.Network.ASN != 20473 {
 		t.Fatal(d.Network)
 	}
 	r, p, now = networkFixture()
@@ -66,7 +69,7 @@ func TestVultrWithSplitControlsAndMixedTemplateIPv6(t *testing.T) {
 		}
 	}
 	d = Evaluate(r, p, r.Hash, now)
-	if d.Network.Eligible || d.Network.Reason != "ads_mixed_exit" || d.Network.Domain != "securepubads.g.doubleclick.net" || d.Network.Variant != "template" || d.Network.Family != 6 || len(d.Network.Families) != 2 {
+	if !d.Network.BlocksResidential() || d.Network.Eligible || d.Network.Reason != "ads_mixed_exit" || d.Network.Domain != "securepubads.g.doubleclick.net" || d.Network.Variant != "template" || d.Network.Family != 6 || len(d.Network.Families) != 2 {
 		t.Fatal(d.Network)
 	}
 }
@@ -97,14 +100,163 @@ func TestNetworkEvidenceIntegrity(t *testing.T) {
 	}
 }
 
-func TestExitNetworkNeedsBothProfilesAndExactAdDelivery(t *testing.T) {
+func TestLegacyProfileRestoredWithOnlyObservedHostingVeto(t *testing.T) {
 	r, p, now := networkFixture()
+	// Fail the second bootstrap asset. The first profile still passes route and delivery.
 	for i := range r.Delivery {
 		r.Delivery[i].Assets[1].HTTPStatus = 403
 	}
 	d := Evaluate(r, p, r.Hash, now)
-	if !d.Eligible || d.Network.Eligible || d.Network.Reason != "ads_network_coverage_incomplete" {
-		t.Fatal(d.Network)
+	if !d.Eligible || len(d.QualifiedProfiles) != 1 || !d.Network.Eligible || d.Network.BlocksResidential() {
+		t.Fatal(d.Network, d.QualifiedProfiles)
+	}
+	for i := range r.Samples {
+		r.Samples[i].Network = nil
+	}
+	d = Evaluate(r, p, r.Hash, now)
+	if !d.Eligible || len(d.QualifiedProfiles) != 1 || d.Network.BlocksResidential() || d.Network.State != "unknown" {
+		t.Fatal(d.Network, d.QualifiedProfiles)
+	}
+	// The failing second profile still vetoes when an actual Ads connection has a
+	// verified datacenter exit. Failure to classify all other peers changes nothing.
+	domain := r.Delivery[0].Assets[1].Domain
+	populated, _, _ := networkFixture()
+	var found bool
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		if s.Domain == domain && s.Variant == "template" && s.Wave == 2 {
+			s.Network = populated.Samples[i].Network
+			s.Network.CheckedAt = now
+			s.Network.ValidUntil = now + EvidenceTTL
+			setHosting(s, 4)
+			found = true
+		}
+	}
+	d = Evaluate(r, p, r.Hash, now)
+	if !found || !d.Eligible || len(d.QualifiedProfiles) != 1 || !d.Network.BlocksResidential() || d.Network.Domain != domain {
+		t.Fatal(d.Network, d.QualifiedProfiles)
+	}
+	for i := range r.Delivery {
+		r.Delivery[i].Assets[0].HTTPStatus = 403
+	}
+	d = Evaluate(r, p, r.Hash, now)
+	if d.Eligible || !d.Network.BlocksResidential() {
+		t.Fatal("original delivery requirement or independent DC veto lost", d.Network)
+	}
+}
+
+func TestClearanceRequiresEveryPreviouslyObservedHostingFlow(t *testing.T) {
+	r, p, now := networkFixture()
+	first := NetworkFlow{Domains[0], "raw", 4}
+	second := NetworkFlow{Domains[1], "template", 6}
+	third := NetworkFlow{Domains[2], "raw", 4}
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		if s.Domain == first.Domain && s.Variant == first.Variant || s.Domain == second.Domain && s.Variant == second.Variant {
+			family := 4
+			if s.Domain == second.Domain {
+				family = 6
+			}
+			setHosting(s, family)
+		}
+	}
+	adverse := Evaluate(r, p, r.Hash, now).Network
+	if !adverse.BlocksResidential() || len(adverse.HostingFlows) != 2 || !slices.Contains(adverse.HostingFlows, first) || !slices.Contains(adverse.HostingFlows, second) {
+		t.Fatal(adverse)
+	}
+	r, p, now = networkFixture()
+	known := Evaluate(r, p, r.Hash, now).Network
+	if known.ClearsHosting(adverse) {
+		t.Fatal("IPv4 access cleared an observed IPv6 datacenter exit")
+	}
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		if s.Domain == second.Domain && s.Variant == second.Variant {
+			s.Family, s.Network.Family = 6, 6
+			s.Source = Hash([]byte("fixture-v6-access"))
+			s.Network.Source = s.Source
+		}
+		if s.Domain == third.Domain && s.Variant == third.Variant {
+			s.Network = nil
+		}
+	}
+	known = Evaluate(r, p, r.Hash, now).Network
+	if known.State != "unknown" || known.ClearanceUntil <= now || !known.ClearsHosting(adverse) {
+		t.Fatal("unrelated unknown wrongly blocked scoped recovery", known)
+	}
+	legacy := NetworkVerdict{Version: NetworkVersion, State: "hosting", Domain: second.Domain, Variant: second.Variant, Family: 6}
+	if !known.ClearsHosting(legacy) {
+		t.Fatal("legacy specific adverse flow lost", known)
+	}
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		if s.Domain == first.Domain && s.Variant == first.Variant && s.Wave == 1 {
+			s.Network = nil
+		}
+	}
+	known = Evaluate(r, p, r.Hash, now).Network
+	if known.ClearsHosting(adverse) || !known.ClearsHosting(legacy) {
+		t.Fatal("incomplete current attribution cleared same flow", known)
+	}
+}
+
+func TestKnownHostingCanRecoverOnDifferentUnclassifiedOrigin(t *testing.T) {
+	previous := NetworkVerdict{Version: NetworkVersion, State: "mixed", Domain: Domains[0], Variant: "raw", Family: 4, ASN: 20473, HostingASNs: []uint32{20473, 20474}}
+	for name, tc := range map[string]struct {
+		change func(*Sample)
+		clear  bool
+	}{
+		"different observed origin": {nil, true},
+		"private origin":            {func(s *Sample) { s.Network.ASN = 4200000000 }, false},
+		"rotating unrelated origins": {func(s *Sample) {
+			if s.Wave == 2 {
+				s.Network.ASN = 3334
+				s.Source = Hash([]byte("other endpoint"))
+				s.Network.Source = s.Source
+			}
+		}, true},
+		"rotation also containing prior hosting ASN": {func(s *Sample) {
+			if s.Wave == 2 {
+				s.Network.ASN = 20473
+				s.Source = Hash([]byte("old exit"))
+				s.Network.Source = s.Source
+			}
+		}, false},
+		"first adverse origin":                   {func(s *Sample) { s.Network.ASN = 20473 }, false},
+		"another previously adverse origin":      {func(s *Sample) { s.Network.ASN = 20474 }, false},
+		"complete hosting feeds not established": {func(s *Sample) { s.Network.OriginOutsideHosting = false }, false},
+		"unbound source":                         {func(s *Sample) { s.Network.Source = Hash([]byte("unrelated IP")) }, false},
+		"snapshot unavailable":                   {func(s *Sample) { s.Network.Reason = "network_snapshot_unavailable" }, false},
+		"stale dataset":                          {func(s *Sample) { s.Network.ValidUntil = s.At }, false},
+		"unrecognised origin source":             {func(s *Sample) { s.Network.OriginSource = "ip-label" }, false},
+		"competing kind":                         {func(s *Sample) { s.Network.Kind = "hosting" }, false},
+		"unpaired selected waves": {func(s *Sample) {
+			if s.Wave > 1 {
+				s.Network = nil
+			}
+		}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, p, now := networkFixture()
+			for i := range r.Samples {
+				s := &r.Samples[i]
+				if !s.ActualAds {
+					continue
+				}
+				// A usage miss remains unknown even if a trusted live snapshot can exclude
+				// its observed origin from all the maintained hosting networks.
+				s.Network.Kind, s.Network.Provider, s.Network.UsageSource = "unknown", "", ""
+				s.Network.Reason, s.Network.OriginOutsideHosting = "network_usage_unverified", true
+				s.Network.ASN = 3333
+				if tc.change != nil {
+					tc.change(s)
+				}
+			}
+			d := Evaluate(r, p, r.Hash, now)
+			if !d.Eligible || d.Network.BlocksResidential() || d.Network.Eligible || d.Network.State != "unknown" || d.Network.ClearsHosting(previous) != tc.clear {
+				t.Fatal(d.Network)
+			}
+		})
 	}
 }
 

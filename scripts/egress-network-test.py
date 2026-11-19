@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline tests of TLS-bound exit enrichment, snapshot replacement and privacy."""
 import hashlib
+import importlib
 import importlib.util
 import ipaddress
 import json
@@ -18,6 +19,7 @@ spec = importlib.util.spec_from_file_location("probe", HERE / "egress-probe.py")
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
 network = probe.exit_network
+builder = importlib.import_module("egress-network-update")
 
 
 class ExitNetworkTests(unittest.TestCase):
@@ -33,6 +35,9 @@ class ExitNetworkTests(unittest.TestCase):
             ("2606:4700:10::/48", "access", "sample-v6", 1234, "sample-subscriber-pool", self.until),
         ]
         self.origins = [("45.76.112.0/20", 20473), ("84.60.0.0/16", 1234), ("2606:4700::/32", 1234)]
+        self.origin_source = "routeviews"
+        self.feeds = {f.source: ("current", self.at, f.minimum, "f" * 64)
+                      for f in builder.FEEDS if f.kind == "hosting"}
         self.manifest = self.path.with_suffix(".json")
         self.registry = network.NetworkRegistry(self.path, self.manifest)
         self.addCleanup(self.registry.close)
@@ -49,11 +54,13 @@ class ExitNetworkTests(unittest.TestCase):
                     asn INTEGER,source TEXT,valid_until INTEGER,PRIMARY KEY(family,length,start)) WITHOUT ROWID;
                 CREATE TABLE hosting_asns(asn INTEGER PRIMARY KEY);
                 INSERT INTO hosting_asns VALUES(20473);
+                CREATE TABLE feed_status(source TEXT PRIMARY KEY,status TEXT,checked_at INTEGER,records INTEGER,sha256 TEXT);
             """)
             db.executemany("INSERT INTO meta VALUES(?,?)", {
                 "version": network.VERSION, "origin_valid_until": str(size),
-                "origin_source": "routeviews", "dataset": hashlib.sha256(revision.encode()).hexdigest(),
+                "origin_source": self.origin_source, "dataset": hashlib.sha256(revision.encode()).hexdigest(),
             }.items())
+            db.executemany("INSERT INTO feed_status VALUES(?,?,?,?,?)", ((key, *v) for key, v in self.feeds.items()))
             for table, records in (("origins", self.origins), ("usage", self.usage)):
                 for prefix, *values in records:
                     block = ipaddress.ip_network(prefix)
@@ -188,6 +195,61 @@ class ExitNetworkTests(unittest.TestCase):
         self.usage.append(("45.76.115.0/24", "access", "sample-access", 20473, "reviewed-pool", self.until))
         self.snapshot()
         self.assertEqual(self.lookup("45.76.115.243")["reason"], "network_usage_conflict")
+
+    def test_unclassified_origin_proves_only_an_observed_change_for_prior_holds(self):
+        self.origin_source = "ripe-ris"
+        host = "84.61.7.8"
+        self.origins.extend([("84.61.0.0/16", 3243), ("84.61.7.0/24", 1234)])
+        self.feeds["vultr-geofeed"] = ("last-good", self.at - builder.TTL + 20_000, 52, "e" * 64)
+        self.snapshot()
+        for address, asn, family, length in [(host, 1234, 4, 24), ("2606:4700:100::b", 1234, 6, 32)]:
+            fact = self.lookup(address)
+            self.assertEqual((fact["kind"], fact["reason"]), ("unknown", "network_usage_unverified"))
+            self.assertTrue(fact["origin_outside_hosting"])
+            self.assertEqual((fact["asn"], fact["family"], fact["prefix_len"]), (asn, family, length))
+            self.assertEqual((fact["origin_source"], fact["valid_until"]), ("ripe-ris", self.at + 20_000))
+            self.assertNotIn("provider", fact)
+            self.assertNotIn("usage_source", fact)
+        rows = [self.row(host), self.row(host, actual_ads=False)]
+        self.registry.attach(rows)
+        probe.private_sources(rows, b"a" * 32)
+        self.assertEqual(rows[0]["network"]["source"], rows[0]["source"])
+        self.assertNotIn("network", rows[1])
+        self.assertNotIn(host, json.dumps(rows))
+        self.assertNotIn("origin_outside_hosting", self.registry.lookup(ipaddress.ip_address(host), self.at + 20_001))
+
+    def test_unclassified_origin_requires_unambiguous_public_origin_and_no_usage(self):
+        self.origin_source = "ripe-ris"
+        self.origins.extend([("84.61.0.0/16", 1234), ("84.61.1.0/24", 0), ("84.61.2.0/24", 20473),
+                             ("84.61.3.0/24", 64512), ("84.61.4.0/24", 23456), ("84.61.5.0/24", 65535)])
+        self.usage.extend([("84.61.7.0/24", "hosting", "stale", 1234, "stale-host", self.at - 1),
+                           ("84.61.8.0/24", "unknown", "conflict", 1234, "allocations", self.until)])
+        self.snapshot()
+        for addr in ("84.61.1.2", "84.61.2.2", "84.61.3.2", "84.61.4.2", "84.61.5.2", "84.61.7.2",
+                     "84.61.8.2", "45.76.115.243", "84.60.2.2", "8.8.8.8"):
+            with self.subTest(addr=addr):
+                self.assertNotIn("origin_outside_hosting", self.lookup(addr))
+
+    def test_unclassified_origin_requires_current_hosting_inventory(self):
+        self.origin_source = "ripe-ris"
+        self.origins.append(("84.61.0.0/16", 1234))
+        for row in [("unavailable", self.at, 0, ""), ("last-good", self.at - builder.TTL, 52, "e" * 64),
+                    ("current", self.at, 1, "e" * 64), ("current", self.at, 52, "bad"),
+                    ("current", self.at + 120_000, 52, "e" * 64), None]:
+            with self.subTest(row=row):
+                if row is None:
+                    del self.feeds["vultr-geofeed"]
+                else:
+                    self.feeds["vultr-geofeed"] = row
+                self.snapshot()
+                self.assertNotIn("origin_outside_hosting", self.lookup("84.61.0.2"))
+                self.assertEqual(self.lookup("45.76.115.243")["kind"], "hosting")
+        self.feeds["vultr-geofeed"] = ("current", self.at, 52, "e" * 64)
+        self.snapshot(origin_until=self.at)
+        self.assertNotIn("origin_outside_hosting", self.lookup("84.61.0.2"))
+        self.origin_source = "routeviews"
+        self.snapshot()
+        self.assertNotIn("origin_outside_hosting", self.lookup("84.61.0.2"))
 
 
 if __name__ == "__main__":

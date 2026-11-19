@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -31,14 +33,27 @@ func TestPartialProfileCountsAndFourExactExports(t *testing.T) {
 	if err != nil || j == nil {
 		t.Fatal(err)
 	}
-	if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: partialProfileReport(*j)}); err != nil {
+	r := partialProfileReport(*j)
+	for i := range r.Samples {
+		sample := &r.Samples[i]
+		if !sample.ActualAds {
+			continue
+		}
+		if strings.HasSuffix(sample.Domain, "doubleclick.net") {
+			sample.Network = nil
+		} else {
+			sample.Network.Kind, sample.Network.Provider, sample.Network.ASN = "hosting", "aws", 16509
+			sample.Network.Source = sample.Source
+		}
+	}
+	if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != nil {
 		t.Fatal(err)
 	}
 	counts, err := egressProfileSummary(ctx, s.db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts["partial_tested_ads"] != 1 || counts["complete_tested_ads"] != 0 || counts["published"] != 0 || counts["profiles"].(map[string]int)["doubleclick.v1"] != 1 {
+	if counts["partial_tested_ads"] != 1 || counts["complete_tested_ads"] != 0 || counts["published"] != 1 || counts["profiles"].(map[string]int)["doubleclick.v1"] != 1 {
 		t.Fatal(counts)
 	}
 	app, err := NewServer(s, "http://127.0.0.1:18191")
@@ -50,37 +65,38 @@ func TestPartialProfileCountsAndFourExactExports(t *testing.T) {
 		t.Fatal("profile UI module unavailable", asset.Code)
 	}
 	base := app.origin + "/egress-subscription/" + s.digest("egress-export-v2", "all") + "/"
-	// The route receipt remains visible. No single complete profile can qualify
-	// for the strict residential output, even with an allowed country.
+	// A single qualifying profile still admits the exact raw and template.
 	partial := exportRequest(t, app.Handler(), "GET", app.origin+"/api/egress?brief=1&view=diagnostics")
 	var state struct {
-		Eligible int
-		Counts   map[string]int
-		Entries  []struct {
+		Eligible   int
+		Accounting struct{ Publication map[string]int }
+		Counts     map[string]int
+		Entries    []struct {
 			State               string
 			ResidentialEligible bool `json:"residential_eligible"`
 			Published           bool
+			Network             struct {
+				Shared []egressSharedHost `json:"shared_hosting"`
+			}
+			Decision struct {
+				Profiles []string `json:"qualified_profiles"`
+				Network  struct {
+					Shared []egressSharedHost `json:"shared_hosting"`
+				}
+			}
 		}
 	}
 	if partial.Code != 200 || json.Unmarshal(partial.Body.Bytes(), &state) != nil || len(state.Entries) != 1 ||
-		state.Eligible != 0 || state.Counts["RESIDENTIAL"] != 0 || state.Counts["ADS_SPLIT"] != 1 ||
-		state.Entries[0].State != "ADS_SPLIT" || state.Entries[0].ResidentialEligible || state.Entries[0].Published {
-		t.Fatal("partial split mislabelled residential", state, partial.Code)
+		state.Eligible != 1 || state.Counts["RESIDENTIAL"] != 1 || state.Counts["ADS_SPLIT"] != 0 ||
+		state.Entries[0].State != "RESIDENTIAL" || !state.Entries[0].ResidentialEligible || !state.Entries[0].Published {
+		t.Fatal("qualifying partial split missing from Residential", state, partial.Code)
 	}
-	for _, f := range []string{"configs.json", "configs.jsonl", "raw.txt", "next.json"} {
-		if rr := exportRequest(t, app.Handler(), "GET", base+f); rr.Code != 503 {
-			t.Fatal("partial split exported", f, rr.Code)
-		}
-	}
-	if _, err := s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", j.Hash); err != nil {
-		t.Fatal(err)
-	}
-	j, err = s.ClaimEgressLane(ctx, "followup")
-	if err != nil || j == nil {
-		t.Fatal(err)
-	}
-	if err := s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: syntheticEgress(*j)}); err != nil {
-		t.Fatal(err)
+	entry := state.Entries[0]
+	shared := entry.Network.Shared
+	if state.Accounting.Publication["eligible_with_shared_hosting"] != 1 || state.Accounting.Publication["eligible_network_unattributed"] != 1 ||
+		!slices.Equal(entry.Decision.Profiles, []string{"doubleclick.v1"}) || !slices.Equal(shared, entry.Decision.Network.Shared) ||
+		!slices.Contains(shared, egressSharedHost{Domain: "adservice.google.com", Provider: "aws"}) {
+		t.Fatal("expected DoubleClick scope and the AWS evidence for the ordinary route", entry, state.Accounting)
 	}
 	var template []byte
 	for _, v := range egress.Prepare(j.Raw).Variants {
@@ -90,7 +106,10 @@ func TestPartialProfileCountsAndFourExactExports(t *testing.T) {
 	}
 	for _, f := range []string{"configs.json", "configs.jsonl", "raw.txt", "next.json"} {
 		rr := exportRequest(t, app.Handler(), "GET", base+f)
-		if rr.Code != 200 || rr.Header().Get("X-Config-Count") != "1" || rr.Header().Get("X-Residential-Definition") != "verified-ads-access-network" {
+		if rr.Code != 200 || rr.Header().Get("X-Config-Count") != "1" || rr.Header().Get("X-Residential-Definition") != "verified-ads-profile-split" ||
+			rr.Header().Get("X-Egress-Profile-Policy") != "any-complete-profile; partial-Ads-coverage-explicit" || rr.Header().Get("X-Egress-Network-Policy") != "datacenter-veto; proven-shared-control-flow-reported-separately" ||
+			rr.Header().Get("X-Egress-Qualified-Profile-Counts") != "doubleclick.v1=1" || rr.Header().Get("X-Egress-Partial-Profile-Count") != "1" ||
+			rr.Header().Get("X-Egress-Shared-Hosting") != "adservice.google.com=aws, pagead2.googlesyndication.com=aws, www.googleadservices.com=aws" {
 			t.Fatal(f, rr.Code, rr.Body.String())
 		}
 		if f == "raw.txt" {
@@ -111,7 +130,7 @@ func TestPartialProfileCountsAndFourExactExports(t *testing.T) {
 			t.Fatal(f, "exact template changed")
 		}
 	}
-	// Previously observed country from the partial profile cannot publish these bytes.
+	// A country observed only on a shared Ads path cannot select this profile.
 	if _, err = s.db.Exec(`UPDATE egress_country_policy SET allowed='["IE"]',revision=revision+1`); err != nil {
 		t.Fatal(err)
 	}
@@ -165,5 +184,21 @@ func TestProfileCountryHistorySurvivesUnknownButNotProfileChange(t *testing.T) {
 	save(r, d)
 	if err = s.db.QueryRow("SELECT count(*) FROM egress_countries WHERE hash=? AND country='TW'", j.Hash).Scan(&n); err != nil || n != 0 {
 		t.Fatal("profile change reused former countries", err, n)
+	}
+}
+
+func TestRotatingScopeHeadersDescribeOnlySelectedConfig(t *testing.T) {
+	entries := []egressExportEntry{
+		{Hash: "partial", Coverage: "PARTIAL", Profiles: []string{"doubleclick.v1"}, SharedHosting: []egressSharedHost{{Domain: "adservice.google.com", Provider: "aws"}}},
+		{Hash: "full", Coverage: "ALL_TESTED", Profiles: []string{"doubleclick.v1", "ads-serving.v1"}},
+	}
+	headers := make(http.Header)
+	setEgressScopeHeaders(headers, entries, "full")
+	if headers.Get("X-Egress-Shared-Hosting") != "" || headers.Get("X-Egress-Partial-Profile-Count") != "0" || headers.Get("X-Egress-Qualified-Profile-Counts") != "ads-serving.v1=1, doubleclick.v1=1" {
+		t.Fatal("rotation leaked coverage from another config", headers)
+	}
+	setEgressScopeHeaders(headers, entries, "")
+	if headers.Get("X-Egress-Shared-Hosting") != "adservice.google.com=aws" || headers.Get("X-Egress-Partial-Profile-Count") != "1" || headers.Get("X-Egress-Qualified-Profile-Counts") != "ads-serving.v1=1, doubleclick.v1=2" {
+		t.Fatal("bulk coverage did not account for each returned config", headers)
 	}
 }

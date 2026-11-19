@@ -1,7 +1,7 @@
 import {poll} from './poll.js';
 import {$,fa,clock,esc,icon,digit,interval,dateTime,countdown,toast,api,showResult,empty} from './core.js';
 const page=document.body.dataset.page;
-const words={datacenter:["Datacenter", "تفکیک مستقل دیتاسنتر و CDN با خروجی خام و تک‌کانفیگ چرخشی."],egress:['Residential Ads','کانفیگ‌های دارای مسیر جداگانهٔ تبلیغات و خروجی تأییدشده از شبکهٔ دسترسی.'],input:['Input','لینک‌ها را یک‌جا اضافه و مستقل مدیریت کنید.'],output:['Output','کانفیگ‌های تبدیل‌شده به قالب مشترک JSON.'],setting:['Setting','تنظیمات مشترک، برای مدیریت ساده‌تر منابع.']};
+const words={datacenter:["Datacenter", "تفکیک مستقل دیتاسنتر و CDN با خروجی خام و تک‌کانفیگ چرخشی."],egress:['Residential Ads','مسیر جداگانهٔ تبلیغات با بررسی خروج دیتاسنتری Google Ads و DoubleClick.'],input:['Input','لینک‌ها را یک‌جا اضافه و مستقل مدیریت کنید.'],output:['Output','کانفیگ‌های تبدیل‌شده به قالب مشترک JSON.'],setting:['Setting','تنظیمات مشترک، برای مدیریت ساده‌تر منابع.']};
 $('#page-title').textContent=words[page][0];$('#breadcrumb-page').textContent=words[page][0];$('#page-description').textContent=words[page][1];$('#page-icon').setAttribute('href','#i-'+((page==='egress'||page==='datacenter')?'output':page));document.title=words[page][0]+' · Config manager and residential manager';
 let state=null,currentPage=0,busy=false;
 const registry={datacenter:()=>import("./datacenter.js"),egress:()=>import('./egress.js'),input:()=>import("./input.js"),output:()=>import("./output.js"),setting:()=>import("./setting.js")};

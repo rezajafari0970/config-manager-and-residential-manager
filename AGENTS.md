@@ -5,9 +5,11 @@ publication of this project in a separate GitHub repository with a one-command
 installer. This supersedes earlier Smart-preservation/publication instructions.
 Keep ordinary collection, conversion, raw bytes, output rotation, Residential
 classification/health/country/Iran guards and settings. Residential publication
-requires both the Ads/control split and positive access-network evidence for the
-observed Ads source across both domain profiles and exact variants. A verified
-hosting source vetoes residential publication. Keep ordinary eligibility separate.
+uses the original Ads/control split, delivery, health and country checks. Withhold
+residential exports when a separated Ads flow shows a verified hosting exit.
+An authenticated ordinary-path match on another unqualified profile preserves
+the scope of the original qualified profile. A missing network receipt or unknown network type adds no new veto.
+Keep ordinary eligibility separate.
 
 Schema41 retires only exclusive combined-profile data and source flags. Keep
 matched recovery backups and the external deletion ledger; never rewind a live
