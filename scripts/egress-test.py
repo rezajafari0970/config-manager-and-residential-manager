@@ -223,6 +223,28 @@ class DispatchContracts(unittest.TestCase):
     self.assertEqual([attempt['code'] for attempt in report['attempts']],[expected])
     self.assertEqual(report['samples'],[]);self.assertEqual(report['checks'],[])
     dns.assert_not_called();box.launch.assert_not_called()
+ def test_missing_exact_listener_is_one_preflight_result(self):
+  import base64,contextlib,types
+  from unittest.mock import Mock,patch
+  xray={'protocol':'vmess','tag':'proxy','settings':{'address':'192.0.2.9','port':443}}
+  native={'type':'trojan','tag':'proxy','server':'192.0.2.9','server_port':443}
+  listener={'listen':'127.0.0.1','port':10808,'protocol':'socks'}
+  for kind,output,listeners,expected in [
+   ('xray',xray,[],'probe_socks_contract_missing'),
+   ('xray',xray,[dict(listener,settings={'auth':'password'})],'probe_socks_contract_missing'),
+   ('xray',xray,[dict(listener,listen='0.0.0.0')],'nonloopback_listener_not_qualified'),
+   ('xray',xray,[listener,listener],'listener_port_conflict'),
+   ('sing-box',native,[],'native_probe_listener_missing')]:
+   with self.subTest(kind=kind,expected=expected):
+    body=json.dumps({'outbounds':[output],'inbounds':listeners}).encode()
+    variants=[dict(name=name,hash=driver.lab.digest(body),config=base64.b64encode(body).decode()) for name in ('raw','template')]
+    pool=Mock();box=Mock();pool.lease.side_effect=lambda *args:contextlib.nullcontext(box)
+    req=dict(plan=dict(driver=kind,variants=variants),hash=driver.lab.digest(body),started=1)
+    with patch.object(driver,'resource_failures',return_value=((1,2),(0,0))),patch.object(driver.lab,'resolve_endpoints',return_value={}):
+     report=driver.investigate(req,types.SimpleNamespace(prefix='cgt'),pool)
+    self.assertEqual([a['code'] for a in report['attempts']],[expected]);self.assertEqual(report['code'],expected)
+    self.assertFalse(any(report[k] for k in ('checks','samples','delivery','health','evidence')))
+    box.launch.assert_not_called();box.net.assert_not_called()
  def test_failed_firewall_update_is_never_cached(self):
   original=driver.lab.Sandbox.policy;calls=[]
   def policy(box,resolved):

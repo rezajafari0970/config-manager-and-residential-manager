@@ -128,11 +128,12 @@ def private_sources(samples,key):
 def error_code(error):
  return 'driver_subprocess_timeout' if isinstance(error,subprocess.TimeoutExpired) else 'driver_subprocess_failed' if isinstance(error,subprocess.CalledProcessError) else str(error) if isinstance(error,ValueError) and re.fullmatch('[a-z0-9_]{1,60}',str(error)) else 'driver_infrastructure_error'
 def core_independent_failure(code):
- # These route vetoes come from the shared Python preflight on the exact
- # variant, before core launch. Host DNS and address-family failures are
- # likewise independent of core choice. The job retains its UNKNOWN receipt.
+ # These listener and route checks inspect the exact variant before any
+ # core launches. Repeating them cannot produce a network observation.
  return code in ('protocol_disabled','endpoint_dns_failed','ipv6_only_probe_pending',
-                 'direct_route_not_qualified','direct_default_not_qualified')
+                 'direct_route_not_qualified','direct_default_not_qualified',
+                 'probe_socks_contract_missing','native_probe_listener_missing',
+                 'listener_port_conflict','nonloopback_listener_not_qualified')
 def resource_failures(box):
  try:
   with (box.cg/'memory.events').open() as events:
