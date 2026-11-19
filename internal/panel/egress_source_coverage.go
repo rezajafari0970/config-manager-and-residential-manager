@@ -42,6 +42,8 @@ const currentEgressJoins = `LEFT JOIN egress_unique u ON u.identity=k.identity
 
 // All memberships for one identity share the same job. Compute the four
 // disjoint states once, then fan the counts back out onto the displayed page.
+// Withdrawals start from the pinned backlog. The tested=0 index also contains
+// every unassessed historical job, most of which have no source on this page.
 const egressSourceCoverageSQL = `
 SELECT * FROM (WITH page AS (
  SELECT id,name FROM sources WHERE enabled=1 ORDER BY id LIMIT ? OFFSET ?
@@ -55,19 +57,22 @@ SELECT * FROM (WITH page AS (
  FROM ids k ` + currentEgressJoins + ` AND c.expires>?3
 ), withdrawn AS MATERIALIZED (
  SELECT b.source_id,u.identity FROM egress_first_backlog b
- JOIN sources s ON s.id=b.source_id AND s.enabled=1
- JOIN egress_unique u ON u.hash=b.hash JOIN egress_jobs j ON j.hash=b.hash
+ CROSS JOIN sources s ON s.id=b.source_id AND s.enabled=1
+ CROSS JOIN egress_unique u ON u.hash=b.hash CROSS JOIN egress_jobs j ON j.hash=b.hash
  WHERE j.tested=0 AND j.first_completed=0 AND j.state!='DELETED'
  AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.source_id=b.source_id AND m.artifact_id=u.identity)
  AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=u.identity)
  AND NOT EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=u.identity AND g.state='BLOCKED')
  AND NOT EXISTS(SELECT 1 FROM config_controls c WHERE c.id=u.identity AND c.action='deleted' AND c.expires>?3)
+), withdrawn_sources AS MATERIALIZED (
+ SELECT source_id,count(*) AS total FROM withdrawn GROUP BY source_id
 )
 SELECT 0 AS scope,'' AS id,'' AS name,(SELECT count(*) FROM sources WHERE enabled=1),` + egressCoverageAggregates + `,(SELECT count(DISTINCT identity) FROM withdrawn),
  (SELECT count(*) FROM qualified),(SELECT count(*) FROM exported) FROM states v
-UNION ALL SELECT 1,p.id,p.name,0,` + egressCoverageAggregates + `,(SELECT count(*) FROM withdrawn w WHERE w.source_id=p.id),0,0 FROM page p
+UNION ALL SELECT 1,p.id,p.name,0,` + egressCoverageAggregates + `,coalesce(w.total,0),0,0 FROM page p
+ LEFT JOIN withdrawn_sources w ON w.source_id=p.id
  LEFT JOIN memberships m ON m.source_id=p.id LEFT JOIN states v ON v.identity=m.artifact_id
- GROUP BY p.id,p.name ORDER BY scope,id)`
+ GROUP BY p.id,p.name,w.total ORDER BY scope,id)`
 
 const egressCoverageAggregates = `count(v.identity),
  count(*) FILTER(WHERE v.bucket='tested'), count(*) FILTER(WHERE v.bucket='awaiting'),

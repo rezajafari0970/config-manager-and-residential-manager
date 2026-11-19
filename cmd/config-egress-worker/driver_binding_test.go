@@ -65,6 +65,9 @@ for line in sys.stdin:
 			j := egress.Job{Raw: raw, Hash: egress.Hash(raw), Token: "only-lease", Revision: 2}
 			completions := 0
 			client := client{&http.Client{Transport: receiptTransport(func(r *http.Request) (*http.Response, error) {
+				if tc.first == "large" && (r.ContentLength <= 1<<20 || r.ContentLength > egress.MaxCompletionBytes) {
+					t.Fatalf("multi-attempt completion had unexpected size %d", r.ContentLength)
+				}
 				var c egress.Completion
 				if r.URL.Path != "/egress/complete" || json.NewDecoder(r.Body).Decode(&c) != nil {
 					t.Fatal("unexpected request")

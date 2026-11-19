@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
 func TestDriverSessionReuseAndTimeoutRecovery(t *testing.T) {
@@ -56,10 +59,10 @@ for line in sys.stdin:
 
 func TestDriverOversizedOutputFailsClosed(t *testing.T) {
 	helper := filepath.Join(t.TempDir(), "driver.py")
-	source := `import sys
+	source := fmt.Sprintf(`import sys
 if '--cleanup' in sys.argv:sys.exit(0)
-for line in sys.stdin:print('x'*(2*1024*1024),flush=True)
-`
+for line in sys.stdin:print('x'*%d,flush=True)
+`, egress.MaxCompletionBytes+1)
 	if err := os.WriteFile(helper, []byte(source), 0600); err != nil {
 		t.Fatal(err)
 	}

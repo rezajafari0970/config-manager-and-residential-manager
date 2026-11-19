@@ -45,7 +45,8 @@ func ValidAssessment(r Report, p Plan) bool {
 			return true
 		}
 		for _, part := range r.Evidence {
-			if part.Started >= r.Started && part.Finished <= r.Finished && hasBoundObservation(part, p) {
+			part, ok := resolveAttemptSamples(r, part)
+			if ok && part.Started >= r.Started && part.Finished <= r.Finished && hasBoundObservation(part, p) {
 				return true
 			}
 		}
@@ -56,7 +57,7 @@ func ValidAssessment(r Report, p Plan) bool {
 	default:
 		return true
 	}
-	if len(p.Variants) != 2 || len(r.Checks) != 2 || !boundCore(p.Driver, r.Core, r.CoreSHA) {
+	if len(p.Variants) != 2 || len(r.Checks) != 2 || r.Waves < 2 || r.Waves > 3 || !boundCore(p.Driver, r.Core, r.CoreSHA) {
 		return false
 	}
 
@@ -90,7 +91,7 @@ func variantObserved(r Report, name string, routeOnly bool) bool {
 		return variant == name && at >= r.Started && at <= r.Finished+2000
 	}
 	for _, s := range r.Samples {
-		if inRound(s.Variant, s.At) && s.Domain != "" && (s.Code != "" || s.Echo) && s.Wave > 0 && s.Wave <= r.Waves {
+		if inRound(s.Variant, s.At) && s.Domain != "" && (s.Code != "" || s.Echo) && s.Wave > 0 && s.Wave <= 3 && s.Wave <= r.Waves {
 			return true
 		}
 	}

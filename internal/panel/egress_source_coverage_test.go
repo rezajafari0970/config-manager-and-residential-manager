@@ -11,6 +11,45 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
+func TestEgressSourceCoveragePlanStartsWithWithdrawals(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	frozen, err := freezeEgress(ctx, s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := frozen.(egressSnapshotReader).query(egressSourceCoverageSQL)
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+query, egressSourcePageSize, 0, readStamp(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var backlog, sourceLookup, eligibility bool
+	for rows.Next() {
+		var id, parent, unused int
+		var op string
+		if err := rows.Scan(&id, &parent, &unused, &op); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case strings.Contains(op, "egress_tested (tested=?)"), op == "SCAN j", strings.HasPrefix(op, "SCAN j "), op == "SCAN w", strings.HasPrefix(op, "SCAN w "):
+			t.Fatal("scanned archived jobs or rescanned withdrawals per source", op)
+		case op == "SCAN b", strings.HasPrefix(op, "SCAN b "):
+			backlog = true
+		case strings.HasPrefix(op, "SEARCH w ") && strings.Contains(op, "(source_id=?)"):
+			sourceLookup = true
+		case strings.Contains(op, "egress_eligibility (state=? AND paused=? AND valid_until>?)"):
+			eligibility = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !backlog || !sourceLookup || !eligibility {
+		t.Fatalf("backlog scan=%t source count lookup=%t sparse eligibility=%t", backlog, sourceLookup, eligibility)
+	}
+}
+
 func TestEgressSourceCoverageEnabledMembershipPartition(t *testing.T) {
 	s := testStore(t)
 	a, _ := newExportSource(t, s, "A", sourceURI(81), sourceURI(82), sourceURI(83))

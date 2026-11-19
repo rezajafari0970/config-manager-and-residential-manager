@@ -1,8 +1,11 @@
 package panel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
@@ -169,6 +172,8 @@ func TestCompletionRequiresEvidenceBeforeConsumingLease(t *testing.T) {
 	if err != nil || j == nil {
 		t.Fatal("first lease", err)
 	}
+	mux := http.NewServeMux()
+	s.registerPrivateEgress(mux)
 	for _, tc := range []struct {
 		name   string
 		report func() egress.Report
@@ -189,7 +194,19 @@ func TestCompletionRequiresEvidenceBeforeConsumingLease(t *testing.T) {
 			r.Started = egress.Now()
 			r.Finished = r.Started
 		}
-		if err := s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != ErrInvalid {
+		completion := egress.Completion{Job: *j, Report: r}
+		if tc.name == "measured without work" {
+			body, err := json.Marshal(completion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest("POST", "/egress/complete", bytes.NewReader(body)))
+			if w.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("private API accepted empty measurement: %d", w.Code)
+			}
+		}
+		if err := s.CompleteEgress(ctx, completion); err != ErrInvalid {
 			t.Fatalf("%s accepted or consumed lease: %v", tc.name, err)
 		}
 	}

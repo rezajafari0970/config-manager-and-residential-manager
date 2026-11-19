@@ -119,14 +119,15 @@ func (s *Store) repairBoundReceipt(tx *sql.Tx, hash string) error {
 		return nil
 	}
 	var atReceipt, previous egress.NetworkVerdict
-	if json.Unmarshal(summary, &atReceipt) != nil || !atReceipt.BlocksResidential() ||
-		json.Unmarshal(adverse, &previous) != nil || !before.Network.BlocksResidential() || !reflect.DeepEqual(before.Network, atReceipt) {
-		return nil
+	if json.Unmarshal(summary, &atReceipt) != nil || !atReceipt.BlocksResidential() {
+		return nil // An unknown latest observation cannot disprove an older holding receipt.
 	}
+	originalAdverse := json.Unmarshal(adverse, &previous) == nil && reflect.DeepEqual(before.Network, atReceipt) &&
+		(reflect.DeepEqual(atReceipt, previous) || reflect.DeepEqual(mergeHostingFlows(atReceipt, egress.NetworkVerdict{}), previous))
 	// A merged adverse record may represent independent older proof. Keep
 	// that hold. When this single receipt accounts for it all, withdraw its
 	// label but preserve the adverse JSON and gate both feeds on fresh review.
-	if reflect.DeepEqual(atReceipt, previous) || reflect.DeepEqual(mergeHostingFlows(atReceipt, egress.NetworkVerdict{}), previous) {
+	if originalAdverse {
 		b, err := json.Marshal(d.Network)
 		if err != nil {
 			return err
