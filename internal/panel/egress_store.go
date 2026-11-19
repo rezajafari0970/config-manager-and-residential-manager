@@ -287,6 +287,16 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	if !egress.ValidAssessment(r, plan) {
 		return ErrInvalid
 	}
+	var alias *firstRawAlias
+	if inputUnavailable && (r.Code == "input_unavailable" || r.Code == "driver_unavailable") {
+		alias, e = s.readFirstAlias(ctx, j)
+		if e != nil {
+			return e
+		}
+		if alias != nil {
+			defer s.vault.Release(alias.hash)
+		}
+	}
 	now := egress.Now()
 	evaluate := func(now int64) (egress.Decision, string) {
 		d := egress.Evaluate(r, plan, j.Hash, now)
@@ -367,6 +377,11 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 			if _, err = tx.ExecContext(ctx, `UPDATE egress_jobs SET state='PENDING',reason=?,report=?,token='',lease_until=0,
  retry_streak=retry_streak+1,next_run=? WHERE hash=?`, reason, string(report), now+initialRecoveryDelay(j.Hash, streak+1), j.Hash); err != nil {
 				return err
+			}
+			if reason == "input_unavailable" && alias != nil {
+				if err = replaceMissingFirst(ctx, tx, j.Hash, alias, now); err != nil {
+					return err
+				}
 			}
 			return tx.Commit()
 		}
