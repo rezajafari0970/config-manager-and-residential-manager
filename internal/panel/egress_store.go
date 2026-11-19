@@ -21,13 +21,15 @@ func (s *Store) ClaimEgress(ctx context.Context) (*egress.Job, error) {
 // Starting with the due-job index instead scans the entire historical archive on
 // every idle worker poll. The authoritative views still apply all exclusions,
 // Iran guards and completed-result rules to each candidate; this is not a cache.
-const egressClaimCandidates = `WITH claim_scope(hash) AS MATERIALIZED (
+const egressClaimCandidates = `WITH history_head(hash) AS MATERIALIZED (SELECT ` + egressHistoryHead + `),
+ claim_scope(hash) AS MATERIALIZED (
  SELECT u.hash FROM (SELECT DISTINCT artifact_id FROM memberships) m JOIN egress_unique u ON u.identity=m.artifact_id
  UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1
  UNION SELECT u.hash FROM egress_network_review v CROSS JOIN egress_unique u ON u.identity=v.identity
  UNION SELECT hash FROM egress_first_backlog
+ UNION SELECT hash FROM history_head WHERE hash IS NOT NULL
  UNION SELECT u.hash FROM egress_iran_guard g JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'
-), dispatch(streak) AS MATERIALIZED (SELECT ` + egressDispatchStreak + `) `
+), dispatch(streak,modern) AS MATERIALIZED (SELECT ` + egressDispatchStreak + `,` + egressModernFirstStreak + `) `
 
 const egressLiveProof = `ever_accepted=1 AND tested>0 AND valid_until>:claim_now`
 const egressUrgentExpiry = egressLiveProof + ` AND valid_until<=:claim_now+120000`
@@ -76,22 +78,27 @@ func egressRankedClaim(lane string, turn uint64) string {
 	maintenanceLane := lane
 	preference := "0"
 	if lane == "initial" {
-		preference = discoveryOrDeadline
+		// If a threatened proof is borrowing initial slots, a due Iran or
+		// retirement confirmation still gets a normal maintenance turn.
+		preference = "CASE WHEN urgent OR (priority<=0 AND EXISTS(SELECT 1 FROM due threat WHERE threat.urgent)) THEN 0 WHEN queued_at IS NOT NULL THEN 1 ELSE 2 END"
 		maintenanceLane = "followup"
 	}
 	return `WITH due AS MATERIALIZED (
  SELECT egress_jobs.hash,next_run,first_seen,valid_until,` + egressClaimPriority(maintenanceLane, turn) + ` AS priority,
+ EXISTS(SELECT 1 FROM history_head a WHERE a.hash=c.hash) AS historic,
  CASE WHEN ` + egressDiscovery + ` THEN (SELECT u.created FROM egress_unique u WHERE u.hash=c.hash) END AS queued_at,
  CASE WHEN ever_accepted=1 AND tested>0 AND valid_until>0 AND valid_until<=:claim_now+60000
  AND EXISTS(SELECT 1 FROM egress_residential_history h WHERE h.hash=c.hash)
  AND ` + egressRenewableNetwork + ` THEN 1 ELSE 0 END AS urgent
  FROM claim_scope c CROSS JOIN egress_jobs ON egress_jobs.hash=c.hash WHERE ` + egressClaimDue + `
- AND EXISTS(SELECT 1 FROM egress_work w WHERE w.hash=c.hash))
+ AND (EXISTS(SELECT 1 FROM history_head a WHERE a.hash=c.hash) OR EXISTS(SELECT 1 FROM egress_work w WHERE w.hash=c.hash)))
  SELECT hash FROM due CROSS JOIN dispatch ORDER BY CASE WHEN streak<=-3 THEN queued_at IS NULL
  WHEN streak=-2 THEN ` + discoveryOrDeadline + `
  WHEN streak>=2 THEN queued_at IS NOT NULL ELSE ` + preference + ` END,
  CASE WHEN queued_at IS NULL THEN priority ELSE 7 END,
- CASE WHEN priority=4 THEN valid_until END,coalesce(queued_at,next_run),
+ CASE WHEN priority=4 THEN valid_until END,
+ CASE WHEN queued_at IS NOT NULL THEN CASE WHEN modern>=9 THEN NOT historic ELSE historic END END,
+ coalesce(queued_at,next_run),
  CASE WHEN queued_at IS NULL THEN first_seen END,hash LIMIT 1`
 }
 
@@ -111,14 +118,14 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	// again under the writer lock before granting any lease.
 	now := egress.Now()
 	var cleanup bool
-	var candidate string
-	var streak int
+	var candidate, historyHead string
+	var streak, modern int
 	ranked := egressRankedClaim(lane, s.renewalTurn.Load()+1)
-	e := s.workerReader().QueryRowContext(ctx, egressClaimCandidates+`SELECT streak,
+	e := s.workerReader().QueryRowContext(ctx, egressClaimCandidates+`SELECT streak,modern,coalesce((SELECT hash FROM history_head),''),
  EXISTS(SELECT 1 FROM egress_jobs WHERE token!='' AND NOT EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash))
  OR EXISTS(SELECT 1 FROM egress_run_members WHERE run=(SELECT max(id) FROM egress_runs) AND status='pending' AND NOT EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_run_members.hash)),
  CASE WHEN (SELECT enabled FROM egress_settings WHERE id=1)!=0 AND (SELECT count(*) FROM egress_jobs WHERE token!='' AND lease_until>:claim_now)<:worker_limit
- THEN coalesce((`+ranked+`),'') ELSE '' END FROM dispatch`, sql.Named("claim_now", now), sql.Named("worker_limit", egress.MaxWorkers)).Scan(&streak, &cleanup, &candidate)
+ THEN coalesce((`+ranked+`),'') ELSE '' END FROM dispatch`, sql.Named("claim_now", now), sql.Named("worker_limit", egress.MaxWorkers)).Scan(&streak, &modern, &historyHead, &cleanup, &candidate)
 	if e != nil || !cleanup && candidate == "" {
 		return nil, e
 	}
@@ -146,16 +153,26 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	if enabled == 0 || active >= egress.MaxWorkers || candidate == "" {
 		return nil, tx.Commit()
 	}
+	historic := candidate == historyHead
+	if historic {
+		admitted, err := admitEgressHistory(ctx, tx.Tx, candidate, now)
+		if err != nil || !admitted {
+			return nil, err
+		}
+	}
 	j := &egress.Job{}
 	var size int64
 	var state, previousToken string
 	var first, retryStreak int
 	var discovery bool
 	e = tx.QueryRowContext(ctx, `SELECT hash,kind,size,revision,ever_accepted,attempts,state,token,first_completed,retry_streak,`+egressDiscovery+`
- FROM egress_work WHERE hash=:job_hash AND `+egressClaimDue+` AND `+egressDispatchStreak+`=:ranked_streak`,
-		sql.Named("job_hash", candidate), sql.Named("claim_now", now), sql.Named("ranked_streak", streak)).
+ FROM egress_work WHERE hash=:job_hash AND `+egressClaimDue+` AND `+egressDispatchStreak+`=:ranked_streak AND `+egressModernFirstStreak+`=:ranked_modern`,
+		sql.Named("job_hash", candidate), sql.Named("claim_now", now), sql.Named("ranked_streak", streak), sql.Named("ranked_modern", modern)).
 		Scan(&j.Hash, &j.Kind, &size, &j.Revision, &j.Deep, &j.Attempt, &state, &previousToken, &first, &retryStreak, &discovery)
 	if errors.Is(e, sql.ErrNoRows) {
+		if historic {
+			return nil, nil // Roll back the provisional admission with the stale rank.
+		}
 		return nil, tx.Commit()
 	}
 	if e != nil {
@@ -191,6 +208,11 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	}
 	if e = recordEgressDispatch(ctx, tx.Tx, streak, discovery); e != nil {
 		return nil, e
+	}
+	if discovery {
+		if e = recordEgressHistoryTurn(ctx, tx.Tx, modern, historic); e != nil {
+			return nil, e
+		}
 	}
 	if e = tx.Commit(); e != nil {
 		return nil, e
@@ -316,7 +338,9 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	e = tx.QueryRowContext(ctx, `SELECT ever_accepted,failures,last_failure,claimed_at,retry_streak,first_completed,
  CASE WHEN first_completed!=0 THEN '' WHEN EXISTS (
    SELECT 1 FROM egress_unique u JOIN memberships m ON m.artifact_id=u.identity WHERE u.hash=egress_jobs.hash
- ) THEN 'current' ELSE 'withdrawn' END
+ ) THEN 'current' WHEN EXISTS (
+   SELECT 1 FROM egress_first_history h WHERE h.hash=egress_jobs.hash AND h.phase='active'
+ ) THEN 'historical' ELSE 'withdrawn' END
  FROM egress_jobs WHERE hash=? AND revision=? AND token=? AND lease_until>? AND paused=0 AND state!='DELETED'
  AND EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash)`, j.Hash, j.Revision, j.Token, now).Scan(&accepted, &failures, &last, &claimed, &streak, &firstCompleted, &firstScope)
 	if errors.Is(e, sql.ErrNoRows) {
@@ -565,6 +589,9 @@ func (s *Store) manageEgress(ctx context.Context, tx *sql.Tx, action string, all
 	if action != "delete" {
 		_, e := tx.ExecContext(ctx, "UPDATE egress_jobs SET paused=?,revision=revision+1,token='',lease_until=0,valid_until=0,next_run=0,state=CASE WHEN ever_accepted=1 THEN 'QUARANTINED' ELSE state END WHERE ("+condition+") AND state!='DELETED' AND paused!=?", action == "disable", action == "disable")
 		return e
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE egress_first_history SET phase='cancelled' WHERE phase NOT IN('completed','cancelled') AND "+condition); err != nil {
+		return err
 	}
 	// An explicit deletion also cancels withdrawn, unassessed inputs whose
 	// ordinary artifact or temporary deletion control may already have expired.

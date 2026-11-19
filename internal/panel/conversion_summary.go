@@ -42,7 +42,7 @@ func (s *Store) SourceConversionSummaries(ctx context.Context, sources []Source)
 	q = strings.Replace(q, " SELECT ", " SELECT m.source_id,r.version AS result_version,r.rule AS result_rule,", 1)
 	q = strings.Replace(q, "PARTITION BY a.id", "PARTITION BY m.source_id,a.id", 1)
 	marks := make([]string, len(sources))
-	args := []any{convert.Version, now, convert.Version, now, now, now}
+	args := conversionQueryArgs(now)
 	for i, source := range sources {
 		marks[i] = "?"
 		args = append(args, source.ID)

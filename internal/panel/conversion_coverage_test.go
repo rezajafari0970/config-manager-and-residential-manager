@@ -112,12 +112,16 @@ func TestMixedNativeNetworkIdentityCoverage(t *testing.T) {
 func TestFirstProbeFIFOBeatsNewLowHash(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	newExportSource(t, s, "fifo", sourceURI(41), sourceURI(42), sourceURI(43))
+	source, err := s.Save(ctx, "", 0, testSource())
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitProbeInputs(t, s, source, sourceURI(41), sourceURI(42), sourceURI(43))
 	var oldest string
 	if e := s.db.QueryRow("SELECT max(hash) FROM conversion_jobs").Scan(&oldest); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := s.db.Exec("DELETE FROM conversion_receipts;DELETE FROM conversion_results;UPDATE conversion_jobs SET state='queued',version='',token='',next_run=0;UPDATE conversion_schedule SET created=2"); e != nil {
+	if _, e := s.db.Exec("UPDATE conversion_schedule SET created=2"); e != nil {
 		t.Fatal(e)
 	}
 	s.db.Exec("UPDATE conversion_schedule SET created=1 WHERE hash=?", oldest)

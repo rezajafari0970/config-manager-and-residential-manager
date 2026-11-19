@@ -228,6 +228,13 @@ func TestEgressVerifiedDeadlineBorrowsOnlyOneAdditionalMaintenanceGrant(t *testi
 					t.Fatalf("deadline pressure grant %d: %+v, %v", i+1, j, err)
 				}
 			}
+			// After the reserved discovery, the normal initial slot can again
+			// help with urgent work. The safety confirmation must not starve
+			// behind a continuous stream of expiring residential receipts.
+			j, err := s.ClaimEgressLane(ctx, "initial")
+			if err != nil || j == nil || j.Hash != guard {
+				t.Fatal("urgent renewals starved a due safety confirmation", j, err)
+			}
 		})
 	}
 }

@@ -35,13 +35,12 @@ type Store struct {
 	aead                cipher.AEAD
 	key                 []byte
 	vault               *blob.Vault
-	probeTurn           atomic.Uint64
 	renewalTurn         atomic.Uint64
 	rotationMu          sync.Mutex
 	rotationLocks       map[string]*rotationLock
 }
 
-const currentSchemaVersion = 51
+const currentSchemaVersion = 52
 
 func Open(path string, key []byte) (*Store, error) {
 	if len(key) != 32 || !filepath.IsAbs(path) {
@@ -281,6 +280,9 @@ PRAGMA user_version=1;`)
 		return nil, err
 	}
 	if err = s.migrateV51(); err != nil {
+		return nil, err
+	}
+	if err = s.migrateV52(); err != nil {
 		return nil, err
 	}
 	// Reconcile transient children left by older connections with foreign keys

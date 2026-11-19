@@ -157,9 +157,9 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 	}
 	j := &probe.Job{Settings: settings}
 	var size int64
-	priority := s.probeTurn.Add(1)%4 == 0
 	var first bool
-	e = tx.QueryRowContext(ctx, ordinaryLeasedAliases+`SELECT i.hash,i.kind,i.size,j.revision,j.next_run=0 OR j.version!=? FROM temp.conversion_sync_inputs i JOIN conversion_jobs j ON j.hash=i.hash LEFT JOIN conversion_schedule fifo ON fifo.hash=j.hash WHERE (j.token='' OR j.lease_until<=?) AND (j.next_run<=? OR j.version!=?) AND j.hash NOT IN busy_aliases AND NOT EXISTS(SELECT 1 FROM template_preparations own JOIN template_preparations same ON same.candidate_hash=own.candidate_hash AND same.version=own.version AND same.engine=own.engine JOIN conversion_jobs busy ON busy.hash=same.hash WHERE own.hash=j.hash AND own.candidate_hash!='' AND busy.hash!=j.hash AND busy.token!='' AND busy.lease_until>CAST(unixepoch('subsec')*1000 AS INTEGER)) ORDER BY CASE WHEN ((j.version=? AND j.next_run>0)=?) THEN 0 ELSE 1 END,CASE WHEN j.next_run=0 THEN `+conversionFirstSourceOrder+` ELSE 0 END,CASE WHEN j.next_run=0 AND j.token!='' THEN coalesce(fifo.last_started,0) WHEN j.next_run=0 THEN coalesce(fifo.created,0) ELSE j.next_run END,j.hash LIMIT 1`, now, convert.Version, now, now, convert.Version, convert.Version, priority).Scan(&j.Hash, &j.Kind, &size, &j.Revision, &first)
+	e = tx.QueryRowContext(ctx, ordinaryProbeCandidate, now, convert.Version).
+		Scan(&j.Hash, &j.Kind, &size, &j.Revision, &first)
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -186,6 +186,10 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 		if e = recordFirstProbeTurn(ctx, tx.Tx, j.Hash, now); e != nil {
 			return nil, e
 		}
+	}
+	if _, e = tx.ExecContext(ctx, `INSERT INTO metadata(key,value) VALUES('conversion-first-grants',?)
+ ON CONFLICT(key) DO UPDATE SET value=CASE WHEN CAST(excluded.value AS INTEGER)=1 THEN min(3,CAST(metadata.value AS INTEGER)+1) ELSE 0 END`, first); e != nil {
+		return nil, e
 	}
 	if e = tx.Commit(); e != nil {
 		return nil, e

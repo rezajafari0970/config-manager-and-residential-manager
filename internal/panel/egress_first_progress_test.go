@@ -50,7 +50,7 @@ func TestFirstQueueSnapshotSeparatesWorkAndReportsObservedWindows(t *testing.T) 
 		at    int64
 		scope string
 	}{
-		{now - 30000, "current"}, {now, "withdrawn"}, {now, ""},
+		{now - 30000, "current"}, {now, "withdrawn"}, {now, "historical"}, {now, ""},
 		{now - 30001, "current"}, {now + 1, "withdrawn"}, {now - 300000, "current"},
 	} {
 		exec("INSERT INTO egress_events(hash,at,state,reason,first_result_scope) VALUES(?,?,'UNKNOWN','fixture',?)", h(0), row.at, row.scope)
@@ -72,12 +72,12 @@ func TestFirstQueueSnapshotSeparatesWorkAndReportsObservedWindows(t *testing.T) 
 		t.Fatalf("withdrawn %+v", w)
 	}
 	r := p.FirstResults5m
-	if r.ObservedMS != 30000 || r.Current != 1 || r.Withdrawn != 1 || r.PerMinute != nil {
+	if r.ObservedMS != 30000 || r.Current != 1 || r.Withdrawn != 2 || r.Historical != 1 || r.PerMinute != nil {
 		t.Fatalf("partial window %+v", r)
 	}
 	exec("UPDATE metadata SET value=? WHERE key='egress-first-results-since'", now-900000)
 	r = get().FirstResults5m
-	if r.ObservedMS != 300000 || r.Current != 2 || r.Withdrawn != 1 || r.PerMinute == nil || *r.PerMinute != 0.6 {
+	if r.ObservedMS != 300000 || r.Current != 2 || r.Withdrawn != 2 || r.Historical != 1 || r.PerMinute == nil || *r.PerMinute != 0.8 {
 		t.Fatalf("full window %+v", r)
 	}
 	exec("UPDATE egress_settings SET enabled=0")
@@ -165,5 +165,92 @@ func TestFirstAssessmentQueueUsesRepresentativeLookups(t *testing.T) {
 	}
 	if strings.Contains(plan, "SCAN j ") || strings.Contains(plan, "SCAN u ") || !strings.Contains(plan, "SEARCH j USING INDEX") {
 		t.Fatal("expected only indexed representative/job lookups", plan)
+	}
+}
+
+func TestFirstAssessmentAPISeparatesHistoricalRecoveryPhases(t *testing.T) {
+	s := testStore(t)
+	app, err := NewServer(s, "http://127.0.0.1:18191")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type snapshot struct {
+		Archive *archiveRecoveryProgress `json:"archive_recovery"`
+		First   firstAssessmentProgress  `json:"first_assessment"`
+	}
+	get := func() snapshot {
+		t.Helper()
+		reply := httptest.NewRecorder()
+		egressModule{app}.state(reply, httptest.NewRequest("GET", "/api/egress?brief=1", nil))
+		if reply.Code != 200 {
+			t.Fatal(reply.Code, reply.Body.String())
+		}
+		var response struct {
+			Accounting snapshot `json:"accounting"`
+		}
+		if err := json.Unmarshal(reply.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response.Accounting
+	}
+	if initial := get(); initial.Archive == nil || initial.Archive.Total != 0 {
+		t.Fatal("empty cohort", initial)
+	}
+	// This fixture sets the maintained counters directly; the API read must
+	// not discover or admit new identities while reporting any of these phases.
+	for phase, total := range map[string]int{"waiting": 31, "active": 2, "promoted": 3, "completed": 4, "unavailable": 19, "paused": 5, "cancelled": 6} {
+		if _, err = s.db.Exec("INSERT INTO egress_first_history_counts(phase,total) VALUES(?,?) ON CONFLICT(phase) DO UPDATE SET total=excluded.total", phase, total); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := get()
+	want := archiveRecoveryProgress{Total: 70, Waiting: 31, Active: 2, Promoted: 3, Completed: 4, Unavailable: 19, Paused: 5, Cancelled: 6}
+	if state.Archive == nil || *state.Archive != want || state.First.Current.Awaiting != 0 || state.First.Withdrawn.Awaiting != 0 {
+		t.Fatalf("historical work mixed with normal queue: %+v", state)
+	}
+}
+
+func TestArchiveFirstResultAttributionFollowsTheLeaseAndCurrentMembership(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	historical := historyInput(t, s, "receipt-history", 125)
+	current := historyInput(t, s, "receipt-returned", 126)
+	withdrawn := historyInput(t, s, "receipt-modern-pin", 127)
+	exerciseHistoryUpgrade(t, s)
+	commitProbeInputs(t, s, current.source, current.raw)
+	if _, err := s.db.Exec("INSERT INTO egress_first_backlog(source_id,hash) VALUES(?,?)", withdrawn.source, withdrawn.hash); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{historical.hash: "historical", current.hash: "current", withdrawn.hash: "withdrawn"}
+	for range 3 {
+		job, err := s.ClaimEgressLane(ctx, "initial")
+		if err != nil || job == nil {
+			t.Fatal("first claim", job, err)
+		}
+		if job.Hash == historical.hash {
+			now := egress.Now()
+			frozen, err := freezeEgress(context.WithValue(ctx, readTimeKey{}, now), s.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pendingCount(t, frozen, 1, "SELECT count(*) FROM egress_inventory WHERE hash=? AND lease_until>?", job.Hash, now)
+			pendingCount(t, frozen, 1, "SELECT count(*) FROM egress_work WHERE hash=? AND lease_until>?", job.Hash, now)
+		}
+		if err = s.CompleteEgress(ctx, egress.Completion{Job: *job, Report: syntheticEgress(*job)}); err != nil {
+			t.Fatal(err)
+		}
+		pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_events WHERE hash=? AND first_result_scope=?", job.Hash, want[job.Hash])
+		delete(want, job.Hash)
+	}
+	if len(want) != 0 {
+		t.Fatal("missing first completions", want)
+	}
+	p, err := firstAssessmentState(ctx, s.db, egress.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := p.FirstResults5m
+	if r.Current != 1 || r.Withdrawn != 2 || r.Historical != 1 {
+		t.Fatal("historical subset of withdrawn", r)
 	}
 }

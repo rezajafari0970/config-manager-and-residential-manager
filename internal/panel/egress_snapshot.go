@@ -37,6 +37,7 @@ func (r egressSnapshotReader) query(q string) string {
 	const candidates = `SELECT u.hash FROM (SELECT DISTINCT artifact_id FROM memberships) m CROSS JOIN egress_unique u ON u.identity=m.artifact_id
  UNION SELECT u.hash FROM egress_network_review v CROSS JOIN egress_unique u ON u.identity=v.identity
  UNION SELECT hash FROM egress_first_backlog
+ UNION SELECT hash FROM egress_first_history WHERE phase='active'
  UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1
  UNION SELECT u.hash FROM egress_iran_guard g CROSS JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'`
 	scoped := `egress_presentation_scope(hash) AS MATERIALIZED (` + candidates + `),

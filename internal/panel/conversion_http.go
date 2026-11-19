@@ -39,13 +39,21 @@ type Conversion struct {
 // Pick one conversion per canonical source identity. A candidate's connection
 // evidence belongs only to its exact bytes; changed bytes require a fresh test.
 const conversionQuery = `WITH choices AS (
- SELECT coalesce(json_extract(e.metadata,'$.family'),m.kind) AS family,coalesce(r.version='` + convert.Version + `',0) AS current,a.id,m.raw_hash,m.kind,a.expires,j.state,coalesce(p.candidate_hash!='' AND p.version='` + convert.Version + `',0) AS prepared,coalesce(p.engine,json_extract(e.metadata,'$.engine'),'xray') AS engine,coalesce(p.code,'') AS preparation_code,j.next_run,r.candidate_hash,r.code,r.core,r.connection,r.tested,r.valid_until,
+ SELECT coalesce(json_extract(e.metadata,'$.family'),m.kind) AS family,coalesce(r.version='` + convert.Version + `',0) AS current,a.id,m.raw_hash,m.kind,a.expires,
+ CASE WHEN j.state='running' AND (j.token='' OR j.lease_until<=?) THEN 'queued' ELSE j.state END AS state,
+ coalesce(p.candidate_hash!='' AND p.version='` + convert.Version + `',0) AS prepared,coalesce(p.engine,json_extract(e.metadata,'$.engine'),'xray') AS engine,coalesce(p.code,'') AS preparation_code,j.next_run,r.candidate_hash,r.code,r.core,r.connection,r.tested,r.valid_until,
  (coalesce(json_extract(e.metadata,'$.engine'),'xray')='xray' AND r.core='passed' AND r.candidate_hash!='' AND r.version=? AND (r.connection='passed' AND r.valid_until>?)) AS available,
  row_number() OVER(PARTITION BY a.id ORDER BY (r.core='passed' AND r.version=? AND (r.connection='passed' AND r.valid_until>?)) DESC,(r.connection='passed') DESC,r.tested DESC,m.raw_hash) AS choice
  FROM memberships m JOIN artifacts a ON a.id=m.artifact_id JOIN sources s ON s.id=m.source_id
  LEFT JOIN conversion_jobs j ON j.hash=m.raw_hash LEFT JOIN conversion_results r ON r.hash=m.raw_hash LEFT JOIN conversion_evidence e ON e.hash=m.raw_hash LEFT JOIN template_preparations p ON p.hash=m.raw_hash
  WHERE a.expires>? AND s.enabled=1 AND NOT EXISTS(SELECT 1 FROM config_controls c WHERE c.id=a.id AND c.expires>?) AND m.raw_hash NOT IN (SELECT hash FROM input_blocked) AND a.id NOT IN (SELECT identity FROM input_blocked_identities) /* source filter */)
  SELECT family,current,id,raw_hash,kind,expires,coalesce(state,'queued'),coalesce(candidate_hash,''),coalesce(code,''),coalesce(core,'not_run'),coalesce(connection,'not_run'),coalesce(tested,0),coalesce(valid_until,0),coalesce(available,0),prepared,engine,preparation_code,coalesce(next_run,0) FROM choices WHERE choice=1`
+
+// Freeze lease activity, proof expiry and visibility to the same read clock
+// for both the identity list and its per-source summary.
+func conversionQueryArgs(now int64) []any {
+	return []any{now, convert.Version, now, convert.Version, now, now, now}
+}
 
 type conversionQuerier interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
@@ -74,7 +82,7 @@ func querySourceCandidateConversions(ctx context.Context, db conversionQuerier, 
 func queryScopedConversions(ctx context.Context, db conversionQuerier, source, identity, candidate string, page int, all, healthyOnly bool) ([]Conversion, error) {
 	now := readStamp(ctx)
 	q := conversionQuery
-	args := []any{convert.Version, now, convert.Version, now, now, now}
+	args := conversionQueryArgs(now)
 	filter := ""
 	if source != "" {
 		filter += " AND m.source_id=?"

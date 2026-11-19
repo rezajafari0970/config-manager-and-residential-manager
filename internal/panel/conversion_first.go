@@ -124,5 +124,26 @@ func recordFirstProbeTurn(ctx context.Context, tx *sql.Tx, hash string, now int6
 // also serialize probes of raw aliases belonging to a currently leased identity.
 const ordinaryLeasedAliases = `WITH busy_aliases(hash) AS MATERIALIZED (
  SELECT DISTINCT alias.hash FROM conversion_jobs busy CROSS JOIN egress_owners owner ON owner.hash=busy.hash
- CROSS JOIN egress_owners alias ON alias.identity=owner.identity WHERE busy.token!='' AND busy.lease_until>?
+ CROSS JOIN egress_owners alias ON alias.identity=owner.identity WHERE busy.token!='' AND busy.lease_until>?1
 ) `
+
+// A local preparation failure can set next_run without measuring anything.
+// Use the durable assessment of the collector identity for lane assignment.
+// A returning alias with a prior result still receives any due health or
+// compatibility renewal, without taking another identity's first-probe turn.
+const ordinaryProbeCandidate = ordinaryLeasedAliases + `, ready AS MATERIALIZED (
+ SELECT i.hash,i.kind,i.size,j.revision,j.next_run,fifo.created,fifo.last_started,
+ NOT EXISTS(SELECT 1 FROM egress_owners o JOIN conversion_first_assessed a ON a.identity=o.identity WHERE o.hash=i.hash) AS unmeasured
+ FROM temp.conversion_sync_inputs i JOIN conversion_jobs j ON j.hash=i.hash
+ LEFT JOIN conversion_schedule fifo ON fifo.hash=j.hash
+ WHERE (j.token='' OR j.lease_until<=?1) AND (j.next_run<=?1 OR j.version!=?2)
+ AND j.hash NOT IN busy_aliases
+ AND NOT EXISTS(SELECT 1 FROM template_preparations own
+ JOIN template_preparations same ON same.candidate_hash=own.candidate_hash AND same.version=own.version AND same.engine=own.engine
+ JOIN conversion_jobs busy ON busy.hash=same.hash
+ WHERE own.hash=j.hash AND own.candidate_hash!='' AND busy.hash!=j.hash AND busy.token!='' AND busy.lease_until>?1)
+ ), turn(maintenance) AS (SELECT coalesce((SELECT CAST(value AS INTEGER) FROM metadata WHERE key='conversion-first-grants'),0)>=3)
+ SELECT hash,kind,size,revision,unmeasured FROM ready i CROSS JOIN turn
+ ORDER BY (unmeasured=maintenance),
+ CASE WHEN unmeasured THEN ` + conversionFirstSourceOrder + ` ELSE 0 END,
+ CASE WHEN unmeasured THEN max(coalesce(created,0),coalesce(last_started,0)) ELSE next_run END,hash LIMIT 1`

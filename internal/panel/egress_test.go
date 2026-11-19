@@ -13,7 +13,13 @@ import (
 
 func dropEgressForMigration(t *testing.T, s *Store) {
 	t.Helper()
-	if _, err := s.db.Exec(`DROP VIEW conversion_work_inputs; DROP VIEW conversion_first_inputs;
+	var historyTriggers string
+	if err := s.db.QueryRow(`SELECT coalesce(group_concat('DROP TRIGGER ' || name,';'),'')
+ FROM sqlite_schema WHERE type='trigger' AND name GLOB 'egress_first_history_*'`).Scan(&historyTriggers); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(historyTriggers + `; DROP TABLE egress_first_history; DROP TABLE egress_first_history_counts;
+ DROP VIEW conversion_work_inputs; DROP VIEW conversion_first_inputs;
  DROP TRIGGER conversion_first_result_INSERT; DROP TRIGGER conversion_first_result_UPDATE;
  DROP TABLE conversion_first_backlog; DROP TABLE conversion_first_assessed; DROP TABLE conversion_first_turns;
  DROP TRIGGER conversion_first_source_changed; DROP INDEX conversion_active_leases; DROP INDEX conversion_membership_raw_source`); err != nil {

@@ -29,6 +29,13 @@ export function renderAccounting(a){
   $('#egress-first-withdrawn').textContent=(w.awaiting||w.excluded||w.missing_job)?firstQueue('بررسی اول ورودی‌های بدون عضویت فعلی',w):'';
   const r=first.first_results_5m;
   $('#egress-first-results').textContent='نتیجهٔ بررسی اول در '+elapsed(r.observed_ms)+' گذشته · '+n(r.current)+' ورودی فعلی و '+n(r.withdrawn)+' ورودی بدون عضویت فعلی'+(r.per_minute==null?'':' · میانگین '+n(r.per_minute)+' کانفیگ در دقیقه');
+  if(r.historical!=null && (r.historical || a.archive_recovery?.total))$('#egress-first-results').textContent+=' · از ورودی‌های بدون عضویت فعلی، '+n(r.historical)+' مورد در نوبت بازیابی آرشیو بررسی شد';
+ }
+ const archive=a.archive_recovery;
+ $('#egress-archive-recovery').hidden=!archive?.total;
+ if(archive?.total){
+  $('#egress-archive-queue').textContent='بازیابی نخستین بررسی برای '+n(archive.total)+' ورودی قدیمی · '+n(archive.waiting)+' در انتظار پذیرش برای آزمون، '+n(archive.active)+' در مرحلهٔ آزمون و '+n(archive.promoted)+' منتقل‌شده به صف عادی';
+  $('#egress-archive-outcomes').textContent='برای '+n(archive.completed)+' مورد نخستین نتیجه ثبت شده است. نسخهٔ خام اصلی '+n(archive.unavailable)+' مورد قابل تأیید نبود. '+n(archive.paused)+' مورد متوقف و '+n(archive.cancelled)+' مورد لغو شده است.';
  }
  $('#egress-queue').textContent='صف بررسی اولیه و نگهداری · '+n(q.running)+' در حال بررسی · '+n(q.due)+' آماده · '+n(q.scheduled)+' زمان‌بندی‌شده · '+n(q.cached)+' خارج از صف · '+n(q.paused)+' متوقف';
  $('#egress-network-counts').textContent='از '+n(p.route_verified)+' کانفیگ با مسیر جدا و سلامت معتبر، '+n(p.hosting)+' مورد به دلیل خروج دیتاسنتری و '+n(p.mixed)+' مورد به دلیل خروج ترکیبی از رزیدنتال کنار گذاشته شده‌اند. از موارد واجد شرایط، برای '+n(p.eligible_network_unattributed)+' مورد نوع شبکهٔ مسیر جدا مشخص نشده است.';
