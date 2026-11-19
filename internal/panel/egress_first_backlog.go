@@ -59,6 +59,10 @@ const egressRememberPending = `INSERT OR IGNORE INTO egress_first_backlog(source
  AND NOT EXISTS(SELECT 1 FROM config_controls c WHERE c.id=u.identity AND c.action='deleted' AND c.expires>?) AND `
 
 func rememberExpiredEgress(ctx context.Context, tx *sql.Tx, stamp int64) error {
+	if err := rememberOrdinaryFirst(ctx, tx, `SELECT m.source_id,m.artifact_id AS identity,m.raw_hash AS hash,m.kind,m.size FROM memberships m
+ WHERE m.artifact_id IN(SELECT id FROM artifacts WHERE expires<=?)`, stamp); err != nil {
+		return err
+	}
 	_, err := tx.ExecContext(ctx, egressRememberPending+`m.artifact_id IN (SELECT id FROM artifacts WHERE expires<=?)`, stamp, stamp)
 	return err
 }
@@ -76,6 +80,10 @@ func rememberReplacedEgress(ctx context.Context, tx *sql.Tx, result collect.Resu
 			return err
 		}
 		candidates, arg = "SELECT value FROM json_each(?)", string(encoded)
+	}
+	if err := rememberOrdinaryFirst(ctx, tx, `SELECT m.source_id,m.artifact_id AS identity,m.raw_hash AS hash,m.kind,m.size FROM memberships m
+ WHERE m.source_id=? AND m.artifact_id NOT IN (`+candidates+")", source, arg); err != nil {
+		return err
 	}
 	_, err := tx.ExecContext(ctx, egressRememberPending+"m.source_id=? AND m.artifact_id NOT IN ("+candidates+")", stamp, source, arg)
 	return err

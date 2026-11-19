@@ -112,6 +112,9 @@ func execute(ctx context.Context, c client, driver *driverSession, j egress.Job)
 	started := egress.Now()
 	p := egress.Prepare(j.Raw)
 	r := egress.Report{Version: egress.Version, Hash: j.Hash, Started: started, Finished: started, Code: "driver_unavailable"}
+	if j.Issue != "" {
+		r.Code = j.Issue
+	}
 	if len(p.Variants) == 2 && egress.Hash(j.Raw) == j.Hash && j.Issue == "" {
 		job, cancel := context.WithTimeout(ctx, 220*time.Second)
 		defer cancel()

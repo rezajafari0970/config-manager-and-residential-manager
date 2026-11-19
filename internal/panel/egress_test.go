@@ -13,6 +13,12 @@ import (
 
 func dropEgressForMigration(t *testing.T, s *Store) {
 	t.Helper()
+	if _, err := s.db.Exec(`DROP VIEW conversion_work_inputs; DROP VIEW conversion_first_inputs;
+ DROP TRIGGER conversion_first_result_INSERT; DROP TRIGGER conversion_first_result_UPDATE;
+ DROP TABLE conversion_first_backlog; DROP TABLE conversion_first_assessed; DROP TABLE conversion_first_turns;
+ DROP TRIGGER conversion_first_source_changed; DROP INDEX conversion_active_leases; DROP INDEX conversion_membership_raw_source`); err != nil {
+		t.Fatal(err)
+	}
 	for _, table := range []string{"conversion_inputs"} {
 		var q string
 		if e := s.db.QueryRow("SELECT sql FROM sqlite_master WHERE name=?", table).Scan(&q); e != nil {
@@ -24,7 +30,7 @@ func dropEgressForMigration(t *testing.T, s *Store) {
 			t.Fatal(e)
 		}
 	}
-	for _, q := range []string{"DROP TRIGGER egress_review_deleted", "DROP TABLE egress_network_review", "DROP TABLE egress_residential_history", "DROP TRIGGER egress_first_finished", "DROP TRIGGER egress_first_source_replaced", "DROP TABLE egress_first_backlog", "DROP TRIGGER egress_network_representative_removed", "DROP VIEW egress_network_eligible", "DROP TABLE egress_network_results", "DROP INDEX egress_membership_identity", "DROP TRIGGER egress_metric_unique", "DROP VIEW egress_work", "DROP VIEW egress_inventory", "DROP TABLE egress_retirements", "DROP TABLE egress_unique", "DROP TRIGGER egress_excluded_alias_insert", "DROP TRIGGER egress_excluded_alias_update", "DROP TRIGGER egress_run_deleted", "DROP TABLE egress_run_members", "DROP TABLE egress_runs", "DROP TABLE IF EXISTS egress_iran_policy", "DROP TABLE IF EXISTS egress_iran_guard", "DROP TRIGGER IF EXISTS egress_metric_ingest", "DROP TRIGGER egress_metric_delete", "DROP TRIGGER egress_retry_revived", "DROP TABLE egress_metrics", "DROP TRIGGER egress_stage", "DROP TABLE egress_health", "DROP TABLE egress_lifecycle", "DROP VIEW egress_export_eligible", "DROP VIEW egress_geo_eligible", "DROP TABLE egress_geo_results", "DROP TABLE egress_countries", "DROP TABLE egress_country_policy", "DROP TRIGGER egress_ingest", "DROP VIEW input_blocked_identities", "DROP VIEW input_blocked", "DROP VIEW egress_eligible", "DROP TABLE egress_owners", "DROP TABLE egress_jobs", "DROP TABLE egress_turns", "DROP TABLE egress_events", "DROP TABLE egress_settings", "DROP TABLE egress_worker"} {
+	for _, q := range []string{"DROP VIEW IF EXISTS egress_discovery_inputs", "DROP TRIGGER egress_review_deleted", "DROP TABLE egress_network_review", "DROP TABLE egress_residential_history", "DROP TRIGGER egress_first_finished", "DROP TRIGGER egress_first_source_replaced", "DROP TABLE egress_first_backlog", "DROP TRIGGER egress_network_representative_removed", "DROP VIEW egress_network_eligible", "DROP TABLE egress_network_results", "DROP INDEX egress_membership_identity", "DROP TRIGGER egress_metric_unique", "DROP VIEW egress_work", "DROP VIEW egress_inventory", "DROP TABLE egress_retirements", "DROP TABLE egress_unique", "DROP TRIGGER egress_excluded_alias_insert", "DROP TRIGGER egress_excluded_alias_update", "DROP TRIGGER egress_run_deleted", "DROP TABLE egress_run_members", "DROP TABLE egress_runs", "DROP TABLE IF EXISTS egress_iran_policy", "DROP TABLE IF EXISTS egress_iran_guard", "DROP TRIGGER IF EXISTS egress_metric_ingest", "DROP TRIGGER egress_metric_delete", "DROP TRIGGER egress_retry_revived", "DROP TABLE egress_metrics", "DROP TRIGGER egress_stage", "DROP TABLE egress_health", "DROP TABLE egress_lifecycle", "DROP VIEW egress_export_eligible", "DROP VIEW egress_geo_eligible", "DROP TABLE egress_geo_results", "DROP TABLE egress_countries", "DROP TABLE egress_country_policy", "DROP TRIGGER egress_ingest", "DROP VIEW input_blocked_identities", "DROP VIEW input_blocked", "DROP VIEW egress_eligible", "DROP TABLE egress_owners", "DROP TABLE egress_jobs", "DROP TABLE egress_turns", "DROP TABLE egress_events", "DROP TABLE egress_settings", "DROP TABLE egress_worker"} {
 		if _, e := s.db.Exec(q); e != nil {
 			t.Fatal(e)
 		}
@@ -330,13 +336,17 @@ func TestEgressLaneFallbackNeverRepeatsCompletedSharedResult(t *testing.T) {
 		t.Fatal("unknown lane accepted", err)
 	}
 }
-func TestEgressUrgentAcceptedUsesInitialLane(t *testing.T) {
+func TestEgressUrgentAcceptedBorrowsInitialLaneWhenDiscoveryIsLeased(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	newExportSource(t, s, "current", sourceURI(161), sourceURI(162))
 	var hash string
 	s.db.QueryRow("SELECT hash FROM egress_jobs ORDER BY hash DESC LIMIT 1").Scan(&hash)
 	s.db.Exec("UPDATE egress_jobs SET ever_accepted=1,state='RESIDENTIAL',tested=?,attempts=4,valid_until=?,next_run=0 WHERE hash=?", egress.Now(), egress.Now()+20000, hash)
+	fresh, err := s.ClaimEgressLane(ctx, "initial")
+	if err != nil || fresh == nil || fresh.Accepted {
+		t.Fatal("ready discovery lost the first initial slot", fresh, err)
+	}
 	j, err := s.ClaimEgressLane(ctx, "initial")
 	if err != nil || j == nil || j.Hash != hash || !j.Deep {
 		t.Fatal("accepted proof expiry starved", j, err)

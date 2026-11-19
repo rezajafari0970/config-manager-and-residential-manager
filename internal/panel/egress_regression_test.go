@@ -97,15 +97,13 @@ func TestEgressFollowupLaneProgressWithInitialBacklog(t *testing.T) {
 	for round := 0; round < 2; round++ {
 		// Initial lane continuously has fresh work available.
 		newExportSource(t, s, []string{"more-a", "more-b"}[round], sourceURI(250+round))
-		initial, e := s.ClaimEgressLane(ctx, "initial")
-		if e != nil || initial == nil || initial.Hash == a.Hash || initial.Hash == b.Hash {
-			t.Fatal(initial, e)
+		for _, lane := range []string{"initial", "followup"} {
+			j, err := s.ClaimEgressLane(ctx, lane)
+			if err != nil || j == nil || seen[j.Hash] {
+				t.Fatal("missing or duplicate lease", j, err)
+			}
+			seen[j.Hash] = true
 		}
-		follow, e := s.ClaimEgressLane(ctx, "followup")
-		if e != nil || follow == nil {
-			t.Fatal(e)
-		}
-		seen[follow.Hash] = true
 	}
 	if !seen[a.Hash] || !seen[b.Hash] {
 		t.Fatal("expired follow-up leases starved", seen)

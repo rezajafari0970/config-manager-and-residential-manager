@@ -42,7 +42,7 @@ func TestEgressAuditQueueUsesOneDueDefinition(t *testing.T) {
 
 }
 
-func TestEgressAuditStoresInfrastructureResultOnceAcrossReopen(t *testing.T) {
+func TestEgressAuditStoresMeasuredResultOnceAcrossReopen(t *testing.T) {
 	for _, code := range []string{"endpoint_dns_failed", "driver_subprocess_failed", "local_resource_pressure", "ads_delivery_unproven"} {
 		t.Run(code, func(t *testing.T) {
 			s := testStore(t)

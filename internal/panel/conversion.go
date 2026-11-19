@@ -66,19 +66,20 @@ func (s *Store) migrateV6() error {
 	return tx.Commit()
 }
 func syncConversions(ctx context.Context, tx *sql.Tx) error {
-	// Compute current ownership once for this statement. Correlating the full
-	// eligibility view with every historical job repeats its shared safety gates
-	// while holding the sole writer, delaying single exports during ingestion.
-	if _, e := tx.ExecContext(ctx, `WITH active_inputs AS MATERIALIZED(SELECT hash FROM conversion_inputs)
- DELETE FROM conversion_jobs WHERE NOT EXISTS(SELECT 1 FROM active_inputs i WHERE i.hash=conversion_jobs.hash)`); e != nil {
-		return e
-	}
-	_, e := tx.ExecContext(ctx, `INSERT INTO conversion_jobs(hash) SELECT hash FROM conversion_inputs WHERE true ON CONFLICT(hash) DO NOTHING`)
-	if e != nil {
-		return e
-	}
-	_, e = tx.ExecContext(ctx, `INSERT INTO conversion_schedule(hash,created) SELECT hash,CAST(unixepoch('subsec')*1000 AS INTEGER) FROM conversion_jobs WHERE true ON CONFLICT(hash) DO NOTHING`)
-	return e
+	// All callers hold a writer transaction. Rebuild this connection-local
+	// relation from authoritative ownership on every sync. Claiming can then
+	// reuse it for queue maintenance and ranking without three full view scans.
+	_, err := tx.ExecContext(ctx, `
+ CREATE TEMP TABLE IF NOT EXISTS conversion_sync_inputs(
+ hash TEXT NOT NULL,kind TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(hash,kind,size)
+ ) WITHOUT ROWID;
+ DELETE FROM temp.conversion_sync_inputs;
+ INSERT OR IGNORE INTO temp.conversion_sync_inputs SELECT hash,kind,size FROM conversion_work_inputs;
+ DELETE FROM conversion_jobs WHERE NOT EXISTS(
+ SELECT 1 FROM temp.conversion_sync_inputs i WHERE i.hash=conversion_jobs.hash);
+ INSERT OR IGNORE INTO conversion_jobs(hash) SELECT hash FROM temp.conversion_sync_inputs;
+ INSERT OR IGNORE INTO conversion_schedule(hash,created) SELECT hash,CAST(unixepoch('subsec')*1000 AS INTEGER) FROM conversion_jobs`)
+	return err
 }
 func (s *Store) ProbeSettings(ctx context.Context) (probe.Settings, error) {
 	var v probe.Settings
@@ -157,12 +158,22 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 	j := &probe.Job{Settings: settings}
 	var size int64
 	priority := s.probeTurn.Add(1)%4 == 0
-	e = tx.QueryRowContext(ctx, `WITH active_inputs AS MATERIALIZED(SELECT * FROM conversion_inputs) SELECT i.hash,i.kind,i.size,j.revision FROM active_inputs i JOIN conversion_jobs j ON j.hash=i.hash LEFT JOIN conversion_schedule fifo ON fifo.hash=j.hash WHERE (j.token='' OR j.lease_until<=?) AND (j.next_run<=? OR j.version!=?) AND NOT EXISTS(SELECT 1 FROM template_preparations own JOIN template_preparations same ON same.candidate_hash=own.candidate_hash AND same.version=own.version AND same.engine=own.engine JOIN conversion_jobs busy ON busy.hash=same.hash WHERE own.hash=j.hash AND own.candidate_hash!='' AND busy.hash!=j.hash AND busy.token!='' AND busy.lease_until>CAST(unixepoch('subsec')*1000 AS INTEGER)) ORDER BY CASE WHEN ((j.version=? AND j.next_run>0)=?) THEN 0 ELSE 1 END,CASE WHEN j.next_run=0 THEN coalesce(fifo.created,0) ELSE j.next_run END,j.hash LIMIT 1`, now, now, convert.Version, convert.Version, priority).Scan(&j.Hash, &j.Kind, &size, &j.Revision)
+	var first bool
+	e = tx.QueryRowContext(ctx, ordinaryLeasedAliases+`SELECT i.hash,i.kind,i.size,j.revision,j.next_run=0 OR j.version!=? FROM temp.conversion_sync_inputs i JOIN conversion_jobs j ON j.hash=i.hash LEFT JOIN conversion_schedule fifo ON fifo.hash=j.hash WHERE (j.token='' OR j.lease_until<=?) AND (j.next_run<=? OR j.version!=?) AND j.hash NOT IN busy_aliases AND NOT EXISTS(SELECT 1 FROM template_preparations own JOIN template_preparations same ON same.candidate_hash=own.candidate_hash AND same.version=own.version AND same.engine=own.engine JOIN conversion_jobs busy ON busy.hash=same.hash WHERE own.hash=j.hash AND own.candidate_hash!='' AND busy.hash!=j.hash AND busy.token!='' AND busy.lease_until>CAST(unixepoch('subsec')*1000 AS INTEGER)) ORDER BY CASE WHEN ((j.version=? AND j.next_run>0)=?) THEN 0 ELSE 1 END,CASE WHEN j.next_run=0 THEN `+conversionFirstSourceOrder+` ELSE 0 END,CASE WHEN j.next_run=0 AND j.token!='' THEN coalesce(fifo.last_started,0) WHEN j.next_run=0 THEN coalesce(fifo.created,0) ELSE j.next_run END,j.hash LIMIT 1`, now, convert.Version, now, now, convert.Version, convert.Version, priority).Scan(&j.Hash, &j.Kind, &size, &j.Revision, &first)
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
 	if e != nil {
 		return nil, e
+	}
+	// Retention and exclusion deadlines can pass during the transaction. Check
+	// this individual raw candidate against live ownership before issuing a lease.
+	var stillOwned bool
+	if e = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM conversion_work_inputs WHERE hash=?)", j.Hash).Scan(&stillOwned); e != nil {
+		return nil, e
+	}
+	if !stillOwned {
+		return nil, tx.Commit()
 	}
 	j.Token = randomToken()
 	if _, e = tx.ExecContext(ctx, "UPDATE conversion_jobs SET token=?,lease_until=?,state='running',version=? WHERE hash=?", j.Token, now+120000, convert.Version, j.Hash); e != nil {
@@ -170,6 +181,11 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 	}
 	if _, e = tx.ExecContext(ctx, "UPDATE conversion_schedule SET last_started=? WHERE hash=?", now, j.Hash); e != nil {
 		return nil, e
+	}
+	if first {
+		if e = recordFirstProbeTurn(ctx, tx.Tx, j.Hash, now); e != nil {
+			return nil, e
+		}
 	}
 	if e = tx.Commit(); e != nil {
 		return nil, e
@@ -193,7 +209,7 @@ func (s *Store) ClaimProbe(ctx context.Context) (*probe.Job, error) {
 	return j, nil
 }
 func (s *Store) RenewProbe(ctx context.Context, j probe.Job) error {
-	res, e := s.db.ExecContext(ctx, `UPDATE conversion_jobs SET lease_until=? WHERE hash=? AND token=? AND revision=? AND lease_until>? AND EXISTS(SELECT 1 FROM conversion_inputs i WHERE i.hash=conversion_jobs.hash)`, time.Now().Add(2*time.Minute).UnixMilli(), j.Hash, j.Token, j.Revision, time.Now().UnixMilli())
+	res, e := s.db.ExecContext(ctx, `UPDATE conversion_jobs SET lease_until=? WHERE hash=? AND token=? AND revision=? AND lease_until>? AND EXISTS(SELECT 1 FROM conversion_work_inputs i WHERE i.hash=conversion_jobs.hash)`, time.Now().Add(2*time.Minute).UnixMilli(), j.Hash, j.Token, j.Revision, time.Now().UnixMilli())
 	if e != nil {
 		return e
 	}
@@ -270,7 +286,7 @@ func (s *Store) CompleteProbe(ctx context.Context, r probe.Result) error {
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
 	var failures int
-	e = tx.QueryRowContext(ctx, `SELECT failures FROM conversion_jobs j WHERE hash=? AND token=? AND revision=? AND lease_until>? AND EXISTS(SELECT 1 FROM conversion_inputs i WHERE i.hash=j.hash)`, r.Hash, r.Token, r.Revision, now).Scan(&failures)
+	e = tx.QueryRowContext(ctx, `SELECT failures FROM conversion_jobs j WHERE hash=? AND token=? AND revision=? AND lease_until>? AND EXISTS(SELECT 1 FROM conversion_work_inputs i WHERE i.hash=j.hash)`, r.Hash, r.Token, r.Revision, now).Scan(&failures)
 	if errors.Is(e, sql.ErrNoRows) {
 		return ErrConflict
 	}

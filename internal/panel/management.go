@@ -186,6 +186,15 @@ func (s *Store) ManageConfigs(ctx context.Context, b ConfigBatch) (BatchResult, 
 	if e != nil {
 		return result, e
 	}
+	if b.Action == "delete" {
+		del := "DELETE FROM conversion_first_backlog"
+		if !b.All {
+			del += " WHERE identity IN (SELECT id FROM selected_configs)"
+		}
+		if _, e = tx.ExecContext(ctx, del); e != nil {
+			return result, e
+		}
+	}
 	if e = s.manageEgress(ctx, tx, b.Action, b.All, stamp); e != nil {
 		return result, e
 	}

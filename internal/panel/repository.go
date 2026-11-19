@@ -417,6 +417,9 @@ func (s *Store) Complete(ctx context.Context, job collect.Job, result collect.Re
 			return err
 		}
 		if !admission.Accept {
+			if err := rememberHeldSource(ctx, tx, result, job, stamp); err != nil {
+				return err
+			}
 			suppressed = unique - eligible
 			result.State = "error"
 			result.ErrorCode = "source_count_drop_pending"

@@ -27,7 +27,7 @@ const egressClaimCandidates = `WITH claim_scope(hash) AS MATERIALIZED (
  UNION SELECT u.hash FROM egress_network_review v CROSS JOIN egress_unique u ON u.identity=v.identity
  UNION SELECT hash FROM egress_first_backlog
  UNION SELECT u.hash FROM egress_iran_guard g JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'
-) `
+), dispatch(streak) AS MATERIALIZED (SELECT ` + egressDispatchStreak + `) `
 
 const egressLiveProof = `ever_accepted=1 AND tested>0 AND valid_until>:claim_now`
 const egressUrgentExpiry = egressLiveProof + ` AND valid_until<=:claim_now+120000`
@@ -42,9 +42,6 @@ const egressRenewableNetwork = `NOT EXISTS(SELECT 1 FROM egress_unique u JOIN eg
 func egressClaimPriority(lane string, turn uint64) string {
 	order := `CASE WHEN reason='ads_iran_quarantined' THEN -1
  WHEN EXISTS(SELECT 1 FROM egress_retirements r WHERE r.hash=egress_jobs.hash) THEN 0 `
-	if lane == "initial" && turn%3 == 0 {
-		order += "WHEN tested=0 AND first_completed=0 THEN 2 "
-	}
 	if lane == "followup" && turn%3 == 0 {
 		// A zero deadline can also mean an incomplete result. Give the
 		// expired-proof turn first to receipts from proven residential jobs.
@@ -73,17 +70,33 @@ func egressClaimPriority(lane string, turn uint64) string {
 // jobs table. A join directly to egress_work can flatten the view and scan
 // the due index across every unpaused historical job before checking scope.
 func egressRankedClaim(lane string, turn uint64) string {
+	// On a discovery opportunity, only an individually threatened proof may
+	// borrow the slot. An unrelated safety or maintenance job cannot use it.
+	const discoveryOrDeadline = "CASE WHEN urgent THEN 0 WHEN queued_at IS NOT NULL THEN 1 ELSE 2 END"
+	maintenanceLane := lane
+	preference := "0"
+	if lane == "initial" {
+		preference = discoveryOrDeadline
+		maintenanceLane = "followup"
+	}
 	return `WITH due AS MATERIALIZED (
- SELECT egress_jobs.hash,next_run,first_seen,valid_until,` + egressClaimPriority(lane, turn) + ` AS priority
+ SELECT egress_jobs.hash,next_run,first_seen,valid_until,` + egressClaimPriority(maintenanceLane, turn) + ` AS priority,
+ CASE WHEN ` + egressDiscovery + ` THEN (SELECT u.created FROM egress_unique u WHERE u.hash=c.hash) END AS queued_at,
+ CASE WHEN ever_accepted=1 AND tested>0 AND valid_until>0 AND valid_until<=:claim_now+60000
+ AND EXISTS(SELECT 1 FROM egress_residential_history h WHERE h.hash=c.hash)
+ AND ` + egressRenewableNetwork + ` THEN 1 ELSE 0 END AS urgent
  FROM claim_scope c CROSS JOIN egress_jobs ON egress_jobs.hash=c.hash WHERE ` + egressClaimDue + `
  AND EXISTS(SELECT 1 FROM egress_work w WHERE w.hash=c.hash))
- SELECT hash FROM due ORDER BY priority,CASE WHEN priority=4 THEN valid_until END,next_run,first_seen,hash LIMIT 1`
+ SELECT hash FROM due CROSS JOIN dispatch ORDER BY CASE WHEN streak<=-3 THEN queued_at IS NULL
+ WHEN streak=-2 THEN ` + discoveryOrDeadline + `
+ WHEN streak>=2 THEN queued_at IS NOT NULL ELSE ` + preference + ` END,
+ CASE WHEN queued_at IS NULL THEN priority ELSE 7 END,
+ CASE WHEN priority=4 THEN valid_until END,coalesce(queued_at,next_run),
+ CASE WHEN queued_at IS NULL THEN first_seen END,hash LIMIT 1`
 }
 
-// Independent first-assessment and follow-up lanes share revision-fenced leases.
-// Iran, spaced retirement confirmations and near-expiry accepted proofs can use
-// either lane. Routine accepted renewal has reserved follow-up slots and may
-// steal idle initial slots, but cannot monopolize a nonempty first-assessment lane.
+// A worker's lane is a preference. Either lane can use idle capacity, and the
+// durable grant streak protects both queues when only one worker obtains a permit.
 func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, error) {
 	if lane != "" && lane != "initial" && lane != "followup" {
 		return nil, ErrInvalid
@@ -96,22 +109,16 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	// Rank on a committed WAL snapshot, outside the writer transaction. This
 	// is only a hint: claimability, scope, capacity and deadline are checked
 	// again under the writer lock before granting any lease.
-	var turn uint64
-	switch lane {
-	case "initial":
-		turn = s.initialTurn.Load() + 1
-	case "followup":
-		turn = s.renewalTurn.Load() + 1
-	}
 	now := egress.Now()
 	var cleanup bool
 	var candidate string
-	ranked := egressRankedClaim(lane, turn)
-	e := s.workerReader().QueryRowContext(ctx, egressClaimCandidates+`SELECT
+	var streak int
+	ranked := egressRankedClaim(lane, s.renewalTurn.Load()+1)
+	e := s.workerReader().QueryRowContext(ctx, egressClaimCandidates+`SELECT streak,
  EXISTS(SELECT 1 FROM egress_jobs WHERE token!='' AND NOT EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash))
  OR EXISTS(SELECT 1 FROM egress_run_members WHERE run=(SELECT max(id) FROM egress_runs) AND status='pending' AND NOT EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_run_members.hash)),
  CASE WHEN (SELECT enabled FROM egress_settings WHERE id=1)!=0 AND (SELECT count(*) FROM egress_jobs WHERE token!='' AND lease_until>:claim_now)<:worker_limit
- THEN coalesce((`+ranked+`),'') ELSE '' END`, sql.Named("claim_now", now), sql.Named("worker_limit", egress.MaxWorkers)).Scan(&cleanup, &candidate)
+ THEN coalesce((`+ranked+`),'') ELSE '' END FROM dispatch`, sql.Named("claim_now", now), sql.Named("worker_limit", egress.MaxWorkers)).Scan(&streak, &cleanup, &candidate)
 	if e != nil || !cleanup && candidate == "" {
 		return nil, e
 	}
@@ -143,8 +150,11 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	var size int64
 	var state, previousToken string
 	var first, retryStreak int
-	e = tx.QueryRowContext(ctx, `SELECT hash,kind,size,revision,ever_accepted,attempts,state,token,first_completed,retry_streak FROM egress_work WHERE hash=:job_hash AND `+egressClaimDue, sql.Named("job_hash", candidate), sql.Named("claim_now", now)).
-		Scan(&j.Hash, &j.Kind, &size, &j.Revision, &j.Deep, &j.Attempt, &state, &previousToken, &first, &retryStreak)
+	var discovery bool
+	e = tx.QueryRowContext(ctx, `SELECT hash,kind,size,revision,ever_accepted,attempts,state,token,first_completed,retry_streak,`+egressDiscovery+`
+ FROM egress_work WHERE hash=:job_hash AND `+egressClaimDue+` AND `+egressDispatchStreak+`=:ranked_streak`,
+		sql.Named("job_hash", candidate), sql.Named("claim_now", now), sql.Named("ranked_streak", streak)).
+		Scan(&j.Hash, &j.Kind, &size, &j.Revision, &j.Deep, &j.Attempt, &state, &previousToken, &first, &retryStreak, &discovery)
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -156,23 +166,14 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 			return nil, e
 		}
 	}
-	// Interrupted first leases have no trusted receipt. Recover the same identity
-	// twice. A subsequent successful independent worker receipt can grant one
-	// final recovery. Parked jobs retain their raw input and never count as tested.
+	// Expired leases did not produce a measurement. Recover short
+	// interruptions immediately, then space subsequent attempts durably.
 	if previousToken != "" && first == 0 && !j.Deep {
 		retryStreak++
 		if retryStreak >= 3 {
-			reason := "initial_lease_exhausted"
-			if retryStreak == 3 {
-				reason = "initial_lease_interrupted"
-			}
-			_, err := tx.ExecContext(ctx, `UPDATE egress_jobs SET state='UNKNOWN',reason=?,next_run=?,
- retry_streak=?,token='',lease_until=0,revision=revision+1 WHERE hash=?`, reason, now, retryStreak, j.Hash)
-			if err != nil {
-				return nil, err
-			}
-			if _, err = tx.ExecContext(ctx, `UPDATE egress_run_members SET status='excluded',state='UNMEASURED',completed_at=?
- WHERE hash=? AND status='pending' AND run=(SELECT max(id) FROM egress_runs) AND ?='initial_lease_exhausted'`, now, j.Hash, reason); err != nil {
+			due := now + initialRecoveryDelay(j.Hash, retryStreak-2)
+			if _, err := tx.ExecContext(ctx, `UPDATE egress_jobs SET state='PENDING',reason='initial_lease_recovery',next_run=?,
+ retry_streak=?,token='',lease_until=0,revision=revision+1 WHERE hash=?`, due, retryStreak, j.Hash); err != nil {
 				return nil, err
 			}
 			return nil, tx.Commit()
@@ -188,13 +189,13 @@ func (s *Store) ClaimEgressLane(ctx context.Context, lane string) (*egress.Job, 
 	if _, e = tx.ExecContext(ctx, "UPDATE egress_network_review SET attempts=attempts+1 WHERE attempts<2 AND identity=(SELECT identity FROM egress_unique WHERE hash=?)", j.Hash); e != nil {
 		return nil, e
 	}
+	if e = recordEgressDispatch(ctx, tx.Tx, streak, discovery); e != nil {
+		return nil, e
+	}
 	if e = tx.Commit(); e != nil {
 		return nil, e
 	}
-	switch lane {
-	case "initial":
-		s.initialTurn.Add(1)
-	case "followup":
+	if !discovery {
 		s.renewalTurn.Add(1)
 	}
 	release()
@@ -309,15 +310,36 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 	var accepted bool
 	var failures, streak, firstCompleted int
 	var last, claimed int64
-	e = tx.QueryRowContext(ctx, "SELECT ever_accepted,failures,last_failure,claimed_at,retry_streak,first_completed FROM egress_jobs WHERE hash=? AND revision=? AND token=? AND lease_until>? AND paused=0 AND state!='DELETED' AND EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash)", j.Hash, j.Revision, j.Token, now).Scan(&accepted, &failures, &last, &claimed, &streak, &firstCompleted)
+	// Attribution belongs to the membership at completion. A safety decision
+	// below can remove that membership in this same transaction.
+	var firstScope string
+	e = tx.QueryRowContext(ctx, `SELECT ever_accepted,failures,last_failure,claimed_at,retry_streak,first_completed,
+ CASE WHEN first_completed!=0 THEN '' WHEN EXISTS (
+   SELECT 1 FROM egress_unique u JOIN memberships m ON m.artifact_id=u.identity WHERE u.hash=egress_jobs.hash
+ ) THEN 'current' ELSE 'withdrawn' END
+ FROM egress_jobs WHERE hash=? AND revision=? AND token=? AND lease_until>? AND paused=0 AND state!='DELETED'
+ AND EXISTS(SELECT 1 FROM egress_inventory i WHERE i.hash=egress_jobs.hash)`, j.Hash, j.Revision, j.Token, now).Scan(&accepted, &failures, &last, &claimed, &streak, &firstCompleted, &firstScope)
 	if errors.Is(e, sql.ErrNoRows) {
 		return ErrConflict
 	}
 	if e != nil {
 		return e
 	}
-	if r.Started < claimed-2000 || r.Finished > now+2000 {
+	if r.Started < claimed-2000 || r.Finished < r.Started || r.Finished > now+2000 {
 		return ErrConflict
+	}
+	if firstCompleted == 0 && !accepted {
+		if reason := unmeasuredFirstReason(r, d.Reason); reason != "" {
+			report, err := json.Marshal(r)
+			if err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, `UPDATE egress_jobs SET state='PENDING',reason=?,report=?,token='',lease_until=0,
+ retry_streak=retry_streak+1,next_run=? WHERE hash=?`, reason, string(report), now+initialRecoveryDelay(j.Hash, streak+1), j.Hash); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
 	}
 	lifecycle, e := lifecycleState(ctx, tx)
 	if e != nil {
@@ -391,7 +413,8 @@ func (s *Store) CompleteEgress(ctx context.Context, c egress.Completion) error {
 			state = "UNKNOWN" // this attempt's event, independent of the retained proof
 		}
 	}
-	if _, e = tx.ExecContext(ctx, "INSERT INTO egress_events(hash,at,state,reason,definitive,duration_ms) VALUES(?,?,?,?,?,?)", j.Hash, now, state, eventReason, definitive, max(0, r.Finished-r.Started)); e != nil {
+	if _, e = tx.ExecContext(ctx, `INSERT INTO egress_events(hash,at,state,reason,definitive,duration_ms,first_result_scope)
+ VALUES(?,?,?,?,?,?,?)`, j.Hash, now, state, eventReason, definitive, max(0, r.Finished-r.Started), firstScope); e != nil {
 		return e
 	}
 	uniqueDefinitive := false

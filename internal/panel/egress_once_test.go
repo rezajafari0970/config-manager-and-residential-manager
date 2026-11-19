@@ -8,7 +8,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
-func TestInterruptedInitialLeaseBudgetPersistsWithoutInventingReceipt(t *testing.T) {
+func TestInterruptedFirstLeaseRecoversAfterRestartWithoutIndependentSuccess(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	source, _ := newExportSource(t, s, "interrupted", sourceURI(637))
@@ -43,50 +43,37 @@ func TestInterruptedInitialLeaseBudgetPersistsWithoutInventingReceipt(t *testing
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND state='UNKNOWN' AND reason='initial_lease_interrupted' AND tested=0 AND first_completed=0 AND attempts=3 AND token=''", hash)
+	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND state='PENDING' AND reason='initial_lease_recovery' AND tested=0 AND first_completed=0 AND attempts=3 AND token='' AND next_run>?", hash, egress.Now())
 	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM egress_first_backlog WHERE hash=?", hash)
-	pendingCount(t, reopened.db, 0, "SELECT count(*) FROM egress_work WHERE hash=?", hash)
+	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM egress_work WHERE hash=?", hash)
 	pendingCount(t, reopened.db, 0, "SELECT completed FROM egress_metrics")
 	if referenced, err := reopened.Referenced(ctx, hash); err != nil || !referenced {
 		t.Fatal("withdrawn interrupted input lost its bytes", err)
 	}
-	// A trustworthy independent completion revives the same parked record once.
-	if _, err = reopened.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash!=?", hash); err != nil {
-		t.Fatal(err)
+	for attempt := 4; attempt <= 5; attempt++ {
+		if early, err := reopened.ClaimEgress(ctx); err != nil || early != nil {
+			t.Fatal("recovery ignored its deadline", err)
+		}
+		if _, err = reopened.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", hash); err != nil {
+			t.Fatal(err)
+		}
+		again, err := reopened.ClaimEgress(ctx)
+		if err != nil || again == nil || again.Hash != hash || again.Attempt != attempt {
+			t.Fatal("unmeasured job stranded", attempt, err)
+		}
+		if attempt == 4 {
+			if _, err = reopened.db.Exec("UPDATE egress_jobs SET lease_until=1 WHERE hash=?", hash); err != nil {
+				t.Fatal(err)
+			}
+			if again, err = reopened.ClaimEgress(ctx); err != nil || again != nil {
+				t.Fatal("repeated lease loss bypassed backoff", err)
+			}
+		} else if err = reopened.CompleteEgress(ctx, egress.Completion{Job: *again, Report: syntheticEgress(*again)}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	other, err := reopened.ClaimEgress(ctx)
-	if err != nil || other == nil || other.Hash == hash {
-		t.Fatal(other, err)
-	}
-	if err = reopened.CompleteEgress(ctx, egress.Completion{Job: *other, Report: syntheticEgress(*other)}); err != nil {
-		t.Fatal(err)
-	}
-	last, err := reopened.ClaimEgress(ctx)
-	if err != nil || last == nil || last.Hash != hash || last.Attempt != 4 {
-		t.Fatal(last, err)
-	}
-	if _, err = reopened.db.Exec("UPDATE egress_jobs SET lease_until=1 WHERE hash=?", hash); err != nil {
-		t.Fatal(err)
-	}
-	if repeated, err := reopened.ClaimEgress(ctx); err != nil || repeated != nil {
-		t.Fatal("recovery exceeded its total lease budget", repeated, err)
-	}
-	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND reason='initial_lease_exhausted' AND attempts=4 AND first_completed=0 AND tested=0", hash)
-	tx, err := reopened.db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	if err = reopened.manageEgress(ctx, tx, "enable", true, egress.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if err = tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	rearmed, err := reopened.ClaimEgress(ctx)
-	if err != nil || rearmed == nil || rearmed.Hash != hash || rearmed.Attempt != 5 {
-		t.Fatal("explicit enable did not recover parked job", rearmed, err)
-	}
+	pendingCount(t, reopened.db, 1, "SELECT first_assessments FROM egress_metrics")
+	pendingCount(t, reopened.db, 0, "SELECT count(*) FROM egress_first_backlog WHERE hash=?", hash)
 }
 
 func TestMigrationRestoresArchivedInitialReceiptWithoutRequeue(t *testing.T) {

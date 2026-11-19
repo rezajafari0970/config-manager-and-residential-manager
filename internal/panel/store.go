@@ -36,11 +36,12 @@ type Store struct {
 	key                 []byte
 	vault               *blob.Vault
 	probeTurn           atomic.Uint64
-	initialTurn         atomic.Uint64
 	renewalTurn         atomic.Uint64
 	rotationMu          sync.Mutex
 	rotationLocks       map[string]*rotationLock
 }
+
+const currentSchemaVersion = 51
 
 func Open(path string, key []byte) (*Store, error) {
 	if len(key) != 32 || !filepath.IsAbs(path) {
@@ -97,7 +98,7 @@ func Open(path string, key []byte) (*Store, error) {
 	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return nil, err
 	}
-	if version > 49 {
+	if version > currentSchemaVersion {
 		return nil, errors.New("database schema newer than application")
 	}
 	if version == 0 {
@@ -260,11 +261,6 @@ PRAGMA user_version=1;`)
 	if err = s.reconcileEgressVersion(); err != nil {
 		return nil, err
 	}
-	// Reconcile transient children left by older connections with foreign keys
-	// disabled. This never deletes source definitions or a still-owned artifact.
-	if err = s.reconcileTransient(); err != nil {
-		return nil, err
-	}
 	s.vault, err = blob.New(filepath.Join(filepath.Dir(path), "blobs"), key)
 	if err != nil {
 		return nil, err
@@ -279,6 +275,17 @@ PRAGMA user_version=1;`)
 		return nil, err
 	}
 	if err = s.migrateV49(); err != nil {
+		return nil, err
+	}
+	if err = s.migrateV50(); err != nil {
+		return nil, err
+	}
+	if err = s.migrateV51(); err != nil {
+		return nil, err
+	}
+	// Reconcile transient children left by older connections with foreign keys
+	// disabled. This never deletes source definitions or a still-owned artifact.
+	if err = s.reconcileTransient(); err != nil {
 		return nil, err
 	}
 	if err = s.reconcileProtocolResponses(); err != nil {

@@ -23,7 +23,7 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	var current, currentTested, currentAwaiting, currentExcluded, interrupted, exhausted, missing int
 	err = q.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER(WHERE bucket='tested'),
  count(*) FILTER(WHERE bucket='awaiting'),count(*) FILTER(WHERE bucket='excluded'),count(*) FILTER(WHERE bucket='missing'),
- count(*) FILTER(WHERE bucket='awaiting' AND reason='initial_lease_interrupted'),
+ count(*) FILTER(WHERE bucket='awaiting' AND reason IN ('initial_lease_interrupted','initial_lease_recovery')),
  count(*) FILTER(WHERE bucket='awaiting' AND reason='initial_lease_exhausted')
  FROM (SELECT `+currentEgressBucket+` AS bucket,j.reason FROM (SELECT DISTINCT artifact_id AS identity FROM memberships) k `+currentEgressJoins+` AND c.expires>?)`, now).Scan(&current, &currentTested, &currentAwaiting, &currentExcluded, &missing, &interrupted, &exhausted)
 	if err != nil {
@@ -69,11 +69,16 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
+	firstProgress, err := firstAssessmentState(ctx, q, now)
+	if err != nil {
+		return nil, err
+	}
 	awaiting := renewal["paused"] + renewal["running"] + renewal["due"] + renewal["scheduled"] + renewal["cached"]
 	return map[string]any{
 		"at": now, "unit": "collector_identity", "live_versions": total, "current_identities": current, "current_versions": raws,
 		"current_live_versions": total - outside, "archive_versions": outside, "deleted_versions": deleted,
 		"coverage_missing": missing, "staged_coverage_missing": stagedMissing, "staged_versions": staged,
+		"first_assessment":   firstProgress,
 		"current_assessment": map[string]int{"tested": currentTested, "awaiting": currentAwaiting, "excluded": currentExcluded, "missing": missing, "interrupted": interrupted, "exhausted": exhausted},
 		"awaiting_first":     first, "assessed_versions": assessed, "retained_outside_current": retainedOutside,
 		"queue":   map[string]int{"paused": paused, "running": running, "due": due, "scheduled": scheduled, "cached": cached},
