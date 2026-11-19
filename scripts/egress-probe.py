@@ -118,9 +118,11 @@ def private_sources(samples,key):
 def error_code(error):
  return 'driver_subprocess_timeout' if isinstance(error,subprocess.TimeoutExpired) else 'driver_subprocess_failed' if isinstance(error,subprocess.CalledProcessError) else str(error) if isinstance(error,ValueError) and re.fullmatch('[a-z0-9_]{1,60}',str(error)) else 'driver_infrastructure_error'
 def core_independent_failure(code):
- # Changing Xray cannot repair host DNS resolution or the IPv6-only sandbox.
- # Preserve UNKNOWN and the queue's independent retry; do not try four cores.
- return code in ('protocol_disabled','endpoint_dns_failed','ipv6_only_probe_pending')
+ # These route vetoes come from the shared Python preflight on the exact
+ # variant, before core launch. Host DNS and address-family failures are
+ # likewise independent of core choice. The job retains its UNKNOWN receipt.
+ return code in ('protocol_disabled','endpoint_dns_failed','ipv6_only_probe_pending',
+                 'direct_route_not_qualified','direct_default_not_qualified')
 def resource_failures(prefix):
  try:
   fields=dict(line.split() for line in (pathlib.Path('/sys/fs/cgroup')/(prefix+'-sandboxes')/'memory.events').read_text().splitlines())

@@ -117,6 +117,26 @@ class DispatchContracts(unittest.TestCase):
   self.assertEqual(driver.core_order(plan('example.com','none'))[0][0],'xray-26.5.9')
   self.assertEqual(driver.core_order(plan('8.8.8.8','tls'))[0][0],'xray-26.11.9')
   self.assertEqual(driver.core_order(plan('127.0.0.1','none'))[0][0],'xray-26.11.9')
+ def test_unqualified_direct_routes_stop_before_core_rotation(self):
+  import base64,contextlib,types
+  from unittest.mock import Mock,patch
+  proxy={'protocol':'vless','tag':'proxy','settings':{'address':'192.0.2.17','port':443}}
+  direct={'protocol':'freedom','tag':'direct'}
+  rule={'type':'field','port':'443','outboundTag':'direct'}
+  for expected,outbounds,rules in [('direct_route_not_qualified',[proxy,direct],[rule]),
+                                   ('direct_default_not_qualified',[direct,proxy],[])]:
+   with self.subTest(expected=expected):
+    body=json.dumps({'routing':{'rules':rules},'outbounds':outbounds}).encode()
+    variants=[dict(name=name,hash=driver.lab.digest(body),config=base64.b64encode(body).decode())
+              for name in ('raw','template')]
+    box=Mock();pool=Mock();pool.lease.side_effect=lambda *args:contextlib.nullcontext(box)
+    req=dict(plan=dict(driver='xray',variants=variants),hash=driver.lab.digest(body),started=1)
+    with patch.object(driver,'resource_failures',return_value=0),patch.object(driver.lab,'resolve_endpoints') as dns:
+     report=driver.investigate(req,types.SimpleNamespace(prefix='cgt'),pool)
+    self.assertEqual(report['code'],expected)
+    self.assertEqual([attempt['code'] for attempt in report['attempts']],[expected])
+    self.assertEqual(report['samples'],[]);self.assertEqual(report['checks'],[])
+    dns.assert_not_called();box.launch.assert_not_called()
  def test_failed_firewall_update_is_never_cached(self):
   original=driver.lab.Sandbox.policy;calls=[]
   def policy(box,resolved):
