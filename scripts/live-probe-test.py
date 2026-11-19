@@ -7,6 +7,11 @@ spec=importlib.util.spec_from_file_location('probe',pathlib.Path(__file__).with_
 p=importlib.util.module_from_spec(spec);spec.loader.exec_module(p)
 
 class ProbeTests(unittest.TestCase):
+ def test_supervisor_sandbox_check_uses_allowed_upstream(self):
+  cfg = p.preflight.parse_runtime_config(p.SANDBOX_CHECK_CONFIG)
+  p.preflight.require_enabled_config(cfg)
+  self.assertEqual(cfg['outbounds'][0]['settings']['servers'][0]['address'], '127.0.0.1')
+
  def test_payload_qualified_alternative_beats_short_https_success(self):
   spec=importlib.util.spec_from_file_location('candidate_driver',pathlib.Path(__file__).with_name('probe-one.py'))
   driver=importlib.util.module_from_spec(spec);spec.loader.exec_module(driver)

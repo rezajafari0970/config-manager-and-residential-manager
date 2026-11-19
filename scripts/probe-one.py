@@ -149,9 +149,9 @@ def main():
                         if r.stdout.strip()==b'200':good=True;break
                     except subprocess.SubprocessError:pass
                 if not good:raise RuntimeError('positive_control_failed')
-                box.policy({});p=box.launch(b'{"inbounds":[],"outbounds":[{"protocol":"blackhole","settings":{}}],"routing":{}}',True);p.wait(timeout=10)
+                box.policy({});p=box.launch(lab.SANDBOX_CHECK_CONFIG,True);p.wait(timeout=10)
                 if p.returncode!=0:raise RuntimeError('core_launch_failed')
-                if validate_client(box,b'{"inbounds":[],"outbounds":[{"protocol":"blackhole","settings":{}}],"routing":{}}',args.client_core) is not None:raise RuntimeError('client_core_launch_failed')
+                if validate_client(box,lab.SANDBOX_CHECK_CONFIG,args.client_core) is not None:raise RuntimeError('client_core_launch_failed')
                 box.stop();marker=box.work/'host-only.pem';marker.write_text('synthetic host canary')
                 denied={'inbounds':[],'outbounds':[{'protocol':'trojan','settings':{'address':'1.1.1.1','port':443,'password':'synthetic'},'streamSettings':{'security':'tls','tlsSettings':{'certificates':[{'certificateFile':str(marker),'usage':'verify'}]}}}],'routing':{}}
                 p=box.launch(json.dumps(denied).encode(),True);p.wait(timeout=10)

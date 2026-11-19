@@ -15,6 +15,10 @@ IP = '/usr/sbin/ip' if pathlib.Path('/usr/sbin/ip').exists() else '/usr/bin/ip'
 NFT = '/usr/sbin/nft'
 TARGET = 'v2rayng-2.3.15-lib40-xray-26.10.31-and-26.11.9'
 TESTS = [('https://www.gstatic.com/generate_204', 204), ('https://www.cloudflare.com/cdn-cgi/trace', 200)]
+# The installer and supervisor both run this fixture in core configuration-check mode.
+SANDBOX_CHECK_CONFIG = json.dumps({"outbounds": [{"protocol": "shadowsocks", "settings": {
+    "servers": [{"address": "127.0.0.1", "port": 9, "method": "aes-128-gcm", "password": "sandbox-check"}]
+}}]}).encode()
 lock = threading.Lock()
 STOP = threading.Event()
 spec=importlib.util.spec_from_file_location("config_preflight",pathlib.Path(__file__).with_name("config-preflight.py"))
