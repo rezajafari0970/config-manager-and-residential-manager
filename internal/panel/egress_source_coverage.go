@@ -12,12 +12,14 @@ import (
 const egressSourcePageSize = 50
 
 type egressCoverageCounts struct {
-	Current    int `json:"current_unique"`
-	Registered int `json:"registered"`
-	Tested     int `json:"current_tested"`
-	Awaiting   int `json:"awaiting"`
-	Excluded   int `json:"excluded"`
-	Missing    int `json:"missing_job"`
+	Current                int `json:"current_unique"`
+	Registered             int `json:"registered"`
+	Tested                 int `json:"current_tested"`
+	Awaiting               int `json:"awaiting"`
+	Excluded               int `json:"excluded"`
+	Missing                int `json:"missing_job"`
+	Published              int `json:"published"`
+	WithdrawnAwaitingFirst int `json:"withdrawn_awaiting_first"`
 }
 
 type egressSourceRow struct {
@@ -29,12 +31,12 @@ type egressSourceRow struct {
 // All memberships for one identity share the same job. Compute the four
 // disjoint states once, then fan the counts back out onto the displayed page.
 const egressSourceCoverageSQL = `
-WITH page AS (
+SELECT * FROM (WITH page AS (
  SELECT id,name FROM sources WHERE enabled=1 ORDER BY id LIMIT ? OFFSET ?
 ), ids AS MATERIALIZED (
  SELECT DISTINCT m.artifact_id AS identity FROM sources s JOIN memberships m ON m.source_id=s.id WHERE s.enabled=1
 ), states AS MATERIALIZED (
- SELECT k.identity, CASE
+ SELECT k.identity, EXISTS(SELECT 1 FROM egress_export_eligible e WHERE e.hash=u.hash) AS published, CASE
    WHEN x.identity IS NOT NULL OR g.state='BLOCKED' OR c.action='deleted' OR j.state='DELETED' THEN 'excluded'
    WHEN j.hash IS NULL THEN 'missing'
    WHEN j.tested>0 THEN 'tested' ELSE 'awaiting' END AS bucket
@@ -42,16 +44,25 @@ WITH page AS (
  LEFT JOIN egress_jobs j ON j.hash=u.hash
  LEFT JOIN input_exclusions x ON x.identity=k.identity
  LEFT JOIN egress_iran_guard g ON g.identity=k.identity
- LEFT JOIN config_controls c ON c.id=k.identity AND c.expires>?
+ LEFT JOIN config_controls c ON c.id=k.identity AND c.expires>?3
+), withdrawn AS MATERIALIZED (
+ SELECT b.source_id,u.identity FROM egress_first_backlog b
+ JOIN sources s ON s.id=b.source_id AND s.enabled=1
+ JOIN egress_unique u ON u.hash=b.hash JOIN egress_jobs j ON j.hash=b.hash
+ WHERE j.tested=0 AND j.first_completed=0 AND j.state!='DELETED'
+ AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.source_id=b.source_id AND m.artifact_id=u.identity)
+ AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=u.identity)
+ AND NOT EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=u.identity AND g.state='BLOCKED')
+ AND NOT EXISTS(SELECT 1 FROM config_controls c WHERE c.id=u.identity AND c.action='deleted' AND c.expires>?3)
 )
-SELECT 0 AS scope,'' AS id,'' AS name,(SELECT count(*) FROM sources WHERE enabled=1),` + egressCoverageAggregates + ` FROM states v
-UNION ALL SELECT 1,p.id,p.name,0,` + egressCoverageAggregates + ` FROM page p
+SELECT 0 AS scope,'' AS id,'' AS name,(SELECT count(*) FROM sources WHERE enabled=1),` + egressCoverageAggregates + `,(SELECT count(DISTINCT identity) FROM withdrawn) FROM states v
+UNION ALL SELECT 1,p.id,p.name,0,` + egressCoverageAggregates + `,(SELECT count(*) FROM withdrawn w WHERE w.source_id=p.id) FROM page p
  LEFT JOIN memberships m ON m.source_id=p.id LEFT JOIN states v ON v.identity=m.artifact_id
- GROUP BY p.id,p.name ORDER BY scope,id`
+ GROUP BY p.id,p.name ORDER BY scope,id)`
 
 const egressCoverageAggregates = `count(v.identity),
  count(*) FILTER(WHERE v.bucket='tested'), count(*) FILTER(WHERE v.bucket='awaiting'),
- count(*) FILTER(WHERE v.bucket='excluded'), count(*) FILTER(WHERE v.bucket='missing')`
+ count(*) FILTER(WHERE v.bucket='excluded'), count(*) FILTER(WHERE v.bucket='missing'), count(*) FILTER(WHERE v.published=1)`
 
 // A source may have a URL or a pasted configuration as its user-supplied
 // label. Return only short, human-readable labels; its opaque ID still
@@ -87,7 +98,12 @@ func (m egressModule) sourceCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer done()
-	rows, err := m.s.store.read(ctx).QueryContext(ctx, egressSourceCoverageSQL, egressSourcePageSize, offset, readStamp(ctx))
+	db, err := freezeEgress(ctx, m.s.store.read(ctx))
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	rows, err := db.QueryContext(ctx, egressSourceCoverageSQL, egressSourcePageSize, offset, readStamp(ctx))
 	if err != nil {
 		failure(w, err)
 		return
@@ -99,7 +115,7 @@ func (m egressModule) sourceCoverage(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var row egressSourceRow
 		var scope, total int
-		if err = rows.Scan(&scope, &row.ID, &row.Name, &total, &row.Current, &row.Tested, &row.Awaiting, &row.Excluded, &row.Missing); err != nil {
+		if err = rows.Scan(&scope, &row.ID, &row.Name, &total, &row.Current, &row.Tested, &row.Awaiting, &row.Excluded, &row.Missing, &row.Published, &row.WithdrawnAwaitingFirst); err != nil {
 			failure(w, err)
 			return
 		}

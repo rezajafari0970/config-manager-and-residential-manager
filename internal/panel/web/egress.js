@@ -10,7 +10,7 @@ function sourceCoverage(){
  const prev=$('#egress-source-prev'), next=$('#egress-source-next');
  let offset=0, pageSize=50, busy=false, nextRefresh=0;
  function row(label,c){
-  return '<tr><th scope="row">'+esc(label)+'</th>'+[c.current_unique,c.registered,c.current_tested,c.awaiting,c.excluded,c.missing_job].map(v=>'<td>'+fa.format(v)+'</td>').join('')+'</tr>';
+  return '<tr><th scope="row">'+esc(label)+'</th>'+[c.current_unique,c.registered,c.current_tested,c.awaiting,c.excluded,c.missing_job,c.published,c.withdrawn_awaiting_first].map(v=>'<td>'+fa.format(v)+'</td>').join('')+'</tr>';
  }
  async function refresh(force=false){
   if(!panel.open || busy || (!force && performance.now()<nextRefresh))return;
