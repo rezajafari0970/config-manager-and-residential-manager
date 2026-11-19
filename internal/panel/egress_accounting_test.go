@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -39,7 +40,8 @@ func TestEgressAccountingPartitionsAndOutputUnits(t *testing.T) {
 	exec("UPDATE egress_jobs SET candidate_hash=(SELECT candidate_hash FROM egress_jobs WHERE hash=?) WHERE hash=?", hashes[0], hashes[1])
 	exec("UPDATE egress_network_results SET candidate_hash=(SELECT candidate_hash FROM egress_jobs WHERE hash=?) WHERE hash=?", hashes[1], hashes[1])
 	exec("UPDATE egress_jobs SET paused=1 WHERE hash=?", hashes[2])
-	exec("UPDATE egress_jobs SET token='',lease_until=0,next_run=0 WHERE hash=?", hashes[3])
+	exec("UPDATE egress_jobs SET token='expired',lease_until=?,next_run=0 WHERE hash=?", now, hashes[3])
+	exec("UPDATE egress_jobs SET decision=json_set(decision,'$.route','PARTIAL_DIFFERENCE') WHERE hash IN (?,?)", hashes[3], hashes[4])
 	exec("UPDATE egress_jobs SET token='',lease_until=0,next_run=?,tested=1 WHERE hash=?", now+60000, hashes[4])
 	exec("DELETE FROM memberships WHERE raw_hash=?", hashes[4])
 	// Sixth is actively leased: never count it again as due.
@@ -47,6 +49,10 @@ func TestEgressAccountingPartitionsAndOutputUnits(t *testing.T) {
 	q, err := freezeEgress(frozen, s.db)
 	if err != nil {
 		t.Fatal(err)
+	}
+	inventory, err := readEgressInventoryCounts(frozen, q)
+	if err != nil || inventory.partial != 1 || inventory.recoverable != 1 || inventory.states["RESIDENTIAL"] != 2 || inventory.states["PENDING"] != 3 {
+		t.Fatal("incorrect scoped inventory", inventory, err)
 	}
 	a, err := egressAccounting(frozen, q)
 	if err != nil {
@@ -213,4 +219,51 @@ func TestEgressExpiredHoldsStayOutOfResidentialRenewalCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(0, 0, 0, 1, 1, 1, 1)
+}
+
+func TestInventoryCountsReadWorkOnceAndUsePartialIndex(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	frozen, err := freezeEgress(ctx, s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := readEgressInventoryCounts(ctx, frozen)
+	if err != nil || empty.total != 0 || empty.partial != 0 || empty.recoverable != 0 || len(empty.states) != 0 || len(empty.queue) != 5 {
+		t.Fatal("empty inventory counts", empty, err)
+	}
+	for bucket, n := range empty.queue {
+		if n != 0 {
+			t.Fatal(bucket, n)
+		}
+	}
+	query := frozen.(egressSnapshotReader).query(egressInventoryCountsSQL)
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+query, readStamp(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var scopeScans int
+	var sparsePartial, keyedWork bool
+	for rows.Next() {
+		var id, p, n int
+		var detail string
+		if err := rows.Scan(&id, &p, &n, &detail); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case detail == "SCAN c":
+			scopeScans++
+		case strings.Contains(detail, "USING INDEX egress_partial"):
+			sparsePartial = true
+		case strings.HasPrefix(detail, "SEARCH w ") && strings.Contains(detail, "(hash=?)"):
+			keyedWork = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if scopeScans != 2 || !sparsePartial || !keyedWork {
+		t.Fatalf("inventory/work scans=%d partial route index=%t work lookup=%t", scopeScans, sparsePartial, keyedWork)
+	}
 }

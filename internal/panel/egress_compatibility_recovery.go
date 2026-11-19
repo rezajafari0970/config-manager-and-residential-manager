@@ -3,7 +3,6 @@ package panel
 import (
 	"database/sql"
 	"encoding/json"
-	"strings"
 
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
@@ -50,6 +49,13 @@ const compatibilitySchema = `
  UPDATE egress_jobs SET next_run=0 WHERE hash IN(SELECT r.hash FROM egress_compatibility_receipts r
  JOIN egress_compatibility_queue p ON p.hash=r.hash AND p.source_id=NEW.source_id WHERE r.identity=NEW.artifact_id AND r.closed=0)
  AND attempts=1 AND token=''; END;
+ CREATE TRIGGER IF NOT EXISTS egress_compatibility_enabled AFTER UPDATE OF enabled ON sources WHEN OLD.enabled=0 AND NEW.enabled=1 BEGIN
+ INSERT OR IGNORE INTO egress_compatibility_queue(hash,source_id)
+ SELECT r.hash,NEW.id FROM egress_compatibility_receipts r JOIN egress_unique u ON u.hash=r.hash AND u.identity=r.identity
+ JOIN memberships m ON m.artifact_id=u.identity AND m.source_id=NEW.id
+ WHERE r.closed=0;
+ UPDATE egress_jobs SET next_run=0 WHERE attempts=1 AND token=''
+ AND hash IN (SELECT hash FROM egress_compatibility_queue WHERE source_id=NEW.id); END;
  CREATE TRIGGER IF NOT EXISTS egress_compatibility_representative AFTER DELETE ON egress_unique BEGIN
  DELETE FROM egress_compatibility_queue WHERE hash=OLD.hash; END;`
 
@@ -60,7 +66,7 @@ const compatibilityOwners = `SELECT u.hash,m.source_id FROM memberships m JOIN e
  UNION SELECT b.hash,b.source_id FROM conversion_first_backlog b JOIN egress_unique u ON u.identity=b.identity AND u.hash=b.hash`
 
 func (s *Store) recoverCompatibleReceipts(tx *sql.Tx) error {
-	if _, err := tx.Exec(compatibilitySchema + strings.NewReplacer("egress_retirement_fence_", "egress_compatibility_fence_", "egress_retirement_sources", "egress_compatibility_queue").Replace(retirementFences)); err != nil {
+	if _, err := tx.Exec(compatibilitySchema + supplementalSourceFences("egress_compatibility", "egress_compatibility_queue")); err != nil {
 		return err
 	}
 	rows, err := tx.Query(`SELECT j.hash FROM egress_jobs j CROSS JOIN egress_unique u ON u.hash=j.hash

@@ -51,7 +51,7 @@ const egressInventoryCandidates = `SELECT u.hash FROM (SELECT DISTINCT artifact_
  UNION SELECT hash FROM egress_first_backlog
  UNION SELECT hash FROM egress_compatibility_queue
  UNION SELECT hash FROM egress_retirement_sources
- UNION SELECT hash FROM egress_first_history WHERE phase='active'
+ UNION SELECT hash FROM egress_first_history INDEXED BY egress_first_history_active_due WHERE phase='active'
  UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1
  UNION SELECT u.hash FROM egress_iran_guard g CROSS JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'`
 

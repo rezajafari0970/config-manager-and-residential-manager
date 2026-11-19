@@ -81,10 +81,13 @@ func TestV54CompatibleDriverRecoversOnlyBoundUnmeasuredScope(t *testing.T) {
 				if err != nil || j != nil {
 					t.Fatal("unauthorized supplemental work", err)
 				}
-				if mode != "returned" {
+				if mode == "returned" {
+					commitProbeInputs(t, s, id, raw)
+				} else if mode == "disabled" {
+					exec("UPDATE sources SET enabled=1 WHERE id=?", id)
+				} else {
 					return
 				}
-				commitProbeInputs(t, s, id, raw)
 			}
 			next, err := s.ClaimEgress(ctx)
 			if err != nil || next == nil || next.Hash != first.Hash {

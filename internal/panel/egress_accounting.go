@@ -5,24 +5,19 @@ import "context"
 // Every public count and queue partition uses the same durable identity
 // representative. Archive bytes and staging are storage, not pending work.
 func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, error) {
-	now := readStamp(ctx)
-	var total, paused, running, due, scheduled, cached, first, assessed, retained int
-	var enabled bool
-	err := q.QueryRowContext(ctx, `SELECT (SELECT enabled FROM egress_settings WHERE id=1),count(*),
- coalesce(sum(paused!=0),0),
- coalesce(sum(paused=0 AND token!='' AND lease_until>?),0),
- coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND (next_run<=? OR (ever_accepted=1 AND tested>0 AND retry_streak=0 AND valid_until>? AND valid_until<=?))),0),
- coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND NOT (next_run<=? OR (ever_accepted=1 AND tested>0 AND retry_streak=0 AND valid_until>? AND valid_until<=?))),0),
- coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash NOT IN(SELECT hash FROM egress_work)),0),
- coalesce(sum(tested=0),0),coalesce(sum(tested>0),0),coalesce(sum(ever_accepted=1),0)
- FROM egress_inventory`, now, now, now, now, now+120000, now, now, now, now+120000, now).Scan(&enabled, &total, &paused, &running, &due, &scheduled, &cached, &first, &assessed, &retained)
+	inventory, err := readEgressInventoryCounts(ctx, q)
 	if err != nil {
 		return nil, err
 	}
+	return inventory.accounting(ctx, q)
+}
+
+func (inventory egressInventoryCounts) accounting(ctx context.Context, q databaseQuery) (map[string]any, error) {
+	now := readStamp(ctx)
 	// Count committed identities once, using the same states as the source table.
 	// An identity retained after withdrawal belongs only in the maintenance totals.
 	var current, currentTested, currentAwaiting, currentExcluded, interrupted, exhausted, missing int
-	err = q.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER(WHERE bucket='tested'),
+	err := q.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER(WHERE bucket='tested'),
  count(*) FILTER(WHERE bucket='awaiting'),count(*) FILTER(WHERE bucket='excluded'),count(*) FILTER(WHERE bucket='missing'),
  count(*) FILTER(WHERE bucket='awaiting' AND reason IN ('initial_lease_interrupted','initial_lease_recovery')),
  count(*) FILTER(WHERE bucket='awaiting' AND reason='initial_lease_exhausted')
@@ -72,9 +67,7 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	}
 	// A global pause stops new grants. Already leased and cached identities
 	// keep their state until the worker returns or the lease expires.
-	if !enabled {
-		paused += due + scheduled
-		due, scheduled = 0, 0
+	if !inventory.enabled {
 		renewal["paused"] += renewal["due"] + renewal["scheduled"]
 		renewal["due"], renewal["scheduled"] = 0, 0
 	}
@@ -88,16 +81,16 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	}
 	awaiting := renewal["paused"] + renewal["running"] + renewal["due"] + renewal["scheduled"] + renewal["cached"]
 	return map[string]any{
-		"at": now, "unit": "collector_identity", "live_versions": total, "current_identities": current, "current_versions": raws,
-		"current_live_versions": total - outside, "archive_versions": outside, "deleted_versions": deleted,
+		"at": now, "unit": "collector_identity", "live_versions": inventory.total, "current_identities": current, "current_versions": raws,
+		"current_live_versions": inventory.total - outside, "archive_versions": outside, "deleted_versions": deleted,
 		"coverage_missing": missing, "staged_coverage_missing": stagedMissing, "staged_versions": staged,
 		"archive_recovery":   archive,
 		"first_assessment":   firstProgress,
 		"current_assessment": map[string]int{"tested": currentTested, "awaiting": currentAwaiting, "excluded": currentExcluded, "missing": missing, "interrupted": interrupted, "exhausted": exhausted},
-		"awaiting_first":     first, "assessed_versions": assessed, "retained_outside_current": retainedOutside,
-		"queue":   map[string]int{"paused": paused, "running": running, "due": due, "scheduled": scheduled, "cached": cached},
+		"awaiting_first":     inventory.first, "assessed_versions": inventory.assessed, "retained_outside_current": retainedOutside,
+		"queue":   inventory.queue,
 		"renewal": renewal, "safety_review": safety,
-		"publication": map[string]int{"retained": retained, "awaiting_proof": awaiting, "route_verified": routeEligible, "eligible": eligible,
+		"publication": map[string]int{"retained": inventory.retained, "awaiting_proof": awaiting, "route_verified": routeEligible, "eligible": eligible,
 			"hosting": hosting, "mixed": mixed, "network_unverified": routeEligible - eligible - hosting - mixed, "eligible_network_unattributed": eligible - access, "eligible_with_shared_hosting": shared,
 			"country_unknown": eligible - known, "country_filtered": known - published, "published": published, "raw_count": published, "template_count": published, "tested_template_count": published, "distinct_templates": templates, "identities": identities},
 	}, nil

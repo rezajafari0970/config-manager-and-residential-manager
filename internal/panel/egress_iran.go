@@ -177,6 +177,6 @@ func (s *Store) applyIran(ctx context.Context, tx *sql.Tx, r egress.Report, p eg
 
 func iranState(ctx context.Context, q databaseQuery, now int64) (map[string]any, error) {
 	var quarantined, blocked, overdue int
-	e := q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM egress_iran_guard WHERE state='QUARANTINED'),(SELECT count(*) FROM egress_iran_guard WHERE state='BLOCKED'),(SELECT count(*) FROM egress_jobs WHERE state!='DELETED' AND paused=0 AND ever_accepted=1 AND tested<=?)`, now-egress.IranInterval).Scan(&quarantined, &blocked, &overdue)
+	e := q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM egress_iran_guard WHERE state='QUARANTINED'),(SELECT count(*) FROM egress_iran_guard WHERE state='BLOCKED'),(SELECT count(*) FROM egress_jobs INDEXED BY egress_accepted WHERE state!='DELETED' AND paused=0 AND ever_accepted=1 AND tested<=?)`, now-egress.IranInterval).Scan(&quarantined, &blocked, &overdue)
 	return map[string]any{"version": egress.IranVersion, "interval_minutes": 10, "quarantined_identities": quarantined, "blocked_identities": blocked, "overdue_retained": overdue, "country_veto": "IR", "sticky": true}, e
 }

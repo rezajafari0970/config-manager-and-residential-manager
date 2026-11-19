@@ -45,20 +45,22 @@ const retirementSourceSchema = `
 // supplemental lease, even if the source or the same input is added again
 // before that worker returns. Independent network and Iran work retains its
 // own custody; a remaining second source also keeps this exact lease valid.
-const fenceRetirementSourceLease = `
+func supplementalSourceFences(prefix, sourceTable string) string {
+	fence := `
  UPDATE egress_jobs SET token='',lease_until=0,revision=revision+1
  WHERE ever_accepted=0 AND first_completed=1 AND token!='' AND hash IN(
- SELECT p.hash FROM egress_retirement_sources p JOIN egress_unique u ON u.hash=p.hash
- WHERE p.source_id=OLD.id AND NOT EXISTS(SELECT 1 FROM egress_retirement_sources other JOIN sources s ON s.id=other.source_id
+ SELECT p.hash FROM ` + sourceTable + ` p JOIN egress_unique u ON u.hash=p.hash
+ WHERE p.source_id=OLD.id AND NOT EXISTS(SELECT 1 FROM ` + sourceTable + ` other JOIN sources s ON s.id=other.source_id
  WHERE other.hash=p.hash AND other.source_id!=OLD.id AND s.enabled=1)
  AND NOT EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=u.identity)
  AND NOT EXISTS(SELECT 1 FROM egress_network_review v WHERE v.identity=u.identity)
  AND NOT EXISTS(SELECT 1 FROM egress_network_results n WHERE n.identity=u.identity AND n.held=1 AND n.clean_rounds=1));`
 
-const retirementFences = `
- CREATE TRIGGER IF NOT EXISTS egress_retirement_fence_source BEFORE UPDATE OF url_hash,enabled ON sources
- WHEN NEW.url_hash!=OLD.url_hash OR (OLD.enabled=1 AND NEW.enabled=0) BEGIN ` + fenceRetirementSourceLease + ` END;
- CREATE TRIGGER IF NOT EXISTS egress_retirement_fence_deleted BEFORE DELETE ON sources BEGIN ` + fenceRetirementSourceLease + ` END;`
+	return `
+ CREATE TRIGGER IF NOT EXISTS ` + prefix + `_fence_source BEFORE UPDATE OF url_hash,enabled ON sources
+ WHEN NEW.url_hash!=OLD.url_hash OR (OLD.enabled=1 AND NEW.enabled=0) BEGIN ` + fence + ` END;
+ CREATE TRIGGER IF NOT EXISTS ` + prefix + `_fence_deleted BEFORE DELETE ON sources BEGIN ` + fence + ` END;`
+}
 
 func retainRetirementSources(ctx context.Context, tx *sql.Tx, hash string) error {
 	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO egress_retirement_limits(hash,through_attempt)
@@ -86,7 +88,7 @@ func (s *Store) migrateV54() error {
 	if err = tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version >= 54 {
 		return err
 	}
-	if _, err = tx.Exec(retirementSourceSchema + retirementFences); err != nil {
+	if _, err = tx.Exec(retirementSourceSchema + supplementalSourceFences("egress_retirement", "egress_retirement_sources")); err != nil {
 		return err
 	}
 	// Reconstruct ownership only from an accepted membership or an exact,

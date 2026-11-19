@@ -109,33 +109,12 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		failure(w, e)
 		return
 	}
-	counts := map[string]int{}
-	rows, e := db.QueryContext(ctx, "SELECT state,count(*) FROM egress_inventory WHERE state!='DELETED' GROUP BY state")
+	inventory, e := readEgressInventoryCounts(ctx, db)
 	if e != nil {
 		failure(w, e)
 		return
 	}
-	for rows.Next() {
-		var k string
-		var n int
-		if e = rows.Scan(&k, &n); e != nil {
-			rows.Close()
-			failure(w, e)
-			return
-		}
-		counts[k] = n
-	}
-	if e = rows.Err(); e != nil {
-		rows.Close()
-		failure(w, e)
-		return
-	}
-	rows.Close()
-	var total, pending int
-	if e = db.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(tested=0),0) FROM egress_inventory WHERE state!='DELETED'").Scan(&total, &pending); e != nil {
-		failure(w, e)
-		return
-	}
+	counts := inventory.states
 	var status, code string
 	var heartbeat int64
 	var active int
@@ -186,7 +165,7 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
  FROM ` + table + ` WHERE state!='DELETED'` + filter + ` ORDER BY tested DESC,hash LIMIT 50 OFFSET ?) j
  LEFT JOIN egress_unique u ON u.hash=j.hash LEFT JOIN egress_network_results n ON n.identity=u.identity LEFT JOIN egress_network_review v ON v.identity=u.identity
  LEFT JOIN egress_health h ON h.hash=j.hash ORDER BY j.tested DESC,j.hash`
-	rows, e = db.QueryContext(ctx, query, args...)
+	rows, e := db.QueryContext(ctx, query, args...)
 	if e != nil {
 		failure(w, e)
 		return
@@ -262,11 +241,6 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	var partial int
-	if e = db.QueryRowContext(ctx, "SELECT count(*) FROM egress_inventory WHERE state!='DELETED' AND json_extract(decision,'$.route')='PARTIAL_DIFFERENCE'").Scan(&partial); e != nil {
-		failure(w, e)
-		return
-	}
 	var completed, definitive, completed10, definitive10, unique5, unique10, conclusive5, conclusive10, firstSettled5, previouslySettled5 int
 	now := readStamp(ctx)
 	start5 := now - 300000
@@ -285,11 +259,6 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		failure(w, err)
 		return
 	}
-	var recovery int
-	if e = db.QueryRowContext(ctx, "SELECT count(*) FROM egress_work WHERE paused=0 AND token!='' AND lease_until<=?", now).Scan(&recovery); e != nil {
-		failure(w, e)
-		return
-	}
 	countryInfo, err := countryState(ctx, db)
 	if err != nil {
 		failure(w, err)
@@ -300,7 +269,7 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		failure(w, err)
 		return
 	}
-	accounting, err := egressAccounting(ctx, db)
+	accounting, err := inventory.accounting(ctx, db)
 	if err != nil {
 		failure(w, err)
 		return
@@ -337,7 +306,7 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		failure(w, e)
 		return
 	}
-	respond(w, 200, map[string]any{"datacenter_rejections": map[string]any{"count": dcRejected, "review_pending": reviewPending, "review_inconclusive": reviewInconclusive, "raw_url": m.datacenterRejectedURL()}, "profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": recovery, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"target_5m": 500, "first_settled_5m": firstSettled5, "previously_settled_5m": previouslySettled5, "settlement_unknown_5m": conclusive5 - firstSettled5 - previouslySettled5, "unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": total, "pending": pending, "partial": partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "At least one complete Ads profile must pass the route and delivery checks in raw and template. A hosting exit blocks publication when two waves independently separate that Ads flow from same-family ordinary Google and independent controls. Shared hosting and observations with insufficient comparisons are reported separately. An unresolved hosting observation withholds the affected profile. Unknown network ownership alone does not block it.", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
+	respond(w, 200, map[string]any{"datacenter_rejections": map[string]any{"count": dcRejected, "review_pending": reviewPending, "review_inconclusive": reviewInconclusive, "raw_url": m.datacenterRejectedURL()}, "profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": inventory.recoverable, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"target_5m": 500, "first_settled_5m": firstSettled5, "previously_settled_5m": previouslySettled5, "settlement_unknown_5m": conclusive5 - firstSettled5 - previouslySettled5, "unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": inventory.total, "pending": inventory.first, "partial": inventory.partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "At least one complete Ads profile must pass the route and delivery checks in raw and template. A hosting exit blocks publication when two waves independently separate that Ads flow from same-family ordinary Google and independent controls. Shared hosting and observations with insufficient comparisons are reported separately. An unresolved hosting observation withholds the affected profile. Unknown network ownership alone does not block it.", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
 }
 
 type egressExportEntry struct {
