@@ -92,9 +92,6 @@ func TestRenewalDeadlinesAheadOfOrdinaryReviews(t *testing.T) {
 		hashes = append(hashes, job.Hash)
 	}
 	review, first, second := hashes[0], hashes[1], hashes[2]
-	if _, err := s.db.Exec(`INSERT INTO egress_network_review(identity,attempts) SELECT identity,1 FROM egress_unique WHERE hash=?`, review); err != nil {
-		t.Fatal(err)
-	}
 	type schedule struct{ expiresIn, dueIn, retryStreak int64 }
 	later := schedule{360000, 300000, 0}
 	for _, tc := range []struct {
@@ -114,6 +111,10 @@ func TestRenewalDeadlinesAheadOfOrdinaryReviews(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := egress.Now()
+			if _, err := s.db.Exec(`INSERT INTO egress_network_review(identity,attempts) SELECT identity,1 FROM egress_unique WHERE hash=?
+ ON CONFLICT(identity) DO UPDATE SET attempts=1`, review); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := s.db.Exec("UPDATE egress_jobs SET token='',lease_until=0,next_run=0,valid_until=0 WHERE hash=?", review); err != nil {
 				t.Fatal(err)
 			}
