@@ -2,8 +2,12 @@ package panel
 
 import (
 	"context"
+	"encoding/base64"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/collect"
 
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
@@ -98,4 +102,33 @@ func TestMigrationRestoresArchivedInitialReceiptWithoutRequeue(t *testing.T) {
 	}
 	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND state='UNKNOWN' AND reason=json_extract(decision,'$.reason') AND tested=? AND attempts=1 AND token='' AND valid_until=0", j.Hash, r.Finished)
 	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work")
+}
+
+func TestAmbiguousVMessCompletesOnlyItsStaticFirstAssessment(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	id, err := s.Save(ctx, "", 0, testSource())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"add":"192.0.2.1","port":"443","id":"00000000-0000-4000-8000-000000000001","net":"ws","tls":"auto","scy":"auto"}`))
+	result := fixtureResult(t, s, raw)
+	result.Items[0].Kind = "vmess"
+	result.Items[0].Identity = collect.Fingerprint([]byte(raw), true, "vmess", result.Items[0].Hash)
+	if err = s.Complete(ctx, claimOne(t, s, id), result, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.ClaimEgress(ctx)
+	if err != nil || j == nil || j.Kind != "vmess" {
+		t.Fatal("first grant", err)
+	}
+	n := egress.Now()
+	r := egress.Report{Version: egress.Version, Hash: j.Hash, Started: n, Finished: n, Code: egress.AmbiguousVMessTransport}
+	if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != nil {
+		t.Fatal(err)
+	}
+	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND first_completed=1 AND ever_accepted=0 AND state='UNSUPPORTED' AND reason=? AND candidate_hash='' AND valid_until=0", j.Hash, r.Code)
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work WHERE hash=?", j.Hash)
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_network_results WHERE held=1")
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_export_eligible")
 }
