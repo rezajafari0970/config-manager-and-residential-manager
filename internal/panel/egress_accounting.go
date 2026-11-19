@@ -10,19 +10,28 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 	err := q.QueryRowContext(ctx, `SELECT count(*),
  coalesce(sum(paused!=0),0),
  coalesce(sum(paused=0 AND token!='' AND lease_until>?),0),
- coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND (next_run<=? OR (ever_accepted=1 AND tested>0 AND valid_until>? AND valid_until<=?))),0),
- coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND NOT (next_run<=? OR (ever_accepted=1 AND tested>0 AND valid_until>? AND valid_until<=?))),0),
+ coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND (next_run<=? OR (ever_accepted=1 AND tested>0 AND retry_streak=0 AND valid_until>? AND valid_until<=?))),0),
+ coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash IN(SELECT hash FROM egress_work) AND NOT (next_run<=? OR (ever_accepted=1 AND tested>0 AND retry_streak=0 AND valid_until>? AND valid_until<=?))),0),
  coalesce(sum(paused=0 AND (token='' OR lease_until<=?) AND hash NOT IN(SELECT hash FROM egress_work)),0),
  coalesce(sum(tested=0),0),coalesce(sum(tested>0),0),coalesce(sum(ever_accepted=1),0)
  FROM egress_inventory`, now, now, now, now, now+120000, now, now, now, now+120000, now).Scan(&total, &paused, &running, &due, &scheduled, &cached, &first, &assessed, &retained)
 	if err != nil {
 		return nil, err
 	}
-	var current, raws, missing, retainedOutside, outside, deleted, staged, stagedMissing int
+	// Count committed identities once, using the same states as the source table.
+	// An identity retained after withdrawal belongs only in the maintenance totals.
+	var current, currentTested, currentAwaiting, currentExcluded, interrupted, exhausted, missing int
+	err = q.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER(WHERE bucket='tested'),
+ count(*) FILTER(WHERE bucket='awaiting'),count(*) FILTER(WHERE bucket='excluded'),count(*) FILTER(WHERE bucket='missing'),
+ count(*) FILTER(WHERE bucket='awaiting' AND reason='initial_lease_interrupted'),
+ count(*) FILTER(WHERE bucket='awaiting' AND reason='initial_lease_exhausted')
+ FROM (SELECT `+currentEgressBucket+` AS bucket,j.reason FROM (SELECT DISTINCT artifact_id AS identity FROM memberships) k `+currentEgressJoins+` AND c.expires>?)`, now).Scan(&current, &currentTested, &currentAwaiting, &currentExcluded, &missing, &interrupted, &exhausted)
+	if err != nil {
+		return nil, err
+	}
+	var raws, retainedOutside, outside, deleted, staged, stagedMissing int
 	err = q.QueryRowContext(ctx, `SELECT
- (SELECT count(DISTINCT artifact_id) FROM memberships),
  (SELECT count(DISTINCT raw_hash) FROM memberships),
- (SELECT count(DISTINCT artifact_id) FROM memberships m WHERE NOT EXISTS(SELECT 1 FROM egress_unique u WHERE u.identity=m.artifact_id) AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=m.artifact_id)),
  (SELECT count(*) FROM egress_unique u JOIN egress_inventory j ON j.hash=u.hash WHERE j.ever_accepted=1 AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.artifact_id=u.identity)),
  (SELECT count(*) FROM egress_unique u JOIN egress_inventory j ON j.hash=u.hash WHERE NOT EXISTS(SELECT 1 FROM memberships m WHERE m.artifact_id=u.identity)),
  (SELECT count(*) FROM egress_unique u JOIN egress_jobs j ON j.hash=u.hash WHERE j.state='DELETED'),
@@ -30,7 +39,7 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
    WHERE s.enabled=1 AND s.lease_until>?),
  (SELECT count(DISTINCT t.hash) FROM sources s JOIN staged t ON t.token=s.lease_token AND t.source_id=s.id
    WHERE s.enabled=1 AND s.lease_until>? AND NOT EXISTS(SELECT 1 FROM egress_jobs j WHERE j.hash=t.hash)
-   AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=t.identity))`, now, now).Scan(&current, &raws, &missing, &retainedOutside, &outside, &deleted, &staged, &stagedMissing)
+   AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=t.identity))`, now, now).Scan(&raws, &retainedOutside, &outside, &deleted, &staged, &stagedMissing)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +73,8 @@ func egressAccounting(ctx context.Context, q databaseQuery) (map[string]any, err
 		"at": now, "unit": "collector_identity", "live_versions": total, "current_identities": current, "current_versions": raws,
 		"current_live_versions": total - outside, "archive_versions": outside, "deleted_versions": deleted,
 		"coverage_missing": missing, "staged_coverage_missing": stagedMissing, "staged_versions": staged,
-		"awaiting_first": first, "assessed_versions": assessed, "retained_outside_current": retainedOutside,
+		"current_assessment": map[string]int{"tested": currentTested, "awaiting": currentAwaiting, "excluded": currentExcluded, "missing": missing, "interrupted": interrupted, "exhausted": exhausted},
+		"awaiting_first":     first, "assessed_versions": assessed, "retained_outside_current": retainedOutside,
 		"queue":   map[string]int{"paused": paused, "running": running, "due": due, "scheduled": scheduled, "cached": cached},
 		"renewal": renewal, "safety_review": safety,
 		"publication": map[string]int{"retained": retained, "awaiting_proof": awaiting, "route_verified": routeEligible, "eligible": eligible,
@@ -88,7 +98,7 @@ func egressRenewalCounts(ctx context.Context, q databaseQuery, now int64) (map[s
    WHEN j.paused!=0 THEN 'paused'
    WHEN j.token!='' AND j.lease_until>? THEN 'running'
    WHEN j.hash NOT IN (SELECT hash FROM egress_work) THEN 'cached'
-   WHEN j.next_run<=? OR (j.tested>0 AND j.valid_until>? AND j.valid_until<=?) THEN 'due'
+   WHEN j.next_run<=? OR (j.tested>0 AND j.retry_streak=0 AND j.valid_until>? AND j.valid_until<=?) THEN 'due'
    ELSE 'scheduled' END AS bucket
  FROM egress_inventory j JOIN egress_unique u ON u.hash=j.hash
  LEFT JOIN egress_iran_guard g ON g.identity=u.identity

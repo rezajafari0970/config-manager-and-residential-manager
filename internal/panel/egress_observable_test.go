@@ -53,7 +53,7 @@ func TestPolicyUpgradeFencesLegacyReceiptsWithoutImplicitReset(t *testing.T) {
 		if attempts != 3 || first != 1 || !strings.Contains(report, "historical") {
 			t.Fatal("history erased", state, attempts, first, report)
 		}
-		if x.state == "DELETED" {
+		if x.accepted == 0 {
 			if state != x.state || reason != x.reason || tested != now || revision != 7 || deep != 1 || retry != 2 {
 				t.Fatal("unaffected verdict changed", state, reason, tested, revision, deep, retry)
 			}
@@ -76,7 +76,7 @@ func TestPolicyUpgradeFencesLegacyReceiptsWithoutImplicitReset(t *testing.T) {
 	}
 	var revision int
 	s.db.QueryRow("SELECT revision FROM egress_jobs WHERE hash=?", fmt.Sprintf("%064x", 3)).Scan(&revision)
-	if revision != 8 {
+	if revision != 7 {
 		t.Fatal("startup repeated invalidation", revision)
 	}
 }

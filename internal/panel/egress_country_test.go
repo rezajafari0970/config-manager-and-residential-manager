@@ -140,7 +140,7 @@ func TestEgressCountryFactsCannotQualifyMissingConflictingOrStale(t *testing.T) 
 	}
 }
 
-func TestEgressFirstDeepRetrySurvivesArchivedRetention(t *testing.T) {
+func TestEgressUncertainFirstResultSurvivesArchivedRetention(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	newExportSource(t, s, "archive", sourceURI(225))
@@ -160,19 +160,8 @@ func TestEgressFirstDeepRetrySurvivesArchivedRetention(t *testing.T) {
 		t.Fatal(e)
 	}
 	next, e := s.ClaimEgress(ctx)
-	if e != nil || next == nil || !next.Deep {
-		t.Fatal("deep retry lost", next, e)
-	}
-	if e = s.Expire(ctx, time.Now()); e != nil {
-		t.Fatal(e)
-	}
-	r = syntheticEgress(*next)
-	r.Samples = nil
-	if e = s.CompleteEgress(ctx, egress.Completion{Job: *next, Report: r}); e != nil {
-		t.Fatal(e)
-	}
-	if e = s.Expire(ctx, time.Now()); e != nil {
-		t.Fatal(e)
+	if e != nil || next != nil {
+		t.Fatal("ordinary retention repeated a completed evaluation", next, e)
 	}
 	var state string
 	if e = s.db.QueryRow("SELECT state FROM egress_jobs WHERE hash=?", j.Hash).Scan(&state); e != nil || state == "DELETED" {

@@ -105,6 +105,17 @@ func TestEgressReimportDoesNotResetHistoricalAssessment(t *testing.T) {
 	if e != nil || j != nil {
 		t.Fatal(j, e)
 	}
+	id, err := s.Save(ctx, "", 0, testSource())
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := acquisitionResult(t, s, sourceURI(232))
+	sourceJob := claimOne(t, s, id)
+	if _, err = s.StageBatch(ctx, sourceJob, batch.Items); err != nil {
+		t.Fatal(err)
+	}
+	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_jobs WHERE state='DELETED' AND tested=123 AND attempts=5")
+
 }
 
 func TestEgressStagedInputsSurviveFailedSourceProcessing(t *testing.T) {

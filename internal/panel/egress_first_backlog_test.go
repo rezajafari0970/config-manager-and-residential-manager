@@ -233,7 +233,7 @@ func TestFirstAssessmentMigrationPreservesEvidenceAndBackup(t *testing.T) {
 	if err = reopened.migrateV47(); err != nil {
 		t.Fatal(err)
 	}
-	pendingCount(t, reopened.db, 47, "PRAGMA user_version")
+	pendingCount(t, reopened.db, 48, "PRAGMA user_version")
 	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM egress_export_eligible WHERE hash=?", first.Hash)
 	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM egress_events WHERE hash=?", first.Hash)
 	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM memberships WHERE source_id=?", id)

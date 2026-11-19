@@ -6,8 +6,6 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
-// A reset is a durable finite cohort, not a reset of lifetime audit counters.
-// Old leases are fenced; old receipts remain diagnostic and cannot publish.
 func (s *Store) migrateV33() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -46,13 +44,16 @@ func (s *Store) migrateV33() error {
 	return tx.Commit()
 }
 
+// ResetEgress opens a finite audit cohort over outstanding first assessments.
+// Workers retain their leases and schedules. A repeated request for an active
+// cohort reuses it, and a completed cohort with no new inputs remains intact.
 func (s *Store) ResetEgress(ctx context.Context, revision int64) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "UPDATE egress_settings SET generation=generation+1 WHERE id=1"); err != nil {
+	if _, err = tx.ExecContext(ctx, "UPDATE egress_settings SET generation=generation WHERE id=1"); err != nil {
 		return 0, err
 	}
 	var current int64
@@ -62,8 +63,11 @@ func (s *Store) ResetEgress(ctx context.Context, revision int64) (int64, error) 
 	if current != revision {
 		return 0, ErrConflict
 	}
-	now := egress.Now()
-	result, err := tx.ExecContext(ctx, "INSERT INTO egress_runs(started) VALUES(?)", now)
+	var pending bool
+	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM egress_run_members WHERE run=? AND status='pending')", current).Scan(&pending); err != nil || pending {
+		return current, err
+	}
+	result, err := tx.ExecContext(ctx, "INSERT INTO egress_runs(started) VALUES(?)", egress.Now())
 	if err != nil {
 		return 0, err
 	}
@@ -71,41 +75,31 @@ func (s *Store) ResetEgress(ctx context.Context, revision int64) (int64, error) 
 	if err != nil {
 		return 0, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO egress_run_members(run,hash,accepted)
- SELECT ?,j.hash,j.ever_accepted FROM egress_inventory j WHERE j.paused=0
+	result, err = tx.ExecContext(ctx, `INSERT INTO egress_run_members(run,hash,accepted)
+ SELECT ?,j.hash,0 FROM egress_work j WHERE j.first_completed=0 AND j.tested=0 AND j.ever_accepted=0 AND j.paused=0
  AND NOT EXISTS(SELECT 1 FROM egress_owners o JOIN input_exclusions x ON x.identity=o.identity WHERE o.hash=j.hash)
  AND NOT EXISTS(SELECT 1 FROM egress_owners o JOIN egress_iran_guard g ON g.identity=o.identity WHERE o.hash=j.hash AND g.state='BLOCKED')`, id)
 	if err != nil {
 		return 0, err
 	}
-	// Preserve every sticky guard, raw blob, source control, and prior audit event.
-	// Tested is the current assessment clock; first_completed and attempts are lifetime.
-	_, err = tx.ExecContext(ctx, `UPDATE egress_jobs SET tested=0,valid_until=0,revision=revision+1,token='',lease_until=0,next_run=0,retry_streak=0,deep_completed=0,
- state=CASE WHEN ever_accepted=1 THEN 'QUARANTINED' ELSE 'PENDING' END,
- reason=CASE WHEN reason='ads_iran_quarantined' THEN reason ELSE 'full_rescan' END
- WHERE hash IN(SELECT hash FROM egress_run_members WHERE run=?)`, id)
-	if err != nil {
-		return 0, err
-	}
-	for _, table := range []string{"egress_health", "egress_geo_results"} {
-		if _, err = tx.ExecContext(ctx, "UPDATE "+table+" SET valid_until=0 WHERE hash IN(SELECT hash FROM egress_run_members WHERE run=?)", id); err != nil {
-			return 0, err
-		}
+	inserted, err := result.RowsAffected()
+	if err != nil || inserted == 0 {
+		return current, err
 	}
 	return id, tx.Commit()
 }
 
 // Called only after current lease/revision and timestamps pass validation, in
 // the same writer transaction as completion and permanent Iran revocation.
-func recordEgressRun(ctx context.Context, tx *sql.Tx, hash, state string, definitive bool, started, finished, duration int64) error {
+func recordEgressRun(ctx context.Context, tx *sql.Tx, hash, state string, definitive bool, finished, duration int64) error {
 	_, err := tx.ExecContext(ctx, `UPDATE egress_run_members SET status='completed',completed_at=?,state=?,definitive=?,duration_ms=?
  WHERE hash=? AND status!='completed' AND run=(SELECT max(id) FROM egress_runs)
- AND EXISTS(SELECT 1 FROM egress_runs r WHERE r.id=run AND r.started<=?)`, finished, state, definitive, duration, hash, started)
+ AND EXISTS(SELECT 1 FROM egress_runs r WHERE r.id=run AND r.started<=?)`, finished, state, definitive, duration, hash, finished)
 	if err != nil {
 		return err
 	}
 	if definitive {
-		_, err = tx.ExecContext(ctx, `UPDATE egress_run_members SET settled_at=?,settled_state=? WHERE hash=? AND settled_at=0 AND status='completed' AND run=(SELECT max(id) FROM egress_runs) AND EXISTS(SELECT 1 FROM egress_runs r WHERE r.id=run AND r.started<=?)`, finished, state, hash, started)
+		_, err = tx.ExecContext(ctx, `UPDATE egress_run_members SET settled_at=?,settled_state=? WHERE hash=? AND settled_at=0 AND status='completed' AND run=(SELECT max(id) FROM egress_runs) AND EXISTS(SELECT 1 FROM egress_runs r WHERE r.id=run AND r.started<=?)`, finished, state, hash, finished)
 	}
 	return err
 }

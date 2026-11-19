@@ -62,7 +62,7 @@ func TestEgressIdentityCachesAliasesAndIgnoresArchive(t *testing.T) {
 	}
 }
 
-func TestEgressIdentityBoundedUnknownAndCurrentScopeFence(t *testing.T) {
+func TestEgressIdentityCachesUnknownAndKeepsCurrentScopeFence(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	newExportSource(t, s, "unknown", sourceURI(243))
@@ -75,19 +75,8 @@ func TestEgressIdentityBoundedUnknownAndCurrentScopeFence(t *testing.T) {
 	}
 	s.db.Exec("UPDATE egress_jobs SET next_run=0")
 	follow, err := s.ClaimEgress(ctx)
-	if err != nil || follow == nil || !follow.Deep {
-		t.Fatal(follow, err)
-	}
-	r = syntheticEgress(*follow)
-	r.Samples = nil
-	r.Health = nil
-	if err = s.CompleteEgress(ctx, egress.Completion{Job: *follow, Report: r}); err != nil {
-		t.Fatal(err)
-	}
-	s.db.Exec("UPDATE egress_jobs SET next_run=0")
-	end, err := s.ClaimEgress(ctx)
-	if err != nil || end != nil {
-		t.Fatal("unbounded unknown retry", end, err)
+	if err != nil || follow != nil {
+		t.Fatal("completed UNKNOWN automatically repeated", follow, err)
 	}
 	newExportSource(t, s, "removed", sourceURI(244))
 	pending, _ := s.ClaimEgress(ctx)

@@ -154,7 +154,9 @@ func (s *Store) reconcileEgressVersion() error {
 	}
 	current := egress.Version + "|" + convert.EnvelopeVersion + "|" + egress.PolicyDigest()
 	if previous != current {
-		where := "state!='DELETED'"
+		// Existing first receipts remain historical results across evaluator changes.
+		// Renew eligible retained evidence under the new version before publishing.
+		where := "state!='DELETED' AND (ever_accepted=1 OR (first_completed=0 AND reason NOT IN ('initial_lease_interrupted','initial_lease_exhausted')))"
 		if _, e = tx.Exec("UPDATE egress_jobs SET state=CASE WHEN ever_accepted=1 THEN 'QUARANTINED' ELSE 'PENDING' END,reason='implementation_changed',tested=0,deep_completed=0,retry_streak=0,valid_until=0,revision=revision+1,token='',lease_until=0,next_run=0 WHERE " + where); e != nil {
 			return e
 		}
@@ -181,6 +183,7 @@ func (s *Store) ensureEgressIndexes() error {
 		"CREATE INDEX IF NOT EXISTS egress_tested ON egress_jobs(tested)",
 		"CREATE INDEX IF NOT EXISTS egress_retention ON egress_jobs(first_seen) WHERE ever_accepted=0 AND tested>0 AND state!='DELETED'",
 		"CREATE INDEX IF NOT EXISTS egress_events_time ON egress_events(at)",
+		"CREATE INDEX IF NOT EXISTS egress_network_held ON egress_network_results(identity,hash) WHERE held=1",
 		// Every output checks this view; scan only conflicted identities, not large archived decisions.
 		"CREATE INDEX IF NOT EXISTS egress_iran_conflicts ON egress_jobs(hash) WHERE json_extract(decision,'$.country_conflict')=1",
 		// Claims and counters must not fetch large report pages for every archived input.

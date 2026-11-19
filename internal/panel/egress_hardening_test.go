@@ -20,7 +20,7 @@ func TestHardeningFollowupFIFOAndUrgentIran(t *testing.T) {
 		if iran {
 			s.db.Exec("UPDATE egress_jobs SET token='',lease_until=0,ever_accepted=0,tested=0,reason='ads_iran_quarantined',next_run=1 WHERE hash=?", b.Hash)
 		} else {
-			s.db.Exec("UPDATE egress_jobs SET token='',lease_until=0,tested=?,deep_completed=1,reason='ads_delivery_unproven',state='UNKNOWN',next_run=1 WHERE hash=?", egress.Now(), b.Hash)
+			s.db.Exec("UPDATE egress_jobs SET token='',lease_until=0,tested=?,ever_accepted=1,first_completed=1,reason='ads_delivery_unproven',state='QUARANTINED',next_run=1 WHERE hash=?", egress.Now(), b.Hash)
 		}
 		next, err := s.ClaimEgressLane(ctx, "followup")
 		if err != nil || next == nil || next.Hash != b.Hash {
@@ -130,7 +130,8 @@ func TestHardeningMigrationPreservesEpochProofAndStickyWithdrawal(t *testing.T) 
 	var report string
 	s.db.QueryRow("SELECT since FROM egress_metrics").Scan(&since)
 	s.db.QueryRow("SELECT report FROM egress_jobs WHERE hash=?", j.Hash).Scan(&report)
-	for _, q := range []string{"DROP TABLE egress_settlements", "ALTER TABLE egress_retirements DROP COLUMN first_at", "UPDATE egress_metrics SET definitive=99", "PRAGMA user_version=36"} {
+	// The schema-48 scheduler references first_at, absent from the v36 fixture.
+	for _, q := range []string{"DROP VIEW egress_work", "DROP TABLE egress_settlements", "ALTER TABLE egress_retirements DROP COLUMN first_at", "UPDATE egress_metrics SET definitive=99", "PRAGMA user_version=36"} {
 		if _, err := s.db.Exec(q); err != nil {
 			t.Fatal(err)
 		}

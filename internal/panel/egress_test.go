@@ -217,7 +217,7 @@ func TestEgressUnknownQuarantinesButGenericFailuresDoNotPurge(t *testing.T) {
 	}
 }
 
-func TestEgressLanesProtectInitialAndDeepRetry(t *testing.T) {
+func TestEgressLanesRecoverInterruptedInitialWithoutClaimingArchive(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	newExportSource(t, s, "active", sourceURI(121))
@@ -225,7 +225,7 @@ func TestEgressLanesProtectInitialAndDeepRetry(t *testing.T) {
 	if err != nil || j == nil {
 		t.Fatal(err)
 	}
-	if _, err = s.db.Exec("UPDATE egress_jobs SET token='',lease_until=0,tested=?,state='UNKNOWN',attempts=1,next_run=0 WHERE hash=?", egress.Now(), j.Hash); err != nil {
+	if _, err = s.db.Exec("UPDATE egress_jobs SET lease_until=1,attempts=1,next_run=0 WHERE hash=?", j.Hash); err != nil {
 		t.Fatal(err)
 	}
 	archived := strings.Repeat("a", 64)

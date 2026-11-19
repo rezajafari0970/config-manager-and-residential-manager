@@ -28,6 +28,17 @@ type egressSourceRow struct {
 	egressCoverageCounts
 }
 
+const currentEgressBucket = `CASE
+   WHEN x.identity IS NOT NULL OR g.state='BLOCKED' OR c.action='deleted' OR j.state='DELETED' THEN 'excluded'
+   WHEN j.hash IS NULL THEN 'missing'
+   WHEN j.first_completed!=0 OR j.tested>0 THEN 'tested' ELSE 'awaiting' END`
+
+const currentEgressJoins = `LEFT JOIN egress_unique u ON u.identity=k.identity
+ LEFT JOIN egress_jobs j ON j.hash=u.hash
+ LEFT JOIN input_exclusions x ON x.identity=k.identity
+ LEFT JOIN egress_iran_guard g ON g.identity=k.identity
+ LEFT JOIN config_controls c ON c.id=k.identity`
+
 // All memberships for one identity share the same job. Compute the four
 // disjoint states once, then fan the counts back out onto the displayed page.
 const egressSourceCoverageSQL = `
@@ -36,15 +47,8 @@ SELECT * FROM (WITH page AS (
 ), ids AS MATERIALIZED (
  SELECT DISTINCT m.artifact_id AS identity FROM sources s JOIN memberships m ON m.source_id=s.id WHERE s.enabled=1
 ), states AS MATERIALIZED (
- SELECT k.identity, EXISTS(SELECT 1 FROM egress_export_eligible e WHERE e.hash=u.hash) AS published, CASE
-   WHEN x.identity IS NOT NULL OR g.state='BLOCKED' OR c.action='deleted' OR j.state='DELETED' THEN 'excluded'
-   WHEN j.hash IS NULL THEN 'missing'
-   WHEN j.tested>0 THEN 'tested' ELSE 'awaiting' END AS bucket
- FROM ids k LEFT JOIN egress_unique u ON u.identity=k.identity
- LEFT JOIN egress_jobs j ON j.hash=u.hash
- LEFT JOIN input_exclusions x ON x.identity=k.identity
- LEFT JOIN egress_iran_guard g ON g.identity=k.identity
- LEFT JOIN config_controls c ON c.id=k.identity AND c.expires>?3
+ SELECT k.identity, EXISTS(SELECT 1 FROM egress_export_eligible e WHERE e.hash=u.hash) AS published, ` + currentEgressBucket + ` AS bucket
+ FROM ids k ` + currentEgressJoins + ` AND c.expires>?3
 ), withdrawn AS MATERIALIZED (
  SELECT b.source_id,u.identity FROM egress_first_backlog b
  JOIN sources s ON s.id=b.source_id AND s.enabled=1

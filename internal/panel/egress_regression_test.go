@@ -90,7 +90,7 @@ func TestEgressFollowupLaneProgressWithInitialBacklog(t *testing.T) {
 	newExportSource(t, s, "fair", sourceURI(246), sourceURI(247), sourceURI(248), sourceURI(249))
 	a, _ := s.ClaimEgress(ctx)
 	b, _ := s.ClaimEgress(ctx)
-	if _, e := s.db.Exec("UPDATE egress_jobs SET tested=1,state='UNKNOWN',next_run=0,lease_until=1 WHERE hash IN (?,?)", a.Hash, b.Hash); e != nil {
+	if _, e := s.db.Exec("UPDATE egress_jobs SET tested=1,ever_accepted=1,first_completed=1,state='QUARANTINED',next_run=0,lease_until=1 WHERE hash IN (?,?)", a.Hash, b.Hash); e != nil {
 		t.Fatal(e)
 	}
 	seen := map[string]bool{}

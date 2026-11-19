@@ -159,14 +159,14 @@ def overlap_assessment(observe,health):
   rows=observe()
   return rows,pending.result()
 def observation_budget(req):
- # Accepted inputs retain the deeper budget: real canaries can exceed 3s
- # while still downloading valid Ads data. Adaptive third waves stay bounded.
- return (3,8) if req.get('discovery') or req.get('deep') else (2,3)
+ # The first discovery pass can settle a slow valid route in waves 2 and 3.
+ # Return wave count, first-wave timeout and later-wave timeout (seconds).
+ return (3,8,8) if req.get('discovery') or req.get('deep') else (3,3,8)
 def investigate(req,args,pool=None):
  if pool is None:
   with ResourcePool(args) as own:return investigate(req,args,own)
  discovery=req.get('discovery') is True
- probe_waves,probe_timeout=observation_budget(req)
+ probe_waves,first_timeout,probe_timeout=observation_budget(req)
  targets=sessions.target_registry(req.get('targets'));targets=targets if discovery else [t for t in targets if t.get('driver')!='https-reachability'];plan=req['plan'];r=dict(version='ads-egress.v9',hash=req['hash'],started=req['started'],finished=0,core='',core_sha='',infrastructure=False,code='driver_unavailable',checks=[],samples=[],health=[],delivery=[],attempts=[],evidence=[],wall_ms=0,waves=probe_waves)
  begin=time.monotonic();best=-1;before_resource_failures=resource_failures(args.prefix)
  if len(plan.get('variants',[]))!=2:return r
@@ -198,7 +198,7 @@ def investigate(req,args,pool=None):
       code=lab.classify(box.logs(),'runtime_start_failed');check.update(core=False,code=code);break
      check.update(core=True,code='exact_runtime_started')
      def observe(start,waves,timeout):
-      result=box.net(['/usr/bin/python3',str(HERE/'egress-session.py')],input=json.dumps({'targets':targets,'variant':v['name'],'timeout':timeout,'start_wave':start,'waves':waves,'sequential':sequential,'adaptive':bool(req.get('deep')) and not discovery}).encode(),timeout=scheduling.session_deadline(len(targets),waves,timeout,sequential))
+      result=box.net(['/usr/bin/python3',str(HERE/'egress-session.py')],input=json.dumps({'targets':targets,'variant':v['name'],'timeout':timeout,'first_timeout':first_timeout,'start_wave':start,'waves':waves,'sequential':sequential,'adaptive':not discovery}).encode(),timeout=scheduling.session_deadline(len(targets),waves,timeout,sequential))
       if len(result.stdout)>131072:raise ValueError('session_output_limit')
       rows=json.loads(result.stdout)
       if not isinstance(rows,list) or not min(waves,2)*len(targets)<=len(rows)<=waves*len(targets):raise ValueError('session_contract')
@@ -213,9 +213,6 @@ def investigate(req,args,pool=None):
       delivery.append(assets)
      samples+=rows
      box.stop();code='measured';mark(v['name']+'_probes')
-     # Acceptance requires both variants; shared targets never veto another profile.
-     if not discovery and not req.get('accepted') and not req.get('deep') and not any(x.get('echo') for x in rows):
-      code='network_retry_pending';break
    mark('reset')
    score=sum(bool(x.get('echo')) for x in samples)
    if len(checks)==2 and all(x['core'] for x in checks):score+=100
@@ -223,7 +220,7 @@ def investigate(req,args,pool=None):
    r['attempts'].append(dict(core=core,code=code,ms=(time.monotonic()-at)*1000,stages=stages))
    # A validated running core does not need four repetitions of a network timeout.
    # Schema/start failures still use the full pinned compatibility matrix.
-   if len(checks)==2 and all(x.get('core') for x in checks) or code == 'network_retry_pending':break
+   if len(checks)==2 and all(x.get('core') for x in checks):break
   except Exception as error:
    code=error_code(error)
    r['attempts'].append(dict(core=core,code=code,ms=(time.monotonic()-at)*1000,stages=stages))

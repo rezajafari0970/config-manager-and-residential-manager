@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-func TestEgressResetFencesOldWorkPreservesAuditAndPrioritizesAccepted(t *testing.T) {
+func TestEgressCohortPreservesReceiptsAndLeases(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	newExportSource(t, s, "reset", sourceURI(250), sourceURI(251), sourceURI(252))
+	newExportSource(t, s, "cohort", sourceURI(250), sourceURI(251), sourceURI(252))
 	accepted, err := s.ClaimEgress(ctx)
 	if err != nil || accepted == nil {
 		t.Fatal(err)
@@ -17,67 +17,62 @@ func TestEgressResetFencesOldWorkPreservesAuditAndPrioritizesAccepted(t *testing
 	if err = s.CompleteEgress(ctx, egress.Completion{Job: *accepted, Report: syntheticEgress(*accepted)}); err != nil {
 		t.Fatal(err)
 	}
-	old, err := s.ClaimEgress(ctx)
-	if err != nil || old == nil {
+	inFlight, err := s.ClaimEgress(ctx)
+	if err != nil || inFlight == nil {
 		t.Fatal(err)
 	}
-	stale := egress.Completion{Job: *old, Report: syntheticEgress(*old)}
-	before, _ := egressMetricState(ctx, s.db)
+	prior := egress.Completion{Job: *inFlight, Report: syntheticEgress(*inFlight)}
+	prior.Report.Started--
+	before, err := egressMetricState(ctx, s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	id, err := s.ResetEgress(ctx, 0)
 	if err != nil || id != 1 {
 		t.Fatal(id, err)
 	}
-	after, _ := egressMetricState(ctx, s.db)
-	if before != after {
-		t.Fatal("lifetime counters reset", before, after)
-	}
 	if _, err = s.ResetEgress(ctx, 0); err != ErrConflict {
-		t.Fatal("duplicate reset", err)
+		t.Fatal("stale revision", err)
 	}
-	if err = s.CompleteEgress(ctx, stale); err != ErrConflict {
-		t.Fatal("old worker overwrote reset", err)
+	if same, err := s.ResetEgress(ctx, id); err != nil || same != id {
+		t.Fatal("active cohort duplicated", same, err)
 	}
-	var eligible, oldReports int
-	s.db.QueryRow("SELECT count(*) FROM egress_eligible").Scan(&eligible)
-	s.db.QueryRow("SELECT count(*) FROM egress_jobs WHERE report!='{}' AND tested=0").Scan(&oldReports)
-	if eligible != 0 || oldReports != 1 {
-		t.Fatal("freshness/archive", eligible, oldReports)
+	var eligible int
+	if err = s.db.QueryRow("SELECT count(*) FROM egress_export_eligible WHERE hash=?", accepted.Hash).Scan(&eligible); err != nil || eligible != 1 {
+		t.Fatal("accepted proof invalidated", eligible, err)
 	}
-	fresh, err := s.ClaimEgressLane(ctx, "initial")
-	if err != nil || fresh == nil || fresh.Hash != accepted.Hash || !fresh.Accepted || !fresh.Deep || fresh.Attempt != 1 {
-		t.Fatal("accepted priority/deep check", fresh, err)
+	if err = s.CompleteEgress(ctx, prior); err != nil {
+		t.Fatal("active lease interrupted", err)
 	}
-	complete := egress.Completion{Job: *fresh, Report: syntheticEgress(*fresh)}
-	if err = s.CompleteEgress(ctx, complete); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.CompleteEgress(ctx, complete); err != ErrConflict {
+	if err = s.CompleteEgress(ctx, prior); err != ErrConflict {
 		t.Fatal("duplicate completion", err)
 	}
 	run, err := egressRunState(ctx, s.db)
-	if err != nil || run["completed"] != 1 || run["pending"] != 2 || run["accepted_completed"] != 1 {
+	if err != nil || run["total"] != 2 || run["completed"] != 1 || run["pending"] != 1 || run["accepted"] != 0 {
 		t.Fatal(run, err)
 	}
-	next, err := s.ClaimEgressLane(ctx, "initial")
-	if err != nil || next == nil || next.Deep || next.Attempt != 1 {
-		t.Fatal("fresh round inherited old attempts", next, err)
+	fresh, err := s.ClaimEgressLane(ctx, "initial")
+	if err != nil || fresh == nil || fresh.Hash == accepted.Hash || fresh.Hash == inFlight.Hash || fresh.Attempt != 1 {
+		t.Fatal("expected untouched identity", fresh, err)
 	}
-	if err = s.CompleteEgress(ctx, egress.Completion{Job: *next, Report: syntheticEgress(*next)}); err != nil {
+	if err = s.CompleteEgress(ctx, egress.Completion{Job: *fresh, Report: syntheticEgress(*fresh)}); err != nil {
 		t.Fatal(err)
 	}
-	after, _ = egressMetricState(ctx, s.db)
-	if after.Completed != before.Completed+2 || after.FirstAssessments != before.FirstAssessments+1 {
-		t.Fatal("lifetime first assessments invented", before, after)
+	after, err := egressMetricState(ctx, s.db)
+	if err != nil || after.Completed != before.Completed+2 || after.FirstAssessments != before.FirstAssessments+2 {
+		t.Fatal("lifetime accounting", before, after, err)
 	}
-	// Another reset is explicit, CAS protected, and previous cohort results survive.
-	id, err = s.ResetEgress(ctx, 1)
-	if err != nil || id != 2 {
-		t.Fatal(id, err)
+	if same, err := s.ResetEgress(ctx, id); err != nil || same != id {
+		t.Fatal("empty cohort duplicated", same, err)
 	}
-	var prior int
-	s.db.QueryRow("SELECT count(*) FROM egress_run_members WHERE run=1 AND status='completed'").Scan(&prior)
-	if prior != 2 {
-		t.Fatal("prior round lost", prior)
+	newExportSource(t, s, "next", sourceURI(262))
+	nextID, err := s.ResetEgress(ctx, id)
+	if err != nil || nextID != id+1 {
+		t.Fatal(nextID, err)
+	}
+	var priorCount int
+	if err = s.db.QueryRow("SELECT count(*) FROM egress_run_members WHERE run=? AND status='completed'", id).Scan(&priorCount); err != nil || priorCount != 2 {
+		t.Fatal("previous cohort audit lost", priorCount, err)
 	}
 }
 
@@ -155,7 +150,7 @@ func TestEgressRunCountsConfirmedIranCompletionAsTested(t *testing.T) {
 	if err = s.revokeEgress(ctx, tx, j.Hash, "confirmed_ads_iran", egress.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err = recordEgressRun(ctx, tx, j.Hash, "DELETED", false, egress.Now(), egress.Now(), 20); err != nil {
+	if err = recordEgressRun(ctx, tx, j.Hash, "DELETED", false, egress.Now(), 20); err != nil {
 		t.Fatal(err)
 	}
 	if err = tx.Commit(); err != nil {
@@ -184,7 +179,7 @@ func TestEgressManualDeleteFencesAllAliasesWithoutInventingHealthDeletion(t *tes
 	if _, err := s.ResetEgress(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
-	stale, _ := s.ClaimEgress(ctx)
+	stale := second
 	tx, _ := s.db.Begin()
 	if err := s.revokeEgress(ctx, tx, first.Hash, "manual_delete", egress.Now()); err != nil {
 		t.Fatal(err)

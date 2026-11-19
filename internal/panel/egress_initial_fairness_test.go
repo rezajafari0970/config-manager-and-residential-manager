@@ -7,8 +7,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
-// Held routes still get ordinary safety checks. A receipt approaching expiry
-// on an already-withheld route must not jump the first-assessment queue.
+// A completed datacenter result stays cached even after its proof expires.
 func TestEgressHeldExpiryDoesNotDisplaceUntested(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -36,8 +35,8 @@ func TestEgressHeldExpiryDoesNotDisplaceUntested(t *testing.T) {
 		t.Fatal("held expiry displaced fresh input", err)
 	}
 	ordinary, err := s.ClaimEgressLane(ctx, "followup")
-	if err != nil || ordinary == nil || ordinary.Hash != held.Hash {
-		t.Fatal("held safety check was lost", err)
+	if err != nil || ordinary != nil {
+		t.Fatal("held datacenter result re-entered the queue", ordinary, err)
 	}
 }
 

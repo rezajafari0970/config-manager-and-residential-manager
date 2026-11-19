@@ -3,6 +3,8 @@ package panel
 import (
 	"context"
 	"net/http"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
 type egressLifecycle struct {
@@ -99,4 +101,23 @@ func (m egressModule) lifecycle(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Revision++
 	respond(w, 200, p)
+}
+
+// Only a measurement failure before any route observations can reuse the
+// remainder of an existing receipt. Once the driver sees an Ads flow, the
+// normal measurement, withdrawal and guard rules apply.
+func inconclusiveRenewal(d egress.Decision, r egress.Report, health string) bool {
+	if d.State != "UNKNOWN" || d.Negative || health == "unhealthy" || d.CountryConflict || d.Network.BlocksResidential() || len(r.Samples) != 0 {
+		return false
+	}
+	for _, attempt := range r.Evidence {
+		if len(attempt.Samples) != 0 {
+			return false
+		}
+	}
+	switch d.Reason {
+	case "driver_session_failed", "driver_subprocess_timeout", "driver_subprocess_failed", "driver_infrastructure_error", "local_resource_pressure", "missing_runtime_asset", "endpoint_dns_failed":
+		return true
+	}
+	return false
 }

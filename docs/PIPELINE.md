@@ -114,6 +114,12 @@ QUIC negotiation alone is never relabelled as a successful probe.
 Ordinary probes publish a short-lived memory demand when small jobs keep taking
 the available shared permits. Smaller new admissions briefly defer; running jobs,
 collection's bounded control reserve and the host memory floor remain intact.
+Residential discovery uses one stored first assessment per collector identity
+across source generations and restarts. Each assessment records its outcome,
+including inconclusive measurements. A tracking cohort counts outstanding first
+assessments, including those already in flight. Renewals use the stored identity
+and their own health and route deadlines.
+
 Residential initial/follow-up slots are interleaved even under partial admission.
 Every third follow-up turn gives the oldest due expired accepted proof a chance
 before repeatedly urgent work. Expired proof stays unpublished; no evidence TTL

@@ -36,10 +36,10 @@ class DiscoveryContracts(unittest.TestCase):
   for q in calls:self.assertEqual(q['waves'],3);self.assertTrue(q['sequential']);self.assertFalse(q['adaptive'])
 class RenewalBudgetContracts(unittest.TestCase):
  def test_verified_inputs_do_not_silently_use_short_initial_deadline(self):
-  self.assertEqual(driver.observation_budget({'deep':True,'accepted':True}),(3,8))
-  self.assertEqual(driver.observation_budget({'deep':True,'accepted':False}),(3,8))
-  self.assertEqual(driver.observation_budget({}),(2,3))
-  self.assertEqual(driver.observation_budget({'discovery':True}),(3,8))
+  self.assertEqual(driver.observation_budget({'deep':True,'accepted':True}),(3,8,8))
+  self.assertEqual(driver.observation_budget({'deep':True,'accepted':False}),(3,8,8))
+  self.assertEqual(driver.observation_budget({}),(3,3,8))
+  self.assertEqual(driver.observation_budget({'discovery':True}),(3,8,8))
 class Contracts(unittest.TestCase):
  def test_host_dns_failure_does_not_rotate_compatible_cores(self):
   self.assertTrue(driver.core_independent_failure('endpoint_dns_failed'))
@@ -244,6 +244,18 @@ class AdaptiveContracts(unittest.TestCase):
    if r['domain'] in ('api.ipify.org','www.cloudflare.com') and r['wave']==2:r['echo']=False
   rows,calls=self.simulate(change)
   self.assertTrue(any(w==3 for d,w in calls))
+ def test_initial_assessment_can_confirm_two_slow_waves(self):
+  from unittest.mock import patch
+  target_set=[t for t in session.DEFAULT_TARGETS if t.get('required')]
+  waves,first,rest=driver.observation_budget({})
+  async def slow(domain,variant,wave,timeout,control_ipv4=None,target=None):
+   return dict(domain=domain,wave=wave,echo=timeout>=6,family=4,ip=domain)
+  for sequential in [True,False]:
+   with patch.object(session,'measure',slow):
+    rows=asyncio.run(session.session(dict(variant='raw',waves=waves,first_timeout=first,timeout=rest,sequential=sequential,adaptive=True,targets=target_set)))
+   for target in target_set:
+    self.assertEqual({r['wave'] for r in rows if r['domain']==target['domain'] and r['echo']},{2,3})
+   self.assertGreaterEqual(driver.scheduling.session_deadline(len(target_set),waves,rest,sequential),first+2*rest+10)
  def test_adaptive_deep_pair_stays_serial_and_keeps_wave_ids(self):
   original=session.measure;active=0;peak=0;overlap=False;active_waves={}
   async def fake(domain,variant,wave,timeout,control_ipv4=None,target=None):
@@ -254,8 +266,10 @@ class AdaptiveContracts(unittest.TestCase):
    return dict(domain=domain,wave=wave,echo=True,family=4,ip=domain)
   session.measure=fake
   try:
-   rows=asyncio.run(session.session(dict(variant='raw',waves=3,sequential=False,adaptive=True,targets=[t for t in session.DEFAULT_TARGETS if t.get('required')])) )
-   self.assertFalse(overlap);self.assertLessEqual(peak,12);self.assertEqual({r['wave'] for r in rows},{1,2})
+   for sequential in [True,False]:
+    overlap=False
+    rows=asyncio.run(session.session(dict(variant='raw',waves=3,sequential=sequential,adaptive=True,targets=[t for t in session.DEFAULT_TARGETS if t.get('required')])))
+    self.assertEqual(overlap,not sequential);self.assertLessEqual(peak,12);self.assertEqual({r['wave'] for r in rows},{1,2})
   finally:session.measure=original
  def test_flat_vless_dispatch_preserves_tls_and_local_semantics(self):
   import base64
@@ -288,7 +302,7 @@ class SchedulingContracts(unittest.TestCase):
    self.assertEqual(driver.scheduling.sequential({},cfg),want)
    self.assertTrue(driver.scheduling.sequential({'deep':True,'accepted':True},cfg))
    self.assertTrue(driver.scheduling.sequential({'discovery':True},cfg))
-  self.assertEqual(driver.observation_budget({'deep':True,'accepted':True}),(3,8))
+  self.assertEqual(driver.observation_budget({'deep':True,'accepted':True}),(3,8,8))
 class OverlapContracts(unittest.TestCase):
  def test_same_runtime_parallel_join_preserves_both_results(self):
   import threading

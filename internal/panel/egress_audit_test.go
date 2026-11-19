@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,48 +42,41 @@ func TestEgressAuditQueueUsesOneDueDefinition(t *testing.T) {
 
 }
 
-func TestEgressAuditTransientFaultRecoversAfterDeepAttempt(t *testing.T) {
-	for _, code := range []string{"endpoint_dns_failed", "driver_subprocess_failed"} {
+func TestEgressAuditStoresInfrastructureResultOnceAcrossReopen(t *testing.T) {
+	for _, code := range []string{"endpoint_dns_failed", "driver_subprocess_failed", "local_resource_pressure", "ads_delivery_unproven"} {
 		t.Run(code, func(t *testing.T) {
 			s := testStore(t)
 			ctx := context.Background()
-			newExportSource(t, s, "infrastructure-recovery", sourceURI(762))
-			for attempt := 0; attempt < 2; attempt++ {
-				j, err := s.ClaimEgress(ctx)
-				if err != nil || j == nil {
-					t.Fatal(err)
-				}
-				r := syntheticEgress(*j)
-				r.Code = code
-				r.Checks = nil
-				r.Samples = nil
-				r.Delivery = nil
-				if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != nil {
-					t.Fatal(err)
-				}
-				var reason, state string
-				var delay int64
-				if err = s.db.QueryRow("SELECT reason,state,next_run-tested FROM egress_jobs WHERE hash=?", j.Hash).Scan(&reason, &state, &delay); err != nil {
-					t.Fatal(err)
-				}
-				if reason != code || state != "UNKNOWN" || delay < 300000 || delay > 3600000 {
-					t.Fatal("transient fault lost or retry unbounded", reason, state, delay)
-				}
-				if _, err = s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", j.Hash); err != nil {
-					t.Fatal(err)
-				}
-			}
-			retry, err := s.ClaimEgressLane(ctx, "followup")
-			if err != nil || retry == nil || !retry.Deep {
-				t.Fatal("temporary infrastructure fault abandoned", retry, err)
-			}
-			if err = s.CompleteEgress(ctx, egress.Completion{Job: *retry, Report: syntheticEgress(*retry)}); err != nil {
+			raw := strings.Split(sourceURI(762), "#")[0]
+			newExportSource(t, s, "infrastructure", raw+"#a")
+			j, err := s.ClaimEgress(ctx)
+			if err != nil || j == nil {
 				t.Fatal(err)
 			}
-			var n int
-			if err = s.db.QueryRow("SELECT count(*) FROM egress_eligible").Scan(&n); err != nil || n != 1 {
-				t.Fatal("recovery did not require new eligible proof", n, err)
+			r := syntheticEgress(*j)
+			r.Code, r.Checks, r.Samples, r.Delivery = code, nil, nil, nil
+			if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != nil {
+				t.Fatal(err)
 			}
+			path, key := filepath.Join(filepath.Dir(s.vault.Directory()), "panel.db"), s.key
+			if err = s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := Open(path, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fresh.Close()
+			newExportSource(t, fresh, "second-link", raw+"#b")
+			if _, err = fresh.db.Exec("UPDATE egress_jobs SET next_run=0"); err != nil {
+				t.Fatal(err)
+			}
+			retry, err := fresh.ClaimEgressLane(ctx, "followup")
+			if err != nil || retry != nil {
+				t.Fatal("completed assessment was rescheduled", retry, err)
+			}
+			pendingCount(t, fresh.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND state='UNKNOWN' AND first_completed=1 AND attempts=1", j.Hash)
+			pendingCount(t, fresh.db, 0, "SELECT count(*) FROM egress_export_eligible")
 		})
 	}
 }

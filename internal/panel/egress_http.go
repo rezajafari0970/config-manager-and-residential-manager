@@ -86,6 +86,7 @@ func (m egressModule) Register(mux *http.ServeMux) {
 
 	mux.HandleFunc("POST /api/egress/countries", m.countries)
 	mux.HandleFunc("POST /api/egress/lifecycle", m.lifecycle)
+	mux.HandleFunc("GET /egress-subscription/datacenter-rejected/{token}/raw.txt", m.datacenterRejectedRaw)
 	mux.HandleFunc("GET /egress-subscription/{token}/{format}", m.export)
 }
 func (m egressModule) links() map[string]string {
@@ -350,7 +351,12 @@ func (m egressModule) state(w http.ResponseWriter, r *http.Request) {
 		failure(w, err)
 		return
 	}
-	respond(w, 200, map[string]any{"profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": recovery, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"target_5m": 500, "first_settled_5m": firstSettled5, "previously_settled_5m": previouslySettled5, "settlement_unknown_5m": conclusive5 - firstSettled5 - previouslySettled5, "unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": total, "pending": pending, "partial": partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "At least one complete Ads profile must pass the route and delivery checks in raw and template. A verified datacenter exit blocks publication unless the specific flow is proven to share the ordinary controls outside the qualifying profile. Shared hosting is reported separately. Unknown network ownership alone does not block it.", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
+	var dcRejected int
+	if e = db.QueryRowContext(ctx, "SELECT count(*) "+datacenterRejectedFrom).Scan(&dcRejected); e != nil {
+		failure(w, e)
+		return
+	}
+	respond(w, 200, map[string]any{"datacenter_rejections": map[string]any{"count": dcRejected, "raw_url": m.datacenterRejectedURL()}, "profile_stats": profileStats, "profiles": egress.Profiles(), "rescan": run, "now": readStamp(ctx), "accounting": accounting, "iran_guard": iran, "metrics": metrics, "queue": map[string]any{"due": due, "recoverable_leases": recovery, "active_leases": activeLeases}, "lifecycle": lifecycle, "coverage_missing": missing, "retained": retained, "country": countryInfo, "throughput": map[string]any{"target_5m": 500, "first_settled_5m": firstSettled5, "previously_settled_5m": previouslySettled5, "settlement_unknown_5m": conclusive5 - firstSettled5 - previouslySettled5, "unique_definitive_5m": conclusive5, "unique_definitive_10m": conclusive10, "unique_5m": unique5, "unique_10m": unique10, "completed_5m": completed, "definitive_5m": definitive, "completed_10m": completed10, "definitive_10m": definitive10, "target_10m": 1000, "max_workers": egress.MaxWorkers}, "version": egress.Version, "total": total, "pending": pending, "partial": partial, "eligible": eligible, "counts": counts, "entries": entries, "offset": offset, "links": m.links(), "domains": egress.Domains, "targets": egress.Targets(), "worker": map[string]any{"status": status, "heartbeat": heartbeat, "active": active, "code": code}, "classification": "At least one complete Ads profile must pass the route and delivery checks in raw and template. A verified datacenter exit blocks publication unless the specific flow is proven to share the ordinary controls outside the qualifying profile. Shared hosting is reported separately. Unknown network ownership alone does not block it.", "scope": "TCP HTTP/1.1 / versioned Ads profiles / same-family stable controls including ordinary Google / raw and template; source-unobservable controls and QUIC remain unknown"})
 }
 
 type egressExportEntry struct {

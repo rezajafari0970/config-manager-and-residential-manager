@@ -8,6 +8,11 @@ for(const width of [390,1440]){
  await page.locator('#egress-diagnostics').check();await page.waitForFunction(()=>document.querySelectorAll('#egress-list article').length>0);
  await page.locator('#egress-list details').first().locator('summary').click();await page.waitForFunction(()=>document.querySelector('#egress-list details[open] pre')?.textContent.trim().startsWith('{'));await page.waitForTimeout(3500);assert.equal(await page.locator('#egress-list details[open]').count(),1);assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
  const state=await(await page.request.get(process.env.PANEL_TEST_ORIGIN+'/api/egress?view=diagnostics')).json();assert(state.total>0);assert(state.entries.every(x=>x.hash.length===64));
+ assert.equal(await page.locator('#egress-dc-rejected-link').getAttribute('href'),state.datacenter_rejections.raw_url);
+ assert(await page.locator('#egress-dc-rejected-copy').isEnabled());
+ const raw=await page.request.get(state.datacenter_rejections.raw_url);
+ assert([200,204].includes(raw.status()));
+ assert.equal(raw.status()===204,raw.headers()['x-config-count']==='0');
  const a=state.accounting,p=a.publication;assert.equal(a.at,state.now);assert.equal(a.live_versions,state.total);assert.equal(Object.values(a.queue).reduce((x,y)=>x+y,0),a.live_versions);assert.equal(a.awaiting_first+a.assessed_versions,a.live_versions);assert.equal(a.current_live_versions+a.archive_versions,a.live_versions);assert.equal(p.retained,p.route_verified+p.awaiting_proof+Object.values(a.safety_review).reduce((x,y)=>x+y,0));assert.equal(p.route_verified,p.eligible+p.hosting+p.mixed);assert.equal(p.network_unverified,0);assert(p.eligible_network_unattributed>=0&&p.eligible_network_unattributed<=p.eligible);assert.equal(p.eligible,p.country_unknown+p.country_filtered+p.published);assert.equal(p.published,state.country.published);assert.equal(a.coverage_missing,0);assert.equal(a.staged_coverage_missing,0);assert((await page.locator('#egress-inventory').textContent()).includes('یکتا'));assert((await page.locator('#egress-output-counts').textContent()).includes('هویت'));assert(state.throughput.unique_definitive_10m<=state.throughput.unique_10m);
  await page.screenshot({path:process.env.PANEL_TEST_DIR+'/egress-'+width+'.png',fullPage:true});
 }

@@ -22,7 +22,15 @@ import (
 // Fetch bodies and probe receipts are fixtures. No proxy or network core runs.
 // go test ./internal/panel -run '^$' -bench '^BenchmarkResidential500$' -benchtime=1x
 func BenchmarkResidential500(b *testing.B) {
-	const count = 500
+	benchmarkResidentialBatch(b, 500)
+}
+
+func BenchmarkResidential1800(b *testing.B) {
+	benchmarkResidentialBatch(b, 1800)
+}
+
+func benchmarkResidentialBatch(b *testing.B, count int) {
+	b.Helper()
 	raws := make([]string, count)
 	residential := make(map[string]bool)
 	var positives []string

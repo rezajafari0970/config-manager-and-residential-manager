@@ -35,15 +35,28 @@ func TestEgressHostingWithdrawsResidentialFeedsOnlyAndRequiresFreshRecovery(t *t
 			}
 		}
 	}
+	var last egress.Job
 	complete := func(kind string) {
 		t.Helper()
 		if _, err := s.db.Exec("UPDATE egress_jobs SET next_run=0"); err != nil {
 			t.Fatal(err)
 		}
 		job, err := s.ClaimEgress(ctx)
-		if err != nil || job == nil {
-			t.Fatal("lost renewal", err)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if job == nil {
+			// Held DCs no longer receive automatic renewals. Exercise the
+			// independent proof-recovery reducer with a fixture lease.
+			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_network_results WHERE held=1")
+			job = &last
+			job.Token = randomToken()
+			now := egress.Now()
+			if _, err = s.db.Exec("UPDATE egress_jobs SET token=?,lease_until=?,claimed_at=? WHERE hash=?", job.Token, now+120000, now, job.Hash); err != nil {
+				t.Fatal(err)
+			}
+		}
+		last = *job
 		report := syntheticEgress(*job)
 		for i := range report.Samples {
 			x := &report.Samples[i]
@@ -86,6 +99,7 @@ func TestEgressHostingWithdrawsResidentialFeedsOnlyAndRequiresFreshRecovery(t *t
 	check(true)
 	complete("hosting")
 	check(false)
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work")
 	// A v45 hit identified only its first adverse flow. Reopening must retain
 	// the hold even as other fresh routes resume publication immediately.
 	if _, err = s.db.Exec(`UPDATE egress_network_results SET last_adverse=json_remove(last_adverse,'$.hosting_flows','$.hosting_asns');

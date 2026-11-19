@@ -97,7 +97,7 @@ func Open(path string, key []byte) (*Store, error) {
 	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return nil, err
 	}
-	if version > 47 {
+	if version > 48 {
 		return nil, errors.New("database schema newer than application")
 	}
 	if version == 0 {
@@ -251,9 +251,6 @@ PRAGMA user_version=1;`)
 	if err = s.ensureEgressIndexes(); err != nil {
 		return nil, err
 	}
-	if err = s.ensureEgressRecovery(); err != nil {
-		return nil, err
-	}
 	if err = s.ensureEgressEligibilityLookup(); err != nil {
 		return nil, err
 	}
@@ -276,6 +273,9 @@ PRAGMA user_version=1;`)
 		return nil, err
 	}
 	if err = s.migrateV47(); err != nil {
+		return nil, err
+	}
+	if err = s.migrateV48(); err != nil {
 		return nil, err
 	}
 	if err = s.reconcileProtocolResponses(); err != nil {

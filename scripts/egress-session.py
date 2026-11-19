@@ -146,14 +146,19 @@ def needs_pair_recovery(groups,required):
 async def session(req):
  targets=target_registry(req.get('targets'));limit=asyncio.Semaphore(12)
  async def run(t,n):
-  async with limit:return await measure(t['domain'],req['variant'],n,req.get('timeout',3),req.get('control_ipv4'),t)
+  timeout=req.get('timeout',3)
+  if n==start:timeout=req.get('first_timeout',timeout)
+  async with limit:return await measure(t['domain'],req['variant'],n,timeout,req.get('control_ipv4'),t)
  async def wave(n,selected,delay=0):
   await asyncio.sleep(delay)
   return await asyncio.gather(*(run(t,n) for t in selected))
  start=req.get('start_wave',1);waves=req.get('waves',3)
  if not 1<=waves<=3:raise ValueError('wave_limit')
  if req.get('adaptive') and waves==3:
-  groups=[await wave(start,targets),await wave(start+1,targets)]
+  if req.get('sequential'):
+   groups=[await wave(start,targets),await wave(start+1,targets)]
+  else:
+   groups=list(await asyncio.gather(wave(start,targets),wave(start+1,targets,.15)))
   # Repeating an unsupported source observation cannot reveal an IP. Retain
   # both completed reachability observations and report their limited scope.
   required=[t for t in targets if t.get('required')]

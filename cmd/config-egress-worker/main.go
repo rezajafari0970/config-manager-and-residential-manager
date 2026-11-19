@@ -27,6 +27,10 @@ import (
 
 type client struct{ http *http.Client }
 
+type apiStatus int
+
+func (s apiStatus) Error() string { return fmt.Sprintf("api_status_%d", int(s)) }
+
 func (c client) call(ctx context.Context, path string, in, out any) error {
 	b, e := json.Marshal(in)
 	if e != nil {
@@ -43,12 +47,43 @@ func (c client) call(ctx context.Context, path string, in, out any) error {
 	}
 	defer r.Body.Close()
 	if r.StatusCode != 200 {
-		return fmt.Errorf("api_status_%d", r.StatusCode)
+		return apiStatus(r.StatusCode)
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(out)
 	}
 	return nil
+}
+
+// A lost response can follow a committed transaction. Replaying the same
+// token and revision lets the panel fence duplicates. A conflict can also
+// mean the lease expired, so it never counts as an acknowledged completion.
+func (c client) sendLeased(ctx context.Context, path string, body any) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	for attempt := 0; ; attempt++ {
+		err := c.call(ctx, path, body, nil)
+		if err == nil || attempt == 2 {
+			return err
+		}
+		var status apiStatus
+		var transport net.Error
+		if errors.As(err, &status) {
+			switch status {
+			case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
+				http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			default:
+				return err
+			}
+		} else if !errors.As(err, &transport) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 250 * time.Millisecond):
+		}
+	}
 }
 
 type bounded struct {
@@ -81,6 +116,7 @@ func execute(ctx context.Context, c client, driver *driverSession, j egress.Job)
 		job, cancel := context.WithTimeout(ctx, 220*time.Second)
 		defer cancel()
 		done := make(chan struct{})
+		leaseLost := make(chan struct{})
 		defer close(done)
 		go func() {
 			ticker := time.NewTicker(20 * time.Second)
@@ -92,7 +128,8 @@ func execute(ctx context.Context, c client, driver *driverSession, j egress.Job)
 				case <-job.Done():
 					return
 				case <-ticker.C:
-					if c.call(job, "renew", egress.Job{Hash: j.Hash, Token: j.Token, Revision: j.Revision}, nil) != nil {
+					if c.sendLeased(job, "renew", egress.Job{Hash: j.Hash, Token: j.Token, Revision: j.Revision}) != nil {
+						close(leaseLost)
 						cancel()
 						return
 					}
@@ -100,18 +137,32 @@ func execute(ctx context.Context, c client, driver *driverSession, j egress.Job)
 			}
 		}()
 		input, _ := json.Marshal(map[string]any{"hash": j.Hash, "started": started, "plan": p, "targets": egress.Targets(), "delivery_targets": egress.DeliveryTargets(), "deep": j.Deep, "attempt": j.Attempt, "accepted": j.Accepted})
-		output, err := driver.exchange(job, input)
-		if err != nil || json.Unmarshal(output, &r) != nil {
+		// Repair a broken helper once inside the original lease and deadline.
+		// A valid measurement (including UNKNOWN) is immediately committed.
+		for attempt := 0; attempt < 2; attempt++ {
+			output, err := driver.exchange(job, input)
+			if err == nil && json.Unmarshal(output, &r) == nil {
+				break
+			}
 			driver.stop()
 			r = egress.Report{Version: egress.Version, Hash: j.Hash, Started: started, Finished: egress.Now(), Code: "driver_session_failed"}
+			if job.Err() != nil {
+				select {
+				case <-leaseLost:
+					// No completed probe receipt exists; let the lease recover.
+					return
+				default:
+				}
+				break
+			}
 		}
 	}
 	if r.Finished == 0 {
 		r.Finished = egress.Now()
 	}
 	j.Raw = nil
-	if e := c.call(ctx, "complete", egress.Completion{Job: j, Report: r}, nil); e != nil {
-		log.Print("egress completion deferred; lease will recover")
+	if e := c.sendLeased(ctx, "complete", egress.Completion{Job: j, Report: r}); e != nil {
+		log.Print("egress completion was not acknowledged")
 	}
 }
 

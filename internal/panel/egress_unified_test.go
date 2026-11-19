@@ -164,10 +164,10 @@ func TestSettledRescanResultDoesNotOverwriteFirstAssessment(t *testing.T) {
 	s.db.QueryRow("SELECT started FROM egress_runs WHERE id=?", run).Scan(&started)
 	tx, _ := s.db.Begin()
 	defer tx.Rollback()
-	if err = recordEgressRun(ctx, tx, j.Hash, "UNKNOWN", false, started, started+100, 100); err != nil {
+	if err = recordEgressRun(ctx, tx, j.Hash, "UNKNOWN", false, started+100, 100); err != nil {
 		t.Fatal(err)
 	}
-	if err = recordEgressRun(ctx, tx, j.Hash, "NO_SPLIT", true, started+200, started+300, 100); err != nil {
+	if err = recordEgressRun(ctx, tx, j.Hash, "NO_SPLIT", true, started+300, 100); err != nil {
 		t.Fatal(err)
 	}
 	var first, settled int64
@@ -202,10 +202,20 @@ func TestUnifiedConflictWithdrawalUsesSparseIndex(t *testing.T) {
 	}
 }
 
-func TestUnifiedUnprovedDeliveryRemainsRecoverableWithoutReimport(t *testing.T) {
+func TestUnifiedRetainedUnprovedDeliveryRemainsRecoverableWithoutReimport(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	newExportSource(t, s, "asset-recovery", sourceURI(735))
+	accepted, err := s.ClaimEgress(ctx)
+	if err != nil || accepted == nil {
+		t.Fatal(err)
+	}
+	if err = s.CompleteEgress(ctx, egress.Completion{Job: *accepted, Report: syntheticEgress(*accepted)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", accepted.Hash); err != nil {
+		t.Fatal(err)
+	}
 	var hash string
 	for i := 0; i < 2; i++ {
 		j, err := s.ClaimEgress(ctx)

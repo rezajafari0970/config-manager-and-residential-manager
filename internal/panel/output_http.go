@@ -49,9 +49,13 @@ func (s *Server) rawAll(w http.ResponseWriter, r *http.Request) {
 
 type rawScope struct {
 	source, id, axis, group string
+	datacenterRejected      bool
 }
 
 func (s *Store) verifiedRawEntries(ctx context.Context, q readQuerier, scope rawScope) ([]networkEntry, error) {
+	if scope.datacenterRejected {
+		return datacenterRejectedEntries(ctx, q)
+	}
 	if scope.axis != "" {
 		all, err := s.networkEntries(ctx, q, scope.axis, scope.group)
 		return healthyNetworkEntries(all, readStamp(ctx)), err
@@ -110,7 +114,7 @@ func (s *Server) tryVerifiedRaw(w http.ResponseWriter, r *http.Request, scope ra
 			return true
 		}
 		body, err := s.store.openExportBlob(n.Hash)
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, ErrNotFound) && !scope.datacenterRejected {
 			continue
 		}
 		if err != nil {
@@ -174,7 +178,11 @@ func (s *Server) tryVerifiedRaw(w http.ResponseWriter, r *http.Request, scope ra
 		framing += "; final-LF"
 	}
 	w.Header().Set("X-Raw-Framing", framing)
-	w.Header().Set("X-Verification-Scope", "verified-current-source-members")
+	if scope.datacenterRejected {
+		w.Header().Set("X-Verification-Scope", "ads-datacenter-rejection")
+	} else {
+		w.Header().Set("X-Verification-Scope", "verified-current-source-members")
+	}
 	if r.Method != http.MethodHead {
 		_, _ = spool.WriteTo(w)
 	}
