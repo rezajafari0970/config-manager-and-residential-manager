@@ -82,6 +82,7 @@ type admittedQueue struct {
 	governor      *resources.Controller
 	budget        reservationDriver
 	release       func()
+	active        *atomic.Int32
 }
 
 func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
@@ -99,10 +100,23 @@ func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
 	release := func() {}
 	if q.budget != nil {
 		var ok bool
-		if priority, yes := q.budget.(interface{ TryProbe(int64) (func(), bool) }); yes && q.prefix != "/side" {
-			release, ok = priority.TryProbe(384 * 1024 * 1024)
+		const probeBytes = 384 * 1024 * 1024
+		priority, shared := q.budget.(interface{ TryProbe(int64) (func(), bool) })
+		if shared && q.prefix != "/side" {
+			release, ok = priority.TryProbe(probeBytes)
 		} else {
-			release, ok = q.budget.Try(384 * 1024 * 1024)
+			release, ok = q.budget.Try(probeBytes)
+			// Any available slot can represent this process. Idle/over-target
+			// slots do not accumulate large reservations in the shared pool.
+			if !ok && shared && q.prefix == "/side" && q.active != nil && q.active.Load() < 2 {
+				var ready bool
+				if err := q.call(ctx, "/ready", nil, &ready); err != nil {
+					return nil, err
+				}
+				if ready {
+					release, ok = priority.TryProbe(probeBytes)
+				}
+			}
 		}
 		if !ok {
 			return nil, nil
@@ -114,7 +128,12 @@ func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
 		j = nil
 		return nil, e
 	}
-	q.release = release
+	if q.active != nil {
+		q.active.Add(1)
+		q.release = func() { release(); q.active.Add(-1) }
+	} else {
+		q.release = release
+	}
 	return j, e
 }
 
@@ -308,7 +327,7 @@ func run() error {
 		wg.Add(1)
 		go func(slot int) {
 			defer wg.Done()
-			q := &admittedQueue{client: c, slot: slot, maximum: slots, governor: &governor, budget: resources.Budget{Directory: os.Getenv("CONFIG_REPAIR_RESOURCE_DIR")}}
+			q := &admittedQueue{client: c, slot: slot, maximum: slots, governor: &governor, active: &active, budget: resources.Budget{Directory: os.Getenv("CONFIG_REPAIR_RESOURCE_DIR")}}
 			defer func() {
 				if q.release != nil {
 					q.release()
@@ -316,8 +335,6 @@ func run() error {
 			}()
 			worker.RunSlot(ctx, q, func(ctx context.Context, slot int, j probe.Job) {
 				defer func() { q.release(); q.release = nil }()
-				active.Add(1)
-				defer active.Add(-1)
 				execute(ctx, c, *helper, *core, slot, j)
 			}, slot, interval, 2*time.Second)
 		}(slot)

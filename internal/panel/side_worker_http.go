@@ -12,6 +12,16 @@ import (
 
 // Only registered on the local protected worker socket.
 func (s *Store) registerPrivateSide(mux *http.ServeMux) {
+	// Readiness never issues a lease. When resources are saturated this lets
+	// the supervisor advertise demand for the shared budget only for real work.
+	mux.HandleFunc("POST /side/ready", func(w http.ResponseWriter, r *http.Request) {
+		ready, err := s.SideReady(r.Context())
+		if err != nil {
+			failure(w, err)
+			return
+		}
+		respond(w, http.StatusOK, ready)
+	})
 	mux.HandleFunc("POST /side/claim", func(w http.ResponseWriter, r *http.Request) {
 		settings, err := s.ProbeSettings(r.Context())
 		if err != nil {

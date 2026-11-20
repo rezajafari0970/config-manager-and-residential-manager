@@ -150,7 +150,12 @@ func (b Budget) tryClass(bytes, available, limit int64, alive func(int) (string,
 }
 
 func (b Budget) tryDemand(bytes, available, limit int64, alive func(int) (string, error), control, priority bool) (func(), bool) {
-	if bytes <= 0 || available < 512*1024*1024+bytes {
+	return b.tryDemandForPID(bytes, available, limit, alive, control, priority, os.Getpid())
+}
+
+func (b Budget) tryDemandForPID(bytes, available, limit int64, alive func(int) (string, error), control, priority bool, pid int) (func(), bool) {
+	const floor = 512 * 1024 * 1024
+	if bytes <= 0 || limit <= 0 || available < 0 || (!priority && available-floor < bytes) {
 		return nil, false
 	}
 	info, e := os.Lstat(b.Directory)
@@ -183,9 +188,13 @@ func (b Budget) tryDemand(bytes, available, limit int64, alive func(int) (string
 	if e != nil {
 		return nil, false
 	}
-	// A short-lived waiting ordinary probe can accumulate its larger permit
-	// instead of losing every released 128MiB chunk to a smaller Ads job.
-	var pending int64
+	now := time.Now()
+	start, e := alive(pid)
+	if e != nil {
+		return nil, false
+	}
+	request := demand{PID: pid, Start: start, Bytes: bytes, Since: now.UnixNano(), Until: now.Add(demandTTL).UnixMilli()}
+	var waiting []demand
 	for _, entry := range entries {
 		if !strings.HasPrefix(entry.Name(), "demand-") {
 			continue
@@ -204,16 +213,23 @@ func (b Budget) tryDemand(bytes, available, limit int64, alive func(int) (string
 			return nil, false
 		}
 		start, e := alive(d.PID)
-		if os.IsNotExist(e) || (e == nil && start != d.Start) || time.Now().UnixMilli() > d.Until {
+		if os.IsNotExist(e) || (e == nil && start != d.Start) || now.UnixMilli() >= d.Until {
 			os.Remove(path)
 			continue
 		}
 		if e != nil {
 			return nil, false
 		}
-		pending = max(pending, d.Bytes)
+		if d.Since == 0 {
+			// A worker from the previous release wrote only the expiration.
+			d.Since = time.UnixMilli(d.Until).Add(-demandTTL).UnixNano()
+		}
+		if d.PID == pid && d.Start == request.Start && d.Bytes == bytes {
+			request.Since = d.Since
+		}
+		waiting = append(waiting, d)
 	}
-	var used int64
+	remaining := limit
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".permit") {
 			continue
@@ -247,31 +263,30 @@ func (b Budget) tryDemand(bytes, available, limit int64, alive func(int) (string
 		if control && !r.Control {
 			continue
 		}
-		if r.Bytes > limit-used {
-			if priority {
-				b.rememberDemand(bytes, alive, owner)
-			}
-			return nil, false
+		remaining = max(int64(0), remaining-r.Bytes)
+	}
+	// The physical floor still applies if the shared reservation pool is bigger.
+	// Account for every earlier live waiter before lending genuinely spare memory.
+	remaining = min(remaining, max(int64(0), available-floor))
+	matched := false
+	for _, d := range waiting {
+		if d.PID == pid && d.Start == start && d.Bytes == bytes {
+			matched = true
 		}
-		used += r.Bytes
+		if control || d.Bytes > limit {
+			continue
+		}
+		if !priority || d.Since < request.Since || (d.Since == request.Since && d.PID < request.PID) {
+			remaining = max(int64(0), remaining-d.Bytes)
+		}
 	}
-	if !control && !priority && pending > 0 && bytes > limit-used-pending {
-		return nil, false
-	}
-	if bytes > limit-used {
-		if priority {
-			b.rememberDemand(bytes, alive, owner)
+	if bytes > remaining {
+		if priority && bytes <= limit {
+			b.rememberDemand(request, owner)
 		}
 		return nil, false
 	}
-	if priority {
-		os.Remove(filepath.Join(b.Directory, fmt.Sprintf("demand-%d.json", os.Getpid())))
-	}
-	start, e := alive(os.Getpid())
-	if e != nil {
-		return nil, false
-	}
-	data, e := json.Marshal(reservation{PID: os.Getpid(), Start: start, Bytes: bytes, Control: control})
+	data, e := json.Marshal(reservation{PID: pid, Start: start, Bytes: bytes, Control: control})
 	if e != nil {
 		return nil, false
 	}
@@ -294,9 +309,12 @@ func (b Budget) tryDemand(bytes, available, limit int64, alive func(int) (string
 	if e != nil || closeErr != nil {
 		return nil, false
 	}
-	path := filepath.Join(b.Directory, fmt.Sprintf("%d-%d-%s.permit", os.Getpid(), time.Now().UnixNano(), filepath.Base(name)))
+	path := filepath.Join(b.Directory, fmt.Sprintf("%d-%d-%s.permit", pid, time.Now().UnixNano(), filepath.Base(name)))
 	if os.Rename(name, path) != nil {
 		return nil, false
+	}
+	if !control && (priority || matched) {
+		_ = os.Remove(filepath.Join(b.Directory, fmt.Sprintf("demand-%d.json", pid)))
 	}
 	return func() { _ = os.Remove(path) }, true
 }
@@ -314,18 +332,16 @@ func (b Budget) TryProbe(bytes int64) (func(), bool) {
 	return b.tryDemand(bytes, available, limit, processStart, false, true)
 }
 
+const demandTTL = 3 * time.Second
+
 type demand struct {
-	PID          int
-	Start        string
-	Bytes, Until int64
+	PID                 int
+	Start               string
+	Bytes, Until, Since int64
 }
 
-func (b Budget) rememberDemand(bytes int64, alive func(int) (string, error), owner *syscall.Stat_t) {
-	start, e := alive(os.Getpid())
-	if e != nil {
-		return
-	}
-	data, _ := json.Marshal(demand{os.Getpid(), start, bytes, time.Now().Add(3 * time.Second).UnixMilli()})
+func (b Budget) rememberDemand(request demand, owner *syscall.Stat_t) {
+	data, _ := json.Marshal(request)
 	f, e := os.CreateTemp(b.Directory, "waiting-")
 	if e != nil {
 		return
@@ -346,5 +362,5 @@ func (b Budget) rememberDemand(bytes int64, alive func(int) (string, error), own
 	if f.Close() != nil {
 		return
 	}
-	os.Rename(f.Name(), filepath.Join(b.Directory, fmt.Sprintf("demand-%d.json", os.Getpid())))
+	os.Rename(f.Name(), filepath.Join(b.Directory, fmt.Sprintf("demand-%d.json", request.PID)))
 }

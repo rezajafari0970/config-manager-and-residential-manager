@@ -297,6 +297,9 @@ PRAGMA user_version=1;`)
 	if err = s.migrateV56(); err != nil {
 		return nil, err
 	}
+	if err = ensureSideDispatch(s.db); err != nil {
+		return nil, err
+	}
 	// Reconcile transient children left by older connections with foreign keys
 	// disabled. This never deletes source definitions or a still-owned artifact.
 	if err = s.reconcileTransient(); err != nil {

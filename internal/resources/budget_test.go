@@ -2,8 +2,10 @@ package resources
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -46,7 +48,7 @@ func TestWaitingLargeProbeAccumulatesReleasedMemory(t *testing.T) {
 	}
 	small()
 	// A crashed or idle worker cannot reserve capacity forever.
-	data, _ := json.Marshal(demand{os.Getpid(), "boot:100", gib, time.Now().Add(-time.Second).UnixMilli()})
+	data, _ := json.Marshal(demand{PID: os.Getpid(), Start: "boot:100", Bytes: gib, Until: time.Now().Add(-time.Second).UnixMilli()})
 	os.WriteFile(filepath.Join(dir, "demand-expired.json"), data, 0600)
 	small, ok = b.try(unit, 4*gib, gib, alive)
 	if !ok {
@@ -149,6 +151,120 @@ func TestCollectionReserveSurvivesBusyWorkersWithoutOvercommit(t *testing.T) {
 	r, ok := b.tryClass(64*1024*1024, 4*gib, 128*1024*1024, alive, true)
 	if !ok {
 		t.Fatal("control permit did not recover")
+	}
+	r()
+}
+
+func TestCompetingPriorityProcessesRetainFIFOAndLendSpareCapacity(t *testing.T) {
+	const large = 384 << 20
+	const capacity = 3 * large
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	b := Budget{dir}
+	alive := func(pid int) (string, error) { return strconv.Itoa(pid) + ":start", nil }
+	try := func(pid int, bytes int64, priority bool) (func(), bool) {
+		return b.tryDemandForPID(bytes, 4*gib, capacity, alive, false, priority, pid)
+	}
+	wait := func(pid int) {
+		t.Helper()
+		if r, ok := try(pid, large, true); ok {
+			r()
+			t.Fatalf("priority process %d jumped the queue", pid)
+		}
+	}
+	read := func(pid int) demand {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("demand-%d.json", pid)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d demand
+		if err = json.Unmarshal(data, &d); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	// A full pool, two supervisors waiting. Refreshing cannot surrender a turn.
+	holds := make([]func(), 3)
+	for i := range holds {
+		r, ok := try(40, large, false)
+		if !ok {
+			t.Fatal("setup")
+		}
+		holds[i] = r
+	}
+	wait(20)
+	before := read(20)
+	wait(10)
+	wait(20)
+	if after := read(20); after.Since != before.Since || after.Until < before.Until {
+		t.Fatal("refresh changed or shortened arrival")
+	}
+	holds[0]()
+	wait(10)
+	if r, ok := try(50, large/3, false); ok {
+		r()
+		t.Fatal("small process consumed the oldest waiter's headroom")
+	}
+	r, ok := try(20, large, true)
+	if !ok {
+		t.Fatal("oldest large request starved")
+	}
+	// On its next turn the first process becomes a new arrival behind PID 10.
+	wait(20)
+	r()
+	wait(20)
+	r, ok = try(10, large, true)
+	if !ok {
+		t.Fatal("second process starved")
+	}
+	r()
+	holds[1]()
+	// There is enough room for the oldest plus this newcomer; lend the spare.
+	r, ok = try(30, large, true)
+	if !ok {
+		t.Fatal("held capacity beyond the older request")
+	}
+	second, ok := try(20, large, true)
+	if !ok {
+		t.Fatal("newcomer consumed reserved headroom")
+	}
+	second()
+	r()
+	holds[2]()
+}
+
+func TestPriorityDemandTieAndPhysicalFloor(t *testing.T) {
+	const large = 384 << 20
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	b := Budget{dir}
+	alive := func(int) (string, error) { return "start", nil }
+	now := time.Now()
+	for _, pid := range []int{21, 13} {
+		waiter := demand{PID: pid, Start: "start", Bytes: large, Since: now.UnixNano(), Until: now.Add(demandTTL).UnixMilli()}
+		blob, _ := json.Marshal(waiter)
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("demand-%d.json", pid)), blob, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Reservation headroom can be ample while host RAM can fit only one.
+	const available = 512<<20 + large
+	if r, ok := b.tryDemandForPID(large, available, 4*gib, alive, false, true, 21); ok {
+		r()
+		t.Fatal("equal timestamp ignored PID tie-breaker")
+	}
+	if r, ok := b.tryDemandForPID(large, available-1, 4*gib, alive, false, true, 13); ok {
+		r()
+		t.Fatal("priority spent control floor")
+	}
+	r, ok := b.tryDemandForPID(large, available, 4*gib, alive, false, true, 13)
+	if !ok {
+		t.Fatal("winning wait never admitted")
 	}
 	r()
 }

@@ -619,6 +619,9 @@ func (s *Store) Expire(ctx context.Context, now time.Time) error {
 		return e
 	}
 	defer tx.Rollback()
+	if e = settleSideLeases(ctx, tx, now.UnixMilli()); e != nil {
+		return e
+	}
 	if _, e = tx.ExecContext(ctx, "UPDATE side_jobs SET state='expired',code='retention_elapsed_before_assessment',token='',lease_until=0 WHERE state='pending' AND expires<=?", now.UnixMilli()); e != nil {
 		return e
 	}

@@ -52,11 +52,8 @@ func (s *Store) ClaimSide(ctx context.Context) (*SideJob, error) {
 		return nil, err
 	}
 	defer release()
-	const ready = `SELECT EXISTS(SELECT 1 FROM side_work WHERE next_run<=? AND lease_until<=?) AND
- (SELECT count(*) FROM side_jobs WHERE token!='' AND lease_until>?)<8`
-	var due bool
-	now := time.Now().UnixMilli()
-	if err = s.workerReader().QueryRowContext(ctx, ready, now, now, now).Scan(&due); err != nil || !due {
+	due, err := s.SideReady(ctx)
+	if err != nil || !due {
 		return nil, err
 	}
 	tx, err := s.admittedTransaction(ctx, false)
@@ -67,25 +64,38 @@ func (s *Store) ClaimSide(ctx context.Context) (*SideJob, error) {
 	if _, err = tx.ExecContext(ctx, "UPDATE side_jobs SET token=token WHERE 0"); err != nil {
 		return nil, err
 	}
-	now = time.Now().UnixMilli()
-	if _, err = tx.ExecContext(ctx, `UPDATE side_jobs SET state='inconclusive',code='worker_lease_exhausted',finished=?,lease_until=0,token=''
- WHERE state='pending' AND token!='' AND lease_until<=? AND attempts>=?`, now, now, sideAttempts); err != nil {
+	now := time.Now().UnixMilli()
+	if err = settleSideLeases(ctx, tx.Tx, now); err != nil {
 		return nil, err
 	}
-	if err = tx.QueryRowContext(ctx, ready, now, now, now).Scan(&due); err != nil {
+	due, err = sideReadyAt(ctx, tx.Tx, now)
+	if err != nil {
 		return nil, err
 	}
 	if !due {
 		return nil, tx.Commit()
 	}
-	j := SideJob{Token: randomToken()}
-	var size int64
-	err = tx.QueryRowContext(ctx, `SELECT identity,raw_hash,kind,size FROM side_work WHERE next_run<=? AND lease_until<=?
- ORDER BY next_run,admitted,identity LIMIT 1`, now, now).Scan(&j.Identity, &j.Hash, &j.Kind, &size)
+	j, size, fresh, err := selectSideGrant(ctx, tx.Tx, now)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE side_jobs SET attempts=attempts+1,token=?,lease_until=? WHERE identity=?`, j.Token, now+sideLease.Milliseconds(), j.Identity); err != nil {
+	if j == nil {
+		return nil, tx.Commit()
+	}
+	j.Token = randomToken()
+	res, err := tx.ExecContext(ctx, `UPDATE side_jobs SET attempts=attempts+1,token=?,lease_until=? WHERE identity=?
+ AND EXISTS(SELECT 1 FROM side_work w WHERE w.identity=side_jobs.identity)`, j.Token, now+sideLease.Milliseconds(), j.Identity)
+	if err != nil {
+		return nil, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, tx.Commit()
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, sideTurnKey, fresh); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -94,7 +104,7 @@ func (s *Store) ClaimSide(ctx context.Context) (*SideJob, error) {
 	release()
 	if size > repair.MaxBytes {
 		j.Issue = "input_size_limit"
-		return &j, nil
+		return j, nil
 	}
 	raw, err := s.sideRaw(j.Hash)
 	if err != nil {
@@ -102,7 +112,7 @@ func (s *Store) ClaimSide(ctx context.Context) (*SideJob, error) {
 	} else {
 		j.Raw = raw
 	}
-	return &j, nil
+	return j, nil
 }
 
 func (s *Store) sideRaw(hash string) ([]byte, error) {

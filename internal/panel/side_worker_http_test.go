@@ -28,6 +28,9 @@ func TestSidePrivateRPCRequiresAuthenticatedRuntimeReceipt(t *testing.T) {
 		}
 		return w.Body.Bytes()
 	}
+	if a, b := post("ready", nil, 200), post("ready", nil, 200); string(bytes.TrimSpace(a)) != "true" || !bytes.Equal(a, b) {
+		t.Fatal("readiness consumed eligible Side work")
+	}
 	var j probe.Job
 	if err := json.Unmarshal(post("claim", nil, 200), &j); err != nil || j.Identity == "" {
 		t.Fatal("no Side job on private socket", err)
@@ -50,6 +53,9 @@ func TestSidePrivateRPCRequiresAuthenticatedRuntimeReceipt(t *testing.T) {
 	post("complete", v, 200)
 	post("complete", v, 200)
 	post("renew", key, 409)
+	if r := post("ready", nil, 200); string(bytes.TrimSpace(r)) != "false" {
+		t.Fatal("settled work advertised memory demand")
+	}
 	if got := post("claim", nil, 200); !bytes.Equal(bytes.TrimSpace(got), []byte("null")) {
 		t.Fatal("settled identity received another Side grant")
 	}
