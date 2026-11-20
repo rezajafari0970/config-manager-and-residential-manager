@@ -311,3 +311,29 @@ func TestSideInfrastructureRecoveryRequiresNewBytesAfterObservedRecoveryAndIsBou
 		t.Fatal("unbounded recovery", err)
 	}
 }
+
+func TestSideWaitStartsAtQueueAdmission(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	start := time.Now().UnixMilli()
+	id, _ := newExportSource(t, s, "existing-source", sourceURI(51))
+	// Reproduce a first Side admission of a still-valid source artifact that
+	// predates this feature. Its ordinary retention clock must be preserved.
+	if _, err := s.db.Exec(`DELETE FROM side_jobs; UPDATE artifacts SET created=created-3600000;
+		INSERT INTO side_receipts SELECT m.source_id,m.artifact_id,m.raw_hash,m.kind,m.size,a.created,a.expires,0
+		FROM memberships m JOIN artifacts a ON a.id=m.artifact_id WHERE m.source_id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := s.SideCounts(ctx)
+	if err != nil || counts.Pending != 1 || counts.OldestPending < start {
+		t.Fatalf("wait includes time before feature admission: %+v, %v", counts, err)
+	}
+	if _, err := s.db.Exec("UPDATE side_jobs SET queued_at=queued_at-3000"); err != nil {
+		t.Fatal(err)
+	}
+	commitProbeInputs(t, s, id, sourceURI(51))
+	refetched, err := s.SideCounts(ctx)
+	if err != nil || refetched.OldestPending != counts.OldestPending-3000 {
+		t.Fatal("repeat fetch reset waiting time", err)
+	}
+}

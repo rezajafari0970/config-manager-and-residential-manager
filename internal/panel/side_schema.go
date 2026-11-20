@@ -14,7 +14,7 @@ func migrateSide(tx *sql.Tx) error {
 	_, err := tx.Exec(`
  CREATE TABLE IF NOT EXISTS side_jobs(
  identity TEXT PRIMARY KEY,raw_hash TEXT NOT NULL,kind TEXT NOT NULL,size INTEGER NOT NULL,
- admitted INTEGER NOT NULL,expires INTEGER NOT NULL,
+ admitted INTEGER NOT NULL,expires INTEGER NOT NULL,queued_at INTEGER NOT NULL,
  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN('pending','accepted','rejected','inconclusive','expired')),
  token TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,
  repairs INTEGER NOT NULL DEFAULT 0 CHECK(repairs IN(0,1)),next_run INTEGER NOT NULL DEFAULT 0,finished INTEGER NOT NULL DEFAULT 0,code TEXT NOT NULL DEFAULT '',
@@ -48,13 +48,13 @@ func migrateSide(tx *sql.Tx) error {
  -- A real response and a subsequent healthy worker measurement authorize
  -- one final grant for an input which never received a measured verdict.
  -- A 304, restart, ordinary reappearance, or changed worker flag cannot.
- UPDATE side_jobs SET state='pending',repairs=1,attempts=2,raw_hash=new.raw_hash,kind=new.kind,size=new.size,
+ UPDATE side_jobs SET state='pending',queued_at=` + sideNow + `,repairs=1,attempts=2,raw_hash=new.raw_hash,kind=new.kind,size=new.size,
  expires=min(expires,new.expires),next_run=` + sideNow + `,finished=0,code='infrastructure_recovery'
  WHERE identity=new.identity AND state='inconclusive' AND repairs=0 AND new.fresh_payload=1 AND expires>` + sideNow + `
  AND finished<(SELECT last_measured FROM side_metrics WHERE id=1);
- INSERT INTO side_jobs(identity,raw_hash,kind,size,admitted,expires,next_run)
- VALUES(new.identity,new.raw_hash,new.kind,new.size,new.admitted,new.expires,new.admitted)
- ON CONFLICT(identity) DO UPDATE SET admitted=excluded.admitted,expires=excluded.expires,
+ INSERT INTO side_jobs(identity,raw_hash,kind,size,admitted,expires,next_run,queued_at)
+ VALUES(new.identity,new.raw_hash,new.kind,new.size,new.admitted,new.expires,new.admitted,` + sideNow + `)
+ ON CONFLICT(identity) DO UPDATE SET admitted=excluded.admitted,expires=excluded.expires,queued_at=excluded.queued_at,
  raw_hash=excluded.raw_hash,kind=excluded.kind,size=excluded.size,state='pending',code='',token='',lease_until=0,next_run=excluded.admitted
  WHERE side_jobs.state IN('pending','expired') AND side_jobs.expires<=` + sideNow + `;
  INSERT OR IGNORE INTO side_sources SELECT new.source_id,j.identity,j.expires FROM side_jobs j

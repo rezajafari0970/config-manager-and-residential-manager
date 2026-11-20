@@ -259,8 +259,8 @@ func (s *Store) CompleteSide(ctx context.Context, r SideResult) error {
 func (s *Store) SideCounts(ctx context.Context) (SideStats, error) {
 	var v SideStats
 	now := readStamp(ctx)
-	err := s.read(ctx).QueryRowContext(ctx, `WITH work AS MATERIALIZED (SELECT lease_until,admitted FROM side_work), exports AS MATERIALIZED (SELECT engine FROM side_export_inputs)
- SELECT (SELECT coalesce(min(admitted),0) FROM work WHERE lease_until<=?),(SELECT count(*) FROM work WHERE lease_until<=?),(SELECT count(*) FROM work WHERE lease_until>?),
+	err := s.read(ctx).QueryRowContext(ctx, `WITH work AS MATERIALIZED (SELECT lease_until,queued_at FROM side_work), exports AS MATERIALIZED (SELECT engine FROM side_export_inputs)
+ SELECT (SELECT coalesce(min(queued_at),0) FROM work WHERE lease_until<=?),(SELECT count(*) FROM work WHERE lease_until<=?),(SELECT count(*) FROM work WHERE lease_until>?),
  (SELECT count(*) FROM exports),(SELECT count(*) FROM exports WHERE engine='xray'),
  (SELECT count(*) FROM side_jobs WHERE state='rejected' AND expires>?),
  (SELECT count(*) FROM side_jobs WHERE state='inconclusive' AND expires>?),
