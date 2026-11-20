@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/side"
 )
 
 func TestSideDispatchFreshAndOldestAcrossLargeSeedAndRestart(t *testing.T) {
@@ -95,11 +97,14 @@ func TestSideDispatchFreshAndOldestAcrossLargeSeedAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	sideClaim(t, s)
-	if _, err = s.db.Exec("UPDATE side_jobs SET next_run=0 WHERE identity='seed-0113'"); err != nil {
+	if _, err = s.db.Exec("UPDATE side_jobs SET next_run=0 WHERE token=''"); err != nil {
 		t.Fatal(err)
 	}
+	for i := 8; i < side.MaxWorkers; i++ {
+		sideClaim(t, s)
+	}
 	if ready, err := s.SideReady(ctx); err != nil || ready {
-		t.Fatal("advertised work above eight-grant cap", err)
+		t.Fatal("advertised work above Side lease ceiling", err)
 	}
 }
 

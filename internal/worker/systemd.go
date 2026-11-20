@@ -1,4 +1,4 @@
-package main
+package worker
 
 import (
 	"net"
@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// The optional systemd driver is independent of queue/API availability. The
+// NotifySystemd sends a bounded status notification. The driver is independent of queue/API availability. The
 // coordinator emits watchdog ticks only while its own loop is making progress.
-func notifySystemd(message string) {
+func NotifySystemd(message string) {
 	path := os.Getenv("NOTIFY_SOCKET")
 	if path == "" {
 		return

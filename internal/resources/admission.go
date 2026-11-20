@@ -88,10 +88,33 @@ func (SharedHost) Capacity(maximum int, s Sample) int {
 	return n
 }
 
+// NetworkProbes keep concurrent TLS sessions alive while they wait for remote
+// endpoints. CPU "some" pressure includes every short-lived runnable process,
+// so apply gradual limits here while retaining the shared memory and I/O rules.
+type NetworkProbes struct{}
+
+func (NetworkProbes) Capacity(maximum int, s Sample) int {
+	cpu := s.CPU
+	s.CPU = 0
+	n := (SharedHost{}).Capacity(maximum, s)
+	switch {
+	case cpu >= 90:
+		return min(n, 2)
+	case cpu >= 75:
+		return min(n, max(2, maximum/4))
+	case cpu >= 55:
+		return min(n, max(2, maximum/2))
+	case cpu >= 35:
+		return min(n, max(2, maximum*3/4))
+	}
+	return n
+}
+
 type Controller struct {
 	mu               sync.Mutex
 	Sensor           Sensor
 	Policy           Policy
+	RecoveryInterval time.Duration // defaults to ten seconds
 	current, maximum int
 	sampled, changed time.Time
 }
@@ -112,6 +135,10 @@ func (g *Controller) Capacity(maximum int, now time.Time) int {
 	if policy == nil {
 		policy = SharedHost{}
 	}
+	recovery := g.RecoveryInterval
+	if recovery <= 0 {
+		recovery = 10 * time.Second
+	}
 	target := max(0, min(maximum, policy.Capacity(maximum, sensor.Sample())))
 	if g.sampled.IsZero() || target < g.current {
 		g.current = target
@@ -119,7 +146,7 @@ func (g *Controller) Capacity(maximum int, now time.Time) int {
 	} else if target == g.current && target < maximum {
 		// Sustained pressure is not quiet recovery time.
 		g.changed = now
-	} else if target > g.current && now.Sub(g.changed) >= 10*time.Second {
+	} else if target > g.current && now.Sub(g.changed) >= recovery {
 		g.current = min(target, g.current+1)
 		g.changed = now
 	}

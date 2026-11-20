@@ -383,12 +383,12 @@ func run() error {
 			}
 		}(slot)
 	}
-	notifySystemd("READY=1")
-	defer notifySystemd("STOPPING=1")
+	worker.NotifySystemd("READY=1")
+	defer worker.NotifySystemd("STOPPING=1")
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
-		notifySystemd("WATCHDOG=1")
+		worker.NotifySystemd("WATCHDOG=1")
 		capacityLimit.Store(int32(governor.update(resourceCapacity(*workers, sampleResources(*prefix)), time.Now())))
 		_ = c.call(ctx, "status", map[string]any{"status": "running", "active": active.Load(), "code": fmt.Sprintf("capacity_%d", capacityLimit.Load())}, nil)
 		select {

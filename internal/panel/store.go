@@ -40,7 +40,7 @@ type Store struct {
 	rotationLocks       map[string]*rotationLock
 }
 
-const currentSchemaVersion = 56
+const currentSchemaVersion = 57
 
 func Open(path string, key []byte) (*Store, error) {
 	if len(key) != 32 || !filepath.IsAbs(path) {
@@ -295,6 +295,9 @@ PRAGMA user_version=1;`)
 		return nil, err
 	}
 	if err = s.migrateV56(); err != nil {
+		return nil, err
+	}
+	if err = s.migrateV57(); err != nil {
 		return nil, err
 	}
 	if err = ensureSideDispatch(s.db); err != nil {

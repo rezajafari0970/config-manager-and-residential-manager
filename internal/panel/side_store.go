@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/protocolpolicy"
@@ -158,42 +159,86 @@ func (s *Store) RenewSide(ctx context.Context, j SideJob) error {
 	return s.updateSideGrant(ctx, "UPDATE side_jobs SET lease_until="+sideNow+"+? WHERE "+sideGrant, sideLease.Milliseconds(), j.Identity, j.Hash, j.Token)
 }
 
-func (s *Store) DeferSide(ctx context.Context, j SideJob, code string) error {
-	if !safeCode(code) {
+func (s *Store) DeferSide(ctx context.Context, j SideJob, code string, evidence map[string]string) error {
+	if !safeCode(code) || !boundedSideEvidence(evidence) {
 		return ErrInvalid
+	}
+	b, err := json.Marshal(evidence)
+	if err != nil {
+		return err
 	}
 	now := time.Now().UnixMilli()
 	// A run without a measurement never becomes evidence of a service failure.
 	// Put fresh inputs ahead of retry work. Bound failures of the local worker.
-	return s.updateSideGrant(ctx, `UPDATE side_jobs SET token='',lease_until=0,code=?,
+	return s.updateSideGrant(ctx, `UPDATE side_jobs SET token='',lease_until=0,code=?,evidence=?,
  state=CASE WHEN attempts>=? THEN 'inconclusive' ELSE 'pending' END,
  finished=CASE WHEN attempts>=? THEN ? ELSE 0 END,next_run=?+min(60,attempts*5)*1000 WHERE `+sideGrant,
-		code, sideAttempts, sideAttempts, now, now, j.Identity, j.Hash, j.Token)
+		code, string(b), sideAttempts, sideAttempts, now, now, j.Identity, j.Hash, j.Token)
 }
 
 var sideServices = [...]string{"google", "facebook", "instagram", "twitter", "telegram", "upload", "download", "stability", "cloudflare", "warp"}
 
-func validSideEvidence(r SideResult) bool {
-	if !safeCode(r.Code) || len(r.Evidence) > 40 || !validDigest(r.Hash) || r.Identity == "" || r.Token == "" {
+// Only a concrete remote observation contributes to network coverage. A
+// missing executable may have a diagnosis but made no service request.
+var sideMeasuredOutcomes = []string{"passed", "warp_not_active", "provider_unavailable", "timeout",
+	"transport_failed", "unverified_connection", "unexpected_http_status", "unexpected_content",
+	"incomplete_response", "incomplete_upload", "response_too_large"}
+
+// A complete template and a distinct raw failure can each carry ten outcomes
+// plus compatibility, byte and runtime receipts. Bound both dimensions.
+func boundedSideEvidence(e map[string]string) bool {
+	if len(e) > 64 {
 		return false
 	}
-	for key, value := range r.Evidence {
+	for key, value := range e {
 		if !safeCode(key) || !safeCode(value) {
 			return false
 		}
 	}
-	passed := true
-	for _, k := range sideServices {
-		if r.Evidence[k] != "passed" {
+	return true
+}
+
+func sideProfile(e map[string]string, prefix string) (complete, passed bool) {
+	passed = true
+	for _, service := range sideServices {
+		outcome := e[prefix+service]
+		if !slices.Contains(sideMeasuredOutcomes, outcome) {
+			return false, false
+		}
+		if outcome != "passed" {
 			passed = false
 		}
 	}
+	return true, passed
+}
+
+func validSideEvidence(r SideResult) bool {
+	if !safeCode(r.Code) || !boundedSideEvidence(r.Evidence) || !validDigest(r.Hash) || r.Identity == "" || r.Token == "" {
+		return false
+	}
+	version := r.Evidence["side_version"]
+	complete, passed := sideProfile(r.Evidence, "")
+	if version != "" || r.Code == "side_checks_failed" || r.Code == "passed" {
+		if !complete || (version != "side_v1" && version != "side_v2") {
+			return false
+		}
+	}
 	if r.Code != "passed" {
-		return len(r.Candidate) == 0 && (!passed || r.Evidence["raw_checks"] == "failed")
+		if len(r.Candidate) != 0 {
+			return false
+		}
+		if r.Code == "side_checks_failed" && r.Evidence["raw_checks"] == "failed" {
+			rawComplete, rawPassed := sideProfile(r.Evidence, "raw_")
+			return passed && rawComplete && !rawPassed
+		}
+		// A candidate can work across all ten probes but still fail import or
+		// validation on the other supported core, or fail its raw runtime check.
+		return !passed || r.Evidence["raw_checks"] == "failed" ||
+			r.Evidence["app_import_contract"] == "failed" || r.Evidence["target_core"] == "failed"
 	}
 	return passed && len(r.Candidate) > 0 && len(r.Candidate) <= repair.MaxBytes &&
 		r.Evidence["raw_checks"] == "passed" && r.Evidence["raw_input_sha256"] == r.Hash && validDigest(r.Evidence["raw_runtime_sha256"]) &&
-		r.Evidence["side_version"] == "side_v1" && (r.Evidence["warp_mode"] == "on" || r.Evidence["warp_mode"] == "plus") &&
+		(r.Evidence["warp_mode"] == "on" || r.Evidence["warp_mode"] == "plus") &&
 		r.Evidence["upload_bytes"] == "131072" && r.Evidence["download_bytes"] == "262144" && r.Evidence["stability_samples"] == "3" &&
 		r.Evidence["candidate_sha256"] == repair.Digest(r.Candidate)
 }

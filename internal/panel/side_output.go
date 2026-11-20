@@ -31,12 +31,31 @@ func (m sideOutputModule) links() map[string]string {
 }
 
 func (m sideOutputModule) summary(w http.ResponseWriter, r *http.Request) {
-	counts, err := m.s.store.SideCounts(r.Context())
+	ctx, closeSnapshot, err := m.s.store.readSnapshot(r.Context())
 	if err != nil {
 		failure(w, err)
 		return
 	}
-	respond(w, http.StatusOK, map[string]any{"counts": counts, "links": m.links()})
+	defer closeSnapshot()
+	counts, err := m.s.store.SideCounts(ctx)
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	window, err := readSideThroughput(ctx, m.s.store.read(ctx))
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	var status string
+	var heartbeat int64
+	if err := m.s.store.read(ctx).QueryRowContext(ctx, "SELECT status,heartbeat FROM side_worker WHERE id=1").Scan(&status, &heartbeat); err != nil {
+		failure(w, err)
+		return
+	}
+	respond(w, http.StatusOK, map[string]any{"counts": counts, "throughput": window, "now": readStamp(ctx), "links": m.links(),
+		"worker": map[string]any{"status": status, "heartbeat": heartbeat}})
+
 }
 
 func sideTemplateEntries(ctx context.Context, q readQuerier) ([]networkEntry, error) {

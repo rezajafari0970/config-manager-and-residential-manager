@@ -8,6 +8,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/native"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/side"
 )
 
 // Only registered on the local protected worker socket.
@@ -67,7 +68,7 @@ func (s *Store) registerPrivateSide(mux *http.ServeMux) {
 		job := SideJob{Identity: v.Identity, Hash: v.Hash, Token: v.Token}
 		var err error
 		if sideInfrastructure(v) {
-			err = s.DeferSide(r.Context(), job, v.Code)
+			err = s.DeferSide(r.Context(), job, v.Code, v.Evidence)
 		} else {
 			err = s.CompleteSide(r.Context(), SideResult{Identity: v.Identity, Hash: v.Hash, Token: v.Token,
 				Code: v.Code, Evidence: v.Evidence, Candidate: v.Candidate})
@@ -82,7 +83,7 @@ func (s *Store) registerPrivateSide(mux *http.ServeMux) {
 		var v probe.WorkerStatus
 		r.Body = http.MaxBytesReader(w, r.Body, 4096)
 		if decode(r, &v) != nil || !safeCode(v.Status) || (v.Code != "" && !safeCode(v.Code)) ||
-			v.Version != convert.Version || v.Active < 0 || v.Active > 8 {
+			v.Version != convert.Version || v.Active < 0 || v.Active > side.MaxWorkers {
 			failure(w, ErrInvalid)
 			return
 		}

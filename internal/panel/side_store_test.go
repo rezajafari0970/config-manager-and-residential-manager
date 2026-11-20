@@ -21,13 +21,24 @@ func sidePass(t *testing.T, job *SideJob) SideResult {
 		t.Fatalf("no fixture candidate: %s", p.Code)
 	}
 	c := p.Candidates[0]
-	e := map[string]string{"raw_input_sha256": job.Hash, "raw_runtime_sha256": p.RawCandidate.SHA256, "raw_checks": "passed", "side_version": "side_v1", "warp_mode": "on", "candidate_sha256": c.SHA256,
+	e := map[string]string{"raw_input_sha256": job.Hash, "raw_runtime_sha256": p.RawCandidate.SHA256, "raw_checks": "passed", "side_version": "side_v2", "warp_mode": "on", "candidate_sha256": c.SHA256,
 		"upload_bytes": "131072", "download_bytes": "262144", "stability_samples": "3"}
 	for _, k := range sideServices {
 		e[k] = "passed"
 	}
 	return SideResult{Identity: job.Identity, Hash: job.Hash, Token: job.Token, Code: "passed", Candidate: c.Config, Evidence: e}
 }
+func sideReject(t *testing.T, job *SideJob) SideResult {
+	t.Helper()
+	r := sidePass(t, job)
+	r.Code = "side_checks_failed"
+	r.Candidate = nil
+	delete(r.Evidence, "raw_checks")
+	r.Evidence["warp"] = "warp_not_active"
+	r.Evidence["warp_mode"] = "off"
+	return r
+}
+
 func sideClaim(t *testing.T, s *Store) *SideJob {
 	t.Helper()
 	j, err := s.ClaimSide(context.Background())
@@ -127,7 +138,7 @@ func TestSideInterruptedLeasesInfraAndFreshRejection(t *testing.T) {
 	if err := s.CompleteSide(ctx, sidePass(t, stale)); !errors.Is(err, ErrConflict) {
 		t.Fatal(err)
 	}
-	if err := s.DeferSide(ctx, *job, "side_driver_unavailable"); err != nil {
+	if err := s.DeferSide(ctx, *job, "side_driver_unavailable", nil); err != nil {
 		t.Fatal(err)
 	}
 	if j, err := s.ClaimSide(ctx); err != nil || j != nil {
@@ -137,7 +148,7 @@ func TestSideInterruptedLeasesInfraAndFreshRejection(t *testing.T) {
 		t.Fatal(err)
 	}
 	job = sideClaim(t, s)
-	if err := s.DeferSide(ctx, *job, "side_driver_unavailable"); err != nil {
+	if err := s.DeferSide(ctx, *job, "side_driver_unavailable", nil); err != nil {
 		t.Fatal(err)
 	}
 	if stats, err := s.SideCounts(ctx); err != nil || stats.Inconclusive != 1 || stats.Rejected+stats.Pending != 0 {
@@ -151,7 +162,7 @@ func TestSideInterruptedLeasesInfraAndFreshRejection(t *testing.T) {
 	if !bytes.Equal(job.Raw, []byte(fresh)) {
 		t.Fatal("incorrect new grant")
 	}
-	r := SideResult{Identity: job.Identity, Token: job.Token, Hash: job.Hash, Code: "side_checks_failed", Evidence: map[string]string{"warp": "warp_not_active"}}
+	r := sideReject(t, job)
 	if err := s.CompleteSide(ctx, r); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +285,7 @@ func TestSideInfrastructureRecoveryRequiresNewBytesAfterObservedRecoveryAndIsBou
 	if _, err := s.db.Exec("UPDATE side_jobs SET attempts=3 WHERE identity=?", j.Identity); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeferSide(ctx, *j, "side_provider_unavailable"); err != nil {
+	if err := s.DeferSide(ctx, *j, "side_provider_unavailable", nil); err != nil {
 		t.Fatal(err)
 	}
 	refetch := func() {
@@ -302,7 +313,7 @@ func TestSideInfrastructureRecoveryRequiresNewBytesAfterObservedRecoveryAndIsBou
 	if recovered.Identity != j.Identity {
 		t.Fatal("recovered wrong identity")
 	}
-	if err := s.DeferSide(ctx, *recovered, "side_provider_unavailable"); err != nil {
+	if err := s.DeferSide(ctx, *recovered, "side_provider_unavailable", nil); err != nil {
 		t.Fatal(err)
 	}
 	refetch()

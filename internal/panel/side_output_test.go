@@ -40,9 +40,8 @@ func TestSideSubscriptionsSelectionRotationAndRevocation(t *testing.T) {
 	for range raw {
 		job := sideClaim(t, s)
 		if job.Hash == repair.Digest([]byte(raw[3])) {
-			result := SideResult{Identity: job.Identity, Hash: job.Hash, Token: job.Token, Code: "side_checks_failed",
-				Evidence: map[string]string{"warp": "warp_not_active", "google": "passed", "upload": "not_run",
-					"private_detail": "sensitive_fixture_marker"}}
+			result := sideReject(t, job)
+			result.Evidence["private_detail"] = "sensitive_fixture_marker"
 			if err := s.CompleteSide(ctx, result); err != nil {
 				t.Fatal(err)
 			}
@@ -74,12 +73,12 @@ func TestSideSubscriptionsSelectionRotationAndRevocation(t *testing.T) {
 			t.Fatal("missing diagnostic scope")
 		}
 		if entry.State == "rejected" && entry.Checks["warp"] == "warp_not_active" &&
-			entry.Checks["upload"] == "not_run" && entry.Checks["stability"] == "unrecorded" {
+			entry.Checks["upload"] == "passed" && entry.Checks["stability"] == "passed" {
 			classified = true
 		}
 	}
 	if !classified {
-		t.Fatal("missing separate negative, unrun and unrecorded outcomes")
+		t.Fatal("missing independently measured WARP and transfer outcomes")
 	}
 	assertExportLines(t, handler, links["configs.json"], expected)
 	rr := exportRequest(t, handler, "GET", links["raw.txt"])

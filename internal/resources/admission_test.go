@@ -87,3 +87,34 @@ func TestControllerAmortizesSensorsAndHonorsCeilingChanges(t *testing.T) {
 		t.Fatal("ignored lowered ceiling")
 	}
 }
+
+func TestNetworkProbeCapacityAndRecovery(t *testing.T) {
+	s := &fakeSensor{sample: Sample{AvailableKB: 4096 * 1024, CPU: 29, CPUValid: true, IOValid: true}}
+	var policy NetworkProbes
+	for _, scenario := range []struct {
+		cpu      float64
+		capacity int
+	}{
+		{29, 31}, {40, 23}, {60, 15}, {80, 7}, {92, 2},
+	} {
+		s.sample.CPU = scenario.cpu
+		if got := policy.Capacity(31, s.sample); got != scenario.capacity {
+			t.Fatalf("cpu=%.0f: capacity %d, want %d", scenario.cpu, got, scenario.capacity)
+		}
+	}
+	s.sample.AvailableKB = 400 * 1024
+	controller := Controller{Sensor: s, Policy: policy, RecoveryInterval: 2 * time.Second}
+	now := time.Now()
+	if got := controller.Capacity(31, now); got != 0 {
+		t.Fatal("critical memory admitted", got)
+	}
+	s.sample.AvailableKB = 4096 * 1024
+	s.sample.CPU = 0
+	if got := controller.Capacity(31, now.Add(2*time.Second)); got != 1 {
+		t.Fatal("no gradual recovery", got)
+	}
+	s.sample.IO = 26
+	if got := controller.Capacity(31, now.Add(4*time.Second)); got != 0 {
+		t.Fatal("critical I/O admitted", got)
+	}
+}

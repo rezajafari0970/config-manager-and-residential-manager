@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/side"
 )
 
 const sideBootstrapKey = "side-first-snapshot-clock"
@@ -13,8 +15,8 @@ const sideDue = "next_run<=?1 AND lease_until<=?1 AND attempts<?2"
 
 func sideReadyAt(ctx context.Context, q readQuerier, now int64) (bool, error) {
 	var ready bool
-	err := q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM side_jobs WHERE token!='' AND lease_until>?1)<8
- AND EXISTS(SELECT 1 FROM side_work WHERE `+sideDue+`)`, now, sideAttempts).Scan(&ready)
+	err := q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM side_jobs WHERE token!='' AND lease_until>?1)<?3
+ AND EXISTS(SELECT 1 FROM side_work WHERE `+sideDue+`)`, now, sideAttempts, side.MaxWorkers).Scan(&ready)
 	return ready, err
 }
 
@@ -46,8 +48,8 @@ func ensureSideDispatch(db *sql.DB) error {
 }
 
 const sideCandidateColumns = "SELECT identity,raw_hash,kind,size FROM side_work WHERE " + sideDue
-const sideSourceCandidate = sideCandidateColumns + " AND attempts=0 AND queued_at>?3 ORDER BY queued_at,identity LIMIT 1"
-const sideBacklogCandidate = sideCandidateColumns + " AND (attempts>0 OR queued_at<=?3) ORDER BY next_run,admitted,identity LIMIT 1"
+const sideSourceCandidate = sideCandidateColumns + " AND attempts=0 AND code!='side_profile_completion' AND queued_at>?3 ORDER BY queued_at,identity LIMIT 1"
+const sideBacklogCandidate = sideCandidateColumns + " AND (attempts>0 OR code='side_profile_completion' OR queued_at<=?3) ORDER BY next_run,admitted,identity LIMIT 1"
 
 // Alternate between genuinely new source admissions and the initial snapshot
 // plus retries. Waiting through an outage cannot move a source first behind
@@ -82,6 +84,6 @@ func selectSideGrant(ctx context.Context, tx *sql.Tx, now int64) (*SideJob, int6
 // normal sweeper even if no worker advertises network demand afterwards.
 func settleSideLeases(ctx context.Context, tx *sql.Tx, now int64) error {
 	_, err := tx.ExecContext(ctx, `UPDATE side_jobs SET state='inconclusive',code='worker_lease_exhausted',finished=?,lease_until=0,token=''
- WHERE state='pending' AND token!='' AND lease_until<=? AND attempts>=?`, now, now, sideAttempts)
+ WHERE state='pending' AND lease_until<=? AND attempts>=?`, now, now, sideAttempts)
 	return err
 }

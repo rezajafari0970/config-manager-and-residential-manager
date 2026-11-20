@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/worker"
 	"net"
 	"path/filepath"
 	"testing"
@@ -15,7 +16,7 @@ func TestWatchdogNotifiesConfiguredSocket(t *testing.T) {
 	}
 	defer listener.Close()
 	t.Setenv("NOTIFY_SOCKET", p)
-	notifySystemd("READY=1\nWATCHDOG=1")
+	worker.NotifySystemd("READY=1\nWATCHDOG=1")
 	listener.SetReadDeadline(time.Now().Add(time.Second))
 	b := make([]byte, 128)
 	n, _, err := listener.ReadFromUnix(b)
@@ -23,5 +24,5 @@ func TestWatchdogNotifiesConfiguredSocket(t *testing.T) {
 		t.Fatal(n, err)
 	}
 	t.Setenv("NOTIFY_SOCKET", "")
-	notifySystemd("WATCHDOG=1")
+	worker.NotifySystemd("WATCHDOG=1")
 }

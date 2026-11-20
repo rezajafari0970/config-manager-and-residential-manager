@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Current-client rejection regression; real checks run only inside the sandbox."""
 import argparse,copy,hashlib,importlib.util,json,pathlib,subprocess,unittest,uuid
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('driver',ROOT/'scripts/probe-one.py')
@@ -18,6 +20,44 @@ class FakeBox:
     def logs(self):return self.log
 
 class ClientGateTest(unittest.TestCase):
+    def test_side_does_not_build_unused_exports_after_a_full_network_failure(self):
+        args = SimpleNamespace(core='/target', client_core='/bundled')
+        receipt = {'code': 'side_checks_failed', 'evidence': {'warp': 'warp_not_active'}}
+        with patch.object(driver, 'validate_client', return_value=None) as validate, \
+             patch.object(driver, 'run_target', return_value=receipt):
+            observed = driver.side_xray_candidate(None, {'sha256': 'x'}, b'{}', 8, args, object())
+        validate.assert_called_once_with(None, b'{}', '/bundled')
+        self.assertEqual(observed['evidence']['warp'], 'warp_not_active')
+        self.assertEqual(observed['evidence']['target_core'], 'not_run')
+
+    def test_side_checks_all_export_forms_before_publishing_pass(self):
+        args = SimpleNamespace(core='/target', client_core='/bundled')
+        data = b'{"inbounds":[],"outbounds":[],"routing":{}}'
+        candidate = {'sha256': hashlib.sha256(data).hexdigest()}
+        for reject_target in (True, False):
+            def validate(box, form, core):
+                if reject_target and core == '/target':
+                    return {'code': 'client_core_incompatible', 'core': 'failed'}
+            receipt = {'code': 'passed', 'evidence': {'upload': 'passed'}}
+            with patch.object(driver, 'validate_client', side_effect=validate) as check, \
+                 patch.object(driver, 'run_target', return_value=receipt):
+                observed = driver.side_xray_candidate(None, candidate, data, 8, args, object())
+            forms = {c.args[1] for c in check.call_args_list if c.args[2] == '/bundled'}
+            self.assertEqual(forms, {data, *driver.app.variants(data)})
+            check.assert_called_with(None, data, '/target')
+            self.assertEqual(observed['code'], 'client_core_incompatible' if reject_target else 'passed')
+            self.assertEqual(observed['evidence']['target_core'], 'failed' if reject_target else 'passed')
+            self.assertEqual(observed['evidence']['upload'], 'passed')
+
+    def test_core_pin_cannot_survive_a_changed_binary(self):
+        with TemporaryDirectory() as td, patch.object(driver, 'PREFIX', 'csi'):
+            core = pathlib.Path(td) / 'core'
+            cache = pathlib.Path(td) / 'receipts'
+            expected = hashlib.sha256(b'original').hexdigest()
+            core.write_bytes(b'original')
+            self.assertTrue(driver.pinned_core(core, expected, cache))
+            core.write_bytes(b'modified')
+            self.assertFalse(driver.pinned_core(core, expected, cache))
     def test_exact_bytes_no_repair_and_restore(self):
         body=b'{"security":"none","private-fixture":"unchanged"}'
         box=FakeBox()

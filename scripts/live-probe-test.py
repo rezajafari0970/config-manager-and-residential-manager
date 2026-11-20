@@ -24,7 +24,7 @@ class ProbeTests(unittest.TestCase):
  def test_worker_and_lab_networks_are_disjoint(self):
   seen=set()
   for prefix in p.SANDBOX_ADDRESS_BASES:
-   for slot in range(9):
+   for slot in range(32 if prefix == 'csi' else 9):
     box=p.Sandbox('/synthetic/core','abcdef',8192+slot,prefix=prefix)
     self.assertEqual(box.name,prefix+'abcdef'+format(8192+slot,'x'))
     self.assertNotIn(box.gateway,seen);self.assertNotIn(box.addr,seen)

@@ -94,7 +94,7 @@ func sharedHeadroom() (available, budget int64, err error) {
 	}
 	for _, p := range entries {
 		n := p.Name()
-		if n == "cge-sandboxes" || (len(n) == 13 && (strings.HasPrefix(n, "crw") || strings.HasPrefix(n, "csi"))) {
+		if n == "cge-sandboxes" || n == "csi-sandboxes" || (len(n) == 13 && (strings.HasPrefix(n, "crw") || strings.HasPrefix(n, "csi"))) {
 			roots = append(roots, "/sys/fs/cgroup/"+n)
 		}
 	}

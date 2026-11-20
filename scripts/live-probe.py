@@ -108,8 +108,11 @@ def resolve_endpoints(result, hopping):
         # Resolver in a killable subprocess: a broken DNS lookup cannot stall the pool.
         helper='import socket,json,sys;print(json.dumps(sorted({x[4][0] for x in socket.getaddrinfo(sys.argv[1],None,socket.AF_UNSPEC,socket.SOCK_STREAM)})))'
         if host not in answers:
-            try: answers[host]=json.loads(cmd(['/usr/bin/python3','-c',helper,host],timeout=8).stdout)
-            except (subprocess.SubprocessError,json.JSONDecodeError): raise ValueError('endpoint_dns_failed')
+            try:
+                answers[host] = [str(ipaddress.ip_address(host))]
+            except ValueError:
+                try: answers[host]=json.loads(cmd(['/usr/bin/python3','-c',helper,host],timeout=8).stdout)
+                except (subprocess.SubprocessError,json.JSONDecodeError): raise ValueError('endpoint_dns_failed')
         ips=answers[host]
         if not ips or any(not ipaddress.ip_address(ip).is_global or ipaddress.ip_address(ip).is_multicast or ipaddress.ip_address(ip).is_reserved for ip in ips): raise ValueError('nonpublic_endpoint_blocked')
         previous=resolved.get(host,{})

@@ -86,7 +86,8 @@ type admittedQueue struct {
 }
 
 func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
-	if q.slot > q.governor.Capacity(q.maximum, time.Now()) {
+	capacity := q.governor.Capacity(q.maximum, time.Now())
+	if q.slot > capacity {
 		return nil, nil
 	}
 	var j *probe.Job
@@ -100,7 +101,12 @@ func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
 	release := func() {}
 	if q.budget != nil {
 		var ok bool
-		const probeBytes = 384 * 1024 * 1024
+		probeBytes := int64(384 * 1024 * 1024)
+		if q.prefix == "/side" {
+			// Side runs one pinned core per identity. Its memory-limited sandbox
+			// pool uses the same admission estimate as the isolated egress pool.
+			probeBytes = 128 * 1024 * 1024
+		}
 		priority, shared := q.budget.(interface{ TryProbe(int64) (func(), bool) })
 		if shared && q.prefix != "/side" {
 			release, ok = priority.TryProbe(probeBytes)
@@ -108,7 +114,7 @@ func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
 			release, ok = q.budget.Try(probeBytes)
 			// Any available slot can represent this process. Idle/over-target
 			// slots do not accumulate large reservations in the shared pool.
-			if !ok && shared && q.prefix == "/side" && q.active != nil && q.active.Load() < 2 {
+			if !ok && shared && q.prefix == "/side" && q.active != nil && q.active.Load() < int32(min(4, max(2, capacity/4))) {
 				var ready bool
 				if err := q.call(ctx, "/ready", nil, &ready); err != nil {
 					return nil, err
@@ -218,12 +224,16 @@ func execute(ctx context.Context, c client, helper, core string, slot int, j pro
 				r.Code = "probe_job_timeout"
 			}
 		}
-		cleanCtx, stop := context.WithTimeout(context.Background(), 20*time.Second)
-		cleanup := exec.CommandContext(cleanCtx, "/usr/bin/python3", helper, "--cleanup-slot", fmt.Sprint(slot), "--cleanup-run", runID)
-		cleanup.Stdout = io.Discard
-		cleanup.Stderr = io.Discard
-		_ = cleanup.Run()
-		stop()
+		// The Side adapter closes its scoped kernel resources before writing
+		// its receipt. Re-run recovery when the process exited abnormally.
+		if c.prefix != "/side" || e != nil || h.Code == "" {
+			cleanCtx, stop := context.WithTimeout(context.Background(), 20*time.Second)
+			cleanup := exec.CommandContext(cleanCtx, "/usr/bin/python3", helper, "--cleanup-slot", fmt.Sprint(slot), "--cleanup-run", runID)
+			cleanup.Stdout = io.Discard
+			cleanup.Stderr = io.Discard
+			_ = cleanup.Run()
+			stop()
+		}
 	}
 	completeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -254,7 +264,7 @@ func settingsForLane(name string) (laneSettings, error) {
 	case "conversion":
 		return laneSettings{"", "probe-one.py", "/run/config-repair-prober.lock", 8}, nil
 	case "side":
-		return laneSettings{"/side", "side-one.py", "/run/config-repair-side.lock", 4}, nil
+		return laneSettings{"/side", "side-one.py", "/run/config-repair-side.lock", side.MaxWorkers}, nil
 	default:
 		return laneSettings{}, errors.New("unknown probe lane")
 	}
@@ -298,6 +308,12 @@ func run() error {
 	}
 	slots := config.slots
 	interval := time.Second
+	var governor resources.Controller
+	if config.prefix == "/side" {
+		governor.Policy = resources.NetworkProbes{}
+		governor.RecoveryInterval = 2 * time.Second
+		interval = 100 * time.Millisecond
+	}
 
 	status := func(state, code string, active int) {
 		sc, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -320,7 +336,6 @@ func run() error {
 		status("blocked", "sandbox_preflight_failed", 0)
 		return errors.New("sandbox_preflight_failed")
 	}
-	var governor resources.Controller
 	var active atomic.Int32
 	var wg sync.WaitGroup
 	for slot := 1; slot <= slots; slot++ {
@@ -342,12 +357,19 @@ func run() error {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	status("running", "", 0)
+	if config.prefix == "/side" {
+		worker.NotifySystemd("READY=1")
+		defer worker.NotifySystemd("STOPPING=1")
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			wg.Wait()
 			return nil
 		case <-tick.C:
+			if config.prefix == "/side" {
+				worker.NotifySystemd("WATCHDOG=1")
+			}
 			status("running", fmt.Sprintf("capacity_%d", governor.Capacity(slots, time.Now())), int(active.Load()))
 		}
 	}

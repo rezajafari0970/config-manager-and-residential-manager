@@ -78,8 +78,8 @@ def qualify_raw(result, candidate, plan, measure):
             evidence['raw_failure'] = raw_result['code']
             for key in ('google','facebook','instagram','twitter','telegram','cloudflare',
                         'warp','upload','download','stability'):
-                value = raw_result.get('evidence', {}).get(key, 'not_run')
-                if value not in ('passed','not_run'):
+                value = raw_result.get('evidence', {}).get(key)
+                if value is not None:
                     evidence['raw_' + key] = value
             return dict(result, connection='failed', code=raw_result['code'])
     evidence['raw_checks'] = 'passed'

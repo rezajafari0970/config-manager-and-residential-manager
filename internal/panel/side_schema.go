@@ -7,6 +7,13 @@ import (
 
 const sideNow = "CAST(unixepoch('subsec')*1000 AS INTEGER)"
 
+const sideMeasuredTrigger = `CREATE TRIGGER IF NOT EXISTS side_measured AFTER UPDATE OF state ON side_jobs
+ WHEN new.state IN('rejected','accepted') AND new.evidence->>'$.side_version' IN('side_v1','side_v2')
+ AND new.evidence->>'$.google'='passed' AND new.evidence->>'$.facebook'='passed' AND new.evidence->>'$.instagram'='passed'
+ AND new.evidence->>'$.twitter'='passed' AND new.evidence->>'$.telegram'='passed' AND new.evidence->>'$.cloudflare'='passed'
+ AND new.evidence->>'$.warp_mode' IN('on','plus','off') BEGIN
+ UPDATE side_metrics SET last_measured=max(last_measured,new.finished) WHERE id=1; END;`
+
 // Only a successful source acquisition, or a validated current snapshot on
 // upgrade, enters this table. The immutable identity verdict survives ordinary
 // retention. Raw and template bytes have a separate, finite lifetime.
@@ -76,12 +83,7 @@ func migrateSide(tx *sql.Tx) error {
  CREATE TRIGGER IF NOT EXISTS side_last_owner AFTER DELETE ON side_sources BEGIN
  UPDATE side_jobs SET token='',lease_until=0 WHERE identity=old.identity AND token!=''
  AND NOT EXISTS(SELECT 1 FROM side_sources o JOIN sources s ON s.id=o.source_id WHERE o.identity=old.identity AND s.enabled=1); END;
- CREATE TRIGGER IF NOT EXISTS side_measured AFTER UPDATE OF state ON side_jobs
- WHEN new.state IN('rejected','accepted') AND new.evidence->>'$.side_version'='side_v1'
- AND new.evidence->>'$.google'='passed' AND new.evidence->>'$.facebook'='passed' AND new.evidence->>'$.instagram'='passed'
- AND new.evidence->>'$.twitter'='passed' AND new.evidence->>'$.telegram'='passed' AND new.evidence->>'$.cloudflare'='passed'
- AND new.evidence->>'$.warp_mode' IN('on','plus','off') BEGIN
- UPDATE side_metrics SET last_measured=max(last_measured,new.finished) WHERE id=1; END;
+ ` + sideMeasuredTrigger + `
  CREATE TRIGGER IF NOT EXISTS side_owner_expiry AFTER UPDATE OF expires ON side_jobs WHEN new.expires!=old.expires BEGIN
  UPDATE side_sources SET expires=new.expires WHERE identity=new.identity; END;
  CREATE TRIGGER IF NOT EXISTS side_finish_owners AFTER UPDATE OF state ON side_jobs WHEN new.state IN('rejected','inconclusive','expired') BEGIN

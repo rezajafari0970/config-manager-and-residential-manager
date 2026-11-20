@@ -5,7 +5,11 @@ Wants=config-repair.service network-online.target
 StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=90
+WatchdogSignal=SIGKILL
+TimeoutStartSec=120
 User=root
 WorkingDirectory=/opt/config-repair/current
 Environment=CONFIG_REPAIR_RESOURCE_DIR=/var/lib/config-repair/resource-budget
@@ -16,9 +20,11 @@ RestartSec=5
 TimeoutStopSec=40
 KillMode=control-group
 UMask=0077
-MemoryMax=1G
-TasksMax=512
-LimitNOFILE=2048
+CPUWeight=75
+MemoryHigh=1536M
+MemoryMax=2G
+TasksMax=1024
+LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target
