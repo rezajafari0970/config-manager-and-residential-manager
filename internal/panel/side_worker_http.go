@@ -61,6 +61,11 @@ func (s *Store) registerPrivateSide(mux *http.ServeMux) {
 			failure(w, ErrInvalid)
 			return
 		}
+		if v.Evidence["measured_form"] == "raw" && (v.Code != "side_checks_failed" || v.Core != "passed" ||
+			v.SHA256 != v.Evidence["raw_runtime_sha256"] || v.RuntimeSHA256 != v.SHA256) {
+			failure(w, ErrInvalid)
+			return
+		}
 		if v.Code == "passed" && !sideRuntimeVerified(v) {
 			failure(w, ErrInvalid)
 			return

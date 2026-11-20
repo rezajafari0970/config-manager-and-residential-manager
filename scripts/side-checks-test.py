@@ -190,6 +190,44 @@ class SideContracts(unittest.TestCase):
                             lambda _: self.fail('identical bytes measured twice'))
         self.assertEqual(r['evidence']['raw_checks'], 'passed')
 
+    def test_multiple_templates_begin_with_one_complete_original_observation(self):
+        spec = importlib.util.spec_from_file_location('side_original', pathlib.Path(__file__).with_name('side-one.py'))
+        one = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(one)
+        def candidate(body):
+            return {'config': base64.b64encode(body).decode(), 'sha256': hashlib.sha256(body).hexdigest()}
+        raw, first, second = (candidate(v) for v in [b'raw', b'first', b'second'])
+        plan = {'original_sha256':'f' * 64, 'raw_candidate':raw, 'candidates':[first, second]}
+        for code in ('side_checks_failed', 'passed', 'probe_socks_contract_missing'):
+            calls = []
+            def run(c):
+                calls.append(c['sha256'])
+                measured = code != 'probe_socks_contract_missing' or c != raw
+                evidence = self.measure(fixture) if measured else {}
+                if code == 'side_checks_failed' and c == raw:
+                    evidence.update(warp='warp_not_active', warp_mode='off')
+                return dict(core='passed', runtime_sha256=c['sha256'] if measured else '', evidence=evidence,
+                            code=code if c == raw else 'passed', connection='passed' if c != raw or code=='passed' else 'failed')
+            terminal, reuse = one.first_profile(plan, run)
+            if code == 'side_checks_failed':
+                self.assertEqual(calls, [raw['sha256']])
+                self.assertEqual(terminal['evidence']['measured_form'], 'raw')
+                self.assertNotIn('candidate_sha256', terminal['evidence'])
+                self.assertEqual(terminal['evidence']['warp'], 'warp_not_active')
+                continue
+            self.assertIsNone(terminal)
+            result = one.qualify_raw(reuse(first), first, plan, reuse)
+            self.assertEqual(calls, [raw['sha256'], first['sha256']])
+            self.assertEqual(result['code'], code)
+            if code == 'passed':
+                self.assertEqual(result['evidence']['raw_checks'], 'passed')
+            else:
+                self.assertEqual(result['evidence']['measured_form'], 'template')
+                self.assertEqual(result['evidence']['google'], 'passed')
+        for single in (dict(plan, candidates=[first]), dict(plan, raw_candidate=None)):
+            no_call = lambda _: self.fail('unnecessary original measurement')
+            self.assertEqual(one.first_profile(single, no_call), (None, no_call))
+
     def test_request_requires_actual_proxy_tls_status_mime_and_bytes(self):
         url = side.FACEBOOK
         transfer = side.Transfer(url, types=side.MEDIA_JSON, payload=b'data')

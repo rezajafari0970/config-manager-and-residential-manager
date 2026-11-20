@@ -57,7 +57,9 @@ func (m sideOutputModule) reviews(w http.ResponseWriter, r *http.Request) {
 // Never label the passing template's observations as the raw result.
 func sideReviewChecks(record map[string]string) (string, map[string]string) {
 	form, prefix := "template", ""
-	if record["raw_checks"] == "failed" {
+	if record["measured_form"] == "raw" {
+		form = "raw"
+	} else if record["measured_form"] != "template" && record["raw_checks"] == "failed" {
 		form, prefix = "raw", "raw_"
 	} else if record["raw_checks"] == "passed" {
 		form = "both"

@@ -223,6 +223,14 @@ func validSideEvidence(r SideResult) bool {
 			return false
 		}
 	}
+	if r.Evidence["measured_form"] == "raw" {
+		// Only the original was run. No template ran and no positive receipt
+		// can be accepted through this short path.
+		return r.Code == "side_checks_failed" && len(r.Candidate) == 0 && complete && !passed &&
+			version == "side_v2" && r.Evidence["raw_checks"] == "failed" &&
+			r.Evidence["raw_input_sha256"] == r.Hash && validDigest(r.Evidence["raw_runtime_sha256"]) &&
+			r.Evidence["candidate_sha256"] == ""
+	}
 	if r.Code != "passed" {
 		if len(r.Candidate) != 0 {
 			return false

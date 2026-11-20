@@ -282,7 +282,7 @@ def measure_candidate(box,candidate,timeout,args,native,session_check):
         r['evidence']['android']='not_run'
     return r
 
-def main(session_check=None,verify_raw=None,inspect_session=None):
+def main(session_check=None,verify_raw=None,inspect_session=None,first_profile=None):
     global OWN
     if PREFIX not in ('crw','ctw','crr','crt','csi') or (PREFIX=='csi')!=(session_check is not None):raise SystemExit('invalid resource prefix')
     max_slot = 31 if PREFIX == 'csi' else 8
@@ -352,7 +352,13 @@ def main(session_check=None,verify_raw=None,inspect_session=None):
                     return dict(core='blocked', connection='not_run', code='probe_resource_or_signal_failure',
                                 runtime_sha256='', endpoints_passed=0, evidence={})
                 return result
-            for candidate in plan['candidates']:
+            candidates = plan['candidates']
+            if first_profile is not None:
+                best, measure = first_profile(plan, measure)
+                if best is not None:
+                    rows.append(best)
+                    candidates = ()
+            for candidate in candidates:
                 r=measure(candidate)
                 if verify_raw is not None and r['code']=='passed':
                     r=verify_raw(r,candidate,plan,measure)

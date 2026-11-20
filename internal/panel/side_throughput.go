@@ -18,7 +18,7 @@ type sideThroughput struct {
 // reviews. The recent index bounds the JSON work to this time window.
 var sideThroughputQuery = `SELECT count(*),count(*) FILTER (WHERE
  (SELECT count(*) FROM json_each(j.evidence) AS e WHERE
-  (CASE WHEN j.evidence->>'$.raw_checks'='failed' THEN
+  (CASE WHEN j.evidence->>'$.raw_checks'='failed' AND coalesce(j.evidence->>'$.measured_form','') NOT IN ('raw','template') THEN
     CASE WHEN substr(e.key,1,4)='raw_' THEN substr(e.key,5) END
    ELSE e.key END) IN ('` + strings.Join(sideServices[:], "','") + `')
   AND e.value IN ('` + strings.Join(sideMeasuredOutcomes, "','") + `')) = ?)

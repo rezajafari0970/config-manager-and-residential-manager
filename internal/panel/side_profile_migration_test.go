@@ -144,3 +144,35 @@ func TestSideV57ExhaustedRevokedTokenSettles(t *testing.T) {
 	}
 	pendingCount(t, s.db, 1, "SELECT count(*) FROM side_jobs WHERE identity=? AND state='inconclusive' AND code='worker_lease_exhausted'", j.Identity)
 }
+
+func TestSideOriginalOnlyCompleteFailureIsRecordedAsRaw(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	newExportSource(t, s, "raw-first", sourceURI(400))
+	j := sideClaim(t, s)
+	r := sideReject(t, j)
+	delete(r.Evidence, "candidate_sha256")
+	r.Evidence["raw_checks"] = "failed"
+	r.Evidence["measured_form"] = "raw"
+	r.Evidence["raw_input_sha256"] = repair.Digest(nil)
+	if validSideEvidence(r) {
+		t.Fatal("failed original from another source")
+	}
+	r.Evidence["raw_input_sha256"] = j.Hash
+	r.Evidence["warp"] = "passed"
+	if validSideEvidence(r) {
+		t.Fatal("a raw-only pass cannot reject or qualify")
+	}
+	r.Evidence["warp"] = "warp_not_active"
+	if err := s.CompleteSide(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	form, checks := sideReviewChecks(r.Evidence)
+	if form != "raw" || checks["warp"] != "warp_not_active" {
+		t.Fatal(form, checks)
+	}
+	rate, err := readSideThroughput(ctx, s.reader())
+	if err != nil || rate.Decided != 1 || rate.Full != 1 {
+		t.Fatal(rate, err)
+	}
+}

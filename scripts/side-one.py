@@ -56,6 +56,45 @@ def inspect_runtime(box, config, lab):
     return resolved
 
 
+SERVICES = ('google', 'facebook', 'instagram', 'twitter', 'telegram', 'cloudflare',
+            'warp', 'upload', 'download', 'stability')
+
+
+def first_profile(plan, measure):
+    """A full original failure disqualifies every normalized alternative."""
+    raw = plan.get('raw_candidate')
+    candidates = plan['candidates']
+    if len(candidates) < 2 or not raw:
+        return None, measure
+    # An invalid input/engine binding is handled by normal candidate validation;
+    # it cannot veto a runnable template or yield a service verdict here.
+    input_hash = plan.get('original_sha256', '')
+    if (not re.fullmatch('[a-f0-9]{64}', input_hash)
+            or raw.get('engine', 'xray') != candidates[0].get('engine', 'xray')):
+        return None, measure
+    raw_hash = hashlib.sha256(base64.b64decode(raw['config'], validate=True)).hexdigest()
+    if raw_hash != raw['sha256']:
+        return None, measure
+    inspected = measure(raw)
+    evidence = inspected.get('evidence', {})
+    if (inspected['code'] == 'side_checks_failed' and inspected.get('core') == 'passed'
+            and inspected.get('runtime_sha256') == raw_hash
+            and all(evidence.get(k) not in (None, 'not_run', 'side_driver_unavailable') for k in SERVICES)):
+        return dict(inspected, sha256=raw_hash, rule='received_input',
+                    evidence=dict(evidence, measured_form='raw', raw_checks='failed',
+                                  raw_input_sha256=input_hash, raw_runtime_sha256=raw_hash)), measure
+
+    # A structural failure may coexist with a runnable template. Test the
+    # normal alternatives, reuse the same raw observation if one qualifies,
+    # and never present a template's service results as an original run.
+    def saved(candidate):
+        if (candidate['sha256'] == raw_hash and candidate.get('engine', 'xray') == raw.get('engine', 'xray')
+                and candidate['config'] == raw['config']):
+            return copy.deepcopy(inspected)
+        return measure(candidate)
+    return None, saved
+
+
 def qualify_raw(result, candidate, plan, measure):
     """Bind the normalized and original delivery forms to the same Side grant."""
     evidence = result['evidence']
@@ -76,9 +115,11 @@ def qualify_raw(result, candidate, plan, measure):
             # different template cannot change its qualified or deferred state.
             evidence['raw_checks'] = 'failed'
             evidence['raw_failure'] = raw_result['code']
-            for key in ('google','facebook','instagram','twitter','telegram','cloudflare',
-                        'warp','upload','download','stability'):
-                value = raw_result.get('evidence', {}).get(key)
+            raw_evidence = raw_result.get('evidence', {})
+            if not any(raw_evidence.get(key) not in (None, 'not_run', 'side_driver_unavailable') for key in SERVICES):
+                evidence['measured_form'] = 'template'
+            for key in SERVICES:
+                value = raw_evidence.get(key)
                 if value is not None:
                     evidence['raw_' + key] = value
             return dict(result, connection='failed', code=raw_result['code'])
@@ -90,4 +131,4 @@ if __name__ == '__main__':
     adapter = load('side_adapter', 'probe-one.py')
     adapter.PREFIX = 'csi'
     adapter.main(session_check=load('side_checks', 'side-checks.py').session,
-                 verify_raw=qualify_raw, inspect_session=inspect_runtime)
+                 verify_raw=qualify_raw, inspect_session=inspect_runtime, first_profile=first_profile)
