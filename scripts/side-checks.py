@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -58,7 +59,9 @@ def request(url, timeout, *, status=200, types=None, payload=None, limit=65536,
     except ValueError:
         m = {}
     if r.returncode or not isinstance(m, dict):
-        raise ObservationError('timeout' if r.returncode == 28 else 'transport_failed')
+        reason = {18: 'incomplete_response', 28: 'timeout', 60: 'unverified_connection',
+                  63: 'response_too_large'}.get(r.returncode, 'transport_failed')
+        raise ObservationError(reason)
     if (m.get('remote_ip') != '127.0.0.1' or m.get('ssl_verify_result') != 0
             or m.get('url_effective') != url or m.get('num_redirects') != 0):
         raise ObservationError('unverified_connection')
@@ -167,7 +170,13 @@ def observed(action):
         return 'unexpected_content'
 
 
-def measure(timeout):
+def sample_off_controls():
+    # Preserve occasional independent observations for worker recovery when
+    # every live candidate exits outside WARP.
+    return secrets.randbelow(16) == 0
+
+
+def measure(timeout, sample_off=sample_off_controls):
     timeout = min(12, max(2, int(timeout)))
     result = dict.fromkeys(CHECKS, 'not_run')
     result.update(side_version='side_v1', warp_mode='unknown')
@@ -184,9 +193,14 @@ def measure(timeout):
             raise ObservationError('warp_not_active')
         return True
 
+    # An authenticated off disproves a required gate. Roughly one in sixteen
+    # also measures the six light controls. No off session runs payload tests.
+    result['warp'] = observed(warp)
+    if result['warp'] == 'warp_not_active' and result['warp_mode'] == 'off' and not sample_off():
+        return result
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         jobs = {name: pool.submit(observed, lambda name=name: service(name)) for name in SERVICES}
-        jobs['warp'] = pool.submit(observed, warp)
         result.update({name: future.result() for name, future in jobs.items()})
     if any(result[name] != 'passed' for name in (*SERVICES, 'warp')):
         return result

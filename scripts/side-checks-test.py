@@ -45,9 +45,9 @@ def fixture(url, timeout, **kw):
 
 
 class SideContracts(unittest.TestCase):
-    def measure(self, driver):
+    def measure(self, driver, sample_off=lambda: False):
         with patch.object(side, 'request', side_effect=driver), patch.object(side.time, 'sleep'):
-            return side.measure(5)
+            return side.measure(5, sample_off=sample_off)
 
     def test_all_independent_gates(self):
         r = self.measure(fixture)
@@ -75,6 +75,44 @@ class SideContracts(unittest.TestCase):
             r = self.measure(lambda u, t, **kw: wire if u.startswith(side.WARP) else fixture(u, t, **kw))
             self.assertEqual((r['warp'], r['warp_mode']), (reason, mode))
             self.assertEqual(side.verdict(r) == 'passed', reason == 'passed')
+
+    def test_explicit_warp_off_terminates_without_other_requests(self):
+        requests = []
+        def off(url, timeout, **kw):
+            requests.append(url)
+            self.assertTrue(url.startswith(side.WARP + '?'))
+            return b'h=www.cloudflare.com\nwarp=off\n'
+        r = self.measure(off)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(r['warp'], 'warp_not_active')
+        self.assertEqual(r['warp_mode'], 'off')
+        self.assertTrue(all(r[k] == 'not_run' for k in side.CHECKS if k != 'warp'))
+        self.assertEqual(side.verdict(r), 'side_checks_failed')
+
+    def test_diagnostic_off_sample_checks_services_and_skips_payloads(self):
+        def off(url, timeout, **kw):
+            if url.startswith(side.WARP + '?'):
+                return b'h=www.cloudflare.com\nwarp=off\n'
+            return fixture(url, timeout, **kw)
+        r = self.measure(off, sample_off=lambda: True)
+        self.assertEqual(r['warp'], 'warp_not_active')
+        self.assertTrue(all(r[k] == 'passed' for k in side.SERVICES))
+        self.assertTrue(all(r[k] == 'not_run' for k in ('upload', 'download', 'stability')))
+        self.assertEqual(side.verdict(r), 'side_checks_failed')
+        for draw in range(16):
+            with patch.object(side.secrets, 'randbelow', return_value=draw) as rng:
+                self.assertEqual(side.sample_off_controls(), draw == 0)
+                rng.assert_called_once_with(16)
+
+    def test_unavailable_warp_still_measures_the_other_service_contracts(self):
+        def unavailable(url, timeout, **kw):
+            if url.startswith(side.WARP):
+                raise side.ObservationError('provider_unavailable')
+            return fixture(url, timeout, **kw)
+        r = self.measure(unavailable)
+        self.assertEqual(r['warp_mode'], 'unknown')
+        self.assertTrue(all(r[k] == 'passed' for k in side.SERVICES))
+        self.assertEqual(side.verdict(r), 'side_provider_unavailable')
 
     def test_partial_load_or_stability_is_not_accepted(self):
         for target in ('upload', 'download', 'stability'):
@@ -166,8 +204,10 @@ class SideContracts(unittest.TestCase):
                 send(changes)
         with self.assertRaisesRegex(side.ObservationError, 'provider_unavailable'):
             send(dict(http_code=429))
-        with self.assertRaisesRegex(side.ObservationError, 'timeout'):
-            send({}, 28)
+        for rc, reason in [(18, 'incomplete_response'), (28, 'timeout'),
+                           (60, 'unverified_connection'), (63, 'response_too_large')]:
+            with self.assertRaisesRegex(side.ObservationError, reason):
+                send({}, rc)
 
 
 if __name__ == '__main__':
