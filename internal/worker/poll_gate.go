@@ -55,6 +55,16 @@ func (g *PollGate) Wait(ctx context.Context) bool {
 }
 
 func (g *PollGate) Finish(now time.Time, hasWork bool) {
+	var idle time.Duration
+	if !hasWork {
+		idle = time.Second
+	}
+	g.FinishAfter(now, idle)
+}
+
+// Resource contention is not evidence that the queue is empty. Keep the
+// shared gate bounded while allowing a newly released permit to start work.
+func (g *PollGate) FinishAfter(now time.Time, idle time.Duration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.busy {
@@ -62,7 +72,7 @@ func (g *PollGate) Finish(now time.Time, hasWork bool) {
 	}
 	g.busy = false
 	g.next = time.Time{}
-	if !hasWork {
-		g.next = now.Add(time.Second)
+	if idle > 0 {
+		g.next = now.Add(idle)
 	}
 }

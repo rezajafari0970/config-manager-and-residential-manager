@@ -136,3 +136,28 @@ func TestSideAdmissionReadyDemandAcrossSlots(t *testing.T) {
 		})
 	}
 }
+
+func TestPressuredSideClaimsPastFourWithoutDelayingOtherProcesses(t *testing.T) {
+	var active atomic.Int32
+	active.Store(9)
+	b := &thresholdBudget{protected: true}
+	ready := true
+	c := client{prefix: "/side", poll: &worker.PollGate{}, http: &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+		response := strconv.FormatBool(ready)
+		if r.URL.Path == "/side/claim" {
+			response = `{"token":"leased"}`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(response))}, nil
+	})}}
+	q := admittedQueue{client: c, slot: 10, maximum: 31, governor: &resources.Controller{Sensor: ampleMemory{}}, budget: b, active: &active}
+	j, err := q.Claim(context.Background())
+	if err != nil || j == nil || active.Load() != 10 || b.protectedCalls != 1 {
+		t.Fatal(j, err, b)
+	}
+	q.release()
+	active.Store(16)
+	j, err = q.Claim(context.Background())
+	if err != nil || j != nil || b.protectedCalls != 1 {
+		t.Fatal("excess workers joined FIFO", j, err, b)
+	}
+}

@@ -439,7 +439,7 @@ func (s *Store) PrivateProbeHandler() http.Handler {
 	other := s.admitWorker(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pattern := mux.Handler(r)
-		if pattern == "POST /claim" || pattern == "POST /egress/claim" || strings.HasPrefix(pattern, "POST /side/") {
+		if pattern == "POST /claim" || pattern == "POST /egress/claim" || pattern == "POST /egress/ready" || strings.HasPrefix(pattern, "POST /side/") {
 			mux.ServeHTTP(w, r)
 			return
 		}

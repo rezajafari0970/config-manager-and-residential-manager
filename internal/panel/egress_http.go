@@ -13,6 +13,14 @@ import (
 )
 
 func (s *Store) registerPrivateEgress(mux *http.ServeMux) {
+	mux.HandleFunc("POST /egress/ready", func(w http.ResponseWriter, r *http.Request) {
+		ready, err := s.egressReady(r.Context())
+		if err != nil {
+			failure(w, err)
+			return
+		}
+		respond(w, 200, ready)
+	})
 	mux.HandleFunc("POST /egress/claim", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Lane string `json:"lane"`

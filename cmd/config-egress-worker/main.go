@@ -352,7 +352,14 @@ func run() error {
 				lane := investigationLane(slot, capacity, claims)
 				if driver.idleAdmission(capacity) && polls[lane].Wait(ctx) {
 					var ok bool
-					release, ok = budget.Try(128 * 1024 * 1024)
+					const workingSet = 128 * 1024 * 1024
+					release, ok = budget.Try(workingSet)
+					if !ok && active.Load() < int32(min(4, capacity)) {
+						var ready bool
+						if err := c.call(ctx, "ready", nil, &ready); err == nil && ready {
+							release, ok = budget.TryProbe(workingSet)
+						}
+					}
 					var err error
 					if ok {
 						err = c.call(ctx, "claim", map[string]string{"lane": lane}, &j)

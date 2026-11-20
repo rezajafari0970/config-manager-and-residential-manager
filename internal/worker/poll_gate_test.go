@@ -69,3 +69,19 @@ func TestPollWaitDrainsSuccessAndCancelsBlockedWaiter(t *testing.T) {
 	}
 	g.Finish(time.Now(), false)
 }
+
+func TestResourceContentionRetriesBeforeAnEmptyQueue(t *testing.T) {
+	var gate PollGate
+	now := time.Now()
+	if !gate.Begin(now) {
+		t.Fatal("fresh poll was rejected")
+	}
+	gate.FinishAfter(now, 150*time.Millisecond)
+	if gate.Begin(now.Add(149*time.Millisecond)) || !gate.Begin(now.Add(150*time.Millisecond)) {
+		t.Fatal("resource poll interval")
+	}
+	gate.Finish(now, false)
+	if gate.Begin(now.Add(999 * time.Millisecond)) {
+		t.Fatal("empty queue was hot-polled")
+	}
+}

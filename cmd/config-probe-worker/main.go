@@ -91,11 +91,17 @@ func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
 		return nil, nil
 	}
 	var j *probe.Job
+	retryDelay := time.Second
 	if q.poll != nil {
 		if !q.poll.Wait(ctx) {
 			return nil, nil
 		}
-		defer func() { q.poll.Finish(time.Now(), j != nil) }()
+		defer func() {
+			if j != nil {
+				retryDelay = 0
+			}
+			q.poll.FinishAfter(time.Now(), retryDelay)
+		}()
 	}
 	// Idle/waiting slots must not reserve memory or scan shared permits.
 	release := func() {}
@@ -114,17 +120,24 @@ func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
 			release, ok = q.budget.Try(probeBytes)
 			// Any available slot can represent this process. Idle/over-target
 			// slots do not accumulate large reservations in the shared pool.
-			if !ok && shared && q.prefix == "/side" && q.active != nil && q.active.Load() < int32(min(4, max(2, capacity/4))) {
+			// Competing due Side jobs may queue one fair permit for this PID
+			// until half the configured slots are active, then borrow spare
+			// capacity. Actual memory and pressure remain authoritative.
+			if !ok && shared && q.prefix == "/side" && q.active != nil && q.active.Load() < int32(min(capacity, max(2, (q.maximum+1)/2))) {
 				var ready bool
 				if err := q.call(ctx, "/ready", nil, &ready); err != nil {
 					return nil, err
 				}
-				if ready {
-					release, ok = priority.TryProbe(probeBytes)
+				if !ready {
+					return nil, nil
 				}
+				release, ok = priority.TryProbe(probeBytes)
 			}
 		}
 		if !ok {
+			if q.prefix == "/side" {
+				retryDelay = 150 * time.Millisecond
+			}
 			return nil, nil
 		}
 	}
@@ -308,11 +321,13 @@ func run() error {
 	}
 	slots := config.slots
 	interval := time.Second
+	maximumPoll := 2 * time.Second
 	var governor resources.Controller
 	if config.prefix == "/side" {
 		governor.Policy = resources.NetworkProbes{}
 		governor.RecoveryInterval = 2 * time.Second
 		interval = 100 * time.Millisecond
+		maximumPoll = 400 * time.Millisecond
 	}
 
 	status := func(state, code string, active int) {
@@ -351,7 +366,7 @@ func run() error {
 			worker.RunSlot(ctx, q, func(ctx context.Context, slot int, j probe.Job) {
 				defer func() { q.release(); q.release = nil }()
 				execute(ctx, c, *helper, *core, slot, j)
-			}, slot, interval, 2*time.Second)
+			}, slot, interval, maximumPoll)
 		}(slot)
 	}
 	tick := time.NewTicker(5 * time.Second)

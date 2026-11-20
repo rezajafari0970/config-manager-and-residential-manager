@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+// At low occupancy the worker may join the shared memory FIFO only for actual,
+// due Residential work. This uses the claim's exact scope and due predicates
+// without issuing a lease or performing a writer transaction.
+func (s *Store) egressReady(ctx context.Context) (bool, error) {
+	var ready bool
+	err := s.workerReader().QueryRowContext(ctx, egressClaimCandidates+`SELECT
+    (SELECT enabled FROM egress_settings WHERE id=1)!=0 AND
+    EXISTS(SELECT 1 FROM claim_scope c CROSS JOIN egress_jobs ON egress_jobs.hash=c.hash WHERE `+egressClaimDue+`
+    AND EXISTS(SELECT 1 FROM egress_work w WHERE w.hash=c.hash))`, sql.Named("claim_now", egress.Now())).Scan(&ready)
+	return ready, err
+}
+
 func (s *Store) ClaimEgress(ctx context.Context) (*egress.Job, error) {
 	return s.ClaimEgressLane(ctx, "")
 }

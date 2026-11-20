@@ -238,3 +238,27 @@ func TestEgressVerifiedDeadlineBorrowsOnlyOneAdditionalMaintenanceGrant(t *testi
 		})
 	}
 }
+
+func TestEgressBudgetReadinessDoesNotReserveOrAdvertisePausedWork(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	ready := func(want bool) {
+		t.Helper()
+		got, err := s.egressReady(ctx)
+		if err != nil || got != want {
+			t.Fatalf("ready %v want %v: %v", got, want, err)
+		}
+	}
+	ready(false)
+	newExportSource(t, s, "budget-ready", sourceURI(53))
+	if _, err := s.db.Exec("UPDATE egress_settings SET enabled=1"); err != nil {
+		t.Fatal(err)
+	}
+	ready(true)
+	ready(true)
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_jobs WHERE token!=''")
+	if _, err := s.db.Exec("UPDATE egress_settings SET enabled=0"); err != nil {
+		t.Fatal(err)
+	}
+	ready(false)
+}
