@@ -8,173 +8,39 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
-func TestRetirementConfirmationSurvivesWithdrawalRestartAndExpiredEvidence(t *testing.T) {
+func TestNeverAcceptedDeliveryFailureDoesNotReenterDetection(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	source, _ := newExportSource(t, s, "rotation", sourceURI(201))
-	first, err := s.ClaimEgress(ctx)
-	if err != nil || first == nil {
-		t.Fatal("first claim", err)
-	}
-	commitProbeInputs(t, s, source, sourceURI(202))
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_first_backlog WHERE hash=?", first.Hash)
-	if err = s.CompleteEgress(ctx, egress.Completion{Job: *first, Report: badDelivery(*first)}); err != nil {
+	raw := sourceURI(202)
+	id, _ := newExportSource(t, s, "first", raw)
+	newExportSource(t, s, "alias", raw+"-different-name")
+	j, err := s.ClaimEgress(ctx)
+	if err != nil || j == nil {
 		t.Fatal(err)
 	}
-	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_first_backlog WHERE hash=?", first.Hash)
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_retirement_sources WHERE hash=? AND source_id=?", first.Hash, source)
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM input_blocked WHERE hash=?", first.Hash)
-	if _, err = s.db.Exec("UPDATE egress_retirements SET first_at=1,at=1 WHERE hash=?", first.Hash); err != nil {
+	if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: badDelivery(*j)}); err != nil {
 		t.Fatal(err)
 	}
-	path, key := filepath.Join(filepath.Dir(s.vault.Directory()), "panel.db"), s.key
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM input_blocked WHERE hash=?", j.Hash)
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_retirement_sources WHERE hash=?", j.Hash)
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work WHERE hash=?", j.Hash)
+	commitProbeInputs(t, s, id, raw)
+	key, path := s.key, filepath.Join(filepath.Dir(s.vault.Directory()), "panel.db")
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(path, key)
+	s, err = Open(path, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
-	present, err := freezeEgress(ctx, reopened.read(ctx))
-	if err != nil {
-		t.Fatal(err)
-	}
-	pendingCount(t, present, 1, "SELECT count(*) FROM egress_work WHERE hash=?", first.Hash)
-	pendingCount(t, present, 0, "SELECT count(*) FROM egress_export_eligible WHERE hash=?", first.Hash)
-	if ref, err := reopened.Referenced(ctx, first.Hash); err != nil || !ref {
-		t.Fatal("raw confirmation input lost", ref, err)
-	}
-	for n := 1; n <= 3; n++ {
-		if _, err := reopened.db.Exec("UPDATE egress_jobs SET next_run=CASE WHEN hash=? THEN 0 ELSE ? END", first.Hash, egress.Now()+3600000); err != nil {
-			t.Fatal(err)
-		}
-		j, err := reopened.ClaimEgressLane(ctx, "followup")
-		if err != nil || j == nil || j.Hash != first.Hash || j.Issue != "" {
-			t.Fatal("missing sourced follow-up", n, err)
-		}
-		if err = reopened.RenewEgress(ctx, *j); err != nil {
-			t.Fatal("last authorized grant cannot finish", err)
-		}
-		if n > 1 {
-			if _, err = reopened.db.Exec("UPDATE egress_retirements SET at=? WHERE hash=?", egress.Now()-31000, first.Hash); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err = reopened.CompleteEgress(ctx, egress.Completion{Job: *j, Report: badDelivery(*j)}); err != nil {
-			t.Fatal(err)
-		}
-		if n < 3 {
-			pendingCount(t, reopened.db, n, "SELECT hits FROM egress_retirements WHERE hash=?", first.Hash)
-			pendingCount(t, reopened.db, 0, "SELECT count(*) FROM input_exclusions")
-		}
-	}
-	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM input_exclusions")
-	pendingCount(t, reopened.db, 0, "SELECT count(*) FROM egress_retirement_sources WHERE hash=?", first.Hash)
-	pendingCount(t, reopened.db, 3, "SELECT count(*) FROM egress_events WHERE hash=? AND first_result_scope=''", first.Hash)
-}
-
-func TestRetirementConfirmationsCannotRefillAfterCrashOrUnknown(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	raw := sourceURI(203)
-	id, _ := newExportSource(t, s, "one", raw)
-	j, err := s.ClaimEgress(ctx)
-	if err != nil || j == nil {
-		t.Fatal(err)
-	}
-	hash := j.Hash
-	if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: badDelivery(*j)}); err != nil {
-		t.Fatal(err)
-	}
-	for n := 0; n < 3; n++ {
-		if _, err = s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", hash); err != nil {
-			t.Fatal(err)
-		}
-		j, err = s.ClaimEgress(ctx)
-		if err != nil || j == nil || j.Hash != hash {
-			t.Fatal("missing grant", n, err)
-		}
-		if n == 0 {
-			if _, err = s.db.Exec("UPDATE egress_jobs SET lease_until=1 WHERE hash=?", hash); err != nil {
-				t.Fatal(err)
-			}
-			continue
-		}
-		now := egress.Now()
-		r := egress.Report{Version: egress.Version, Hash: hash, Started: now, Finished: now, Code: "driver_session_failed"}
-		if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	fillExportSource(t, s, id, raw)
-	newExportSource(t, s, "alias", raw+"-new")
-	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work WHERE hash=?", hash)
-	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_retirement_sources WHERE hash=?", hash)
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM input_blocked WHERE hash=?", hash)
-	pendingCount(t, s.db, 0, "SELECT count(*) FROM input_exclusions")
-	pendingCount(t, s.db, 1, "SELECT hits FROM egress_retirements WHERE hash=?", hash)
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_events WHERE hash=? AND first_result_scope!=''", hash)
-}
-
-func TestRetirementOwnersFenceLeaseAcrossReplaceAndReenable(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	raw := sourceURI(204)
-	one, _ := newExportSource(t, s, "one", raw)
-	two, _ := newExportSource(t, s, "two", raw)
-	j, err := s.ClaimEgress(ctx)
-	if err != nil || j == nil {
-		t.Fatal(err)
-	}
-	if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: badDelivery(*j)}); err != nil {
-		t.Fatal(err)
-	}
-	pendingCount(t, s.db, 2, "SELECT count(*) FROM egress_retirement_sources WHERE hash=?", j.Hash)
+	defer s.Close()
 	if _, err = s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", j.Hash); err != nil {
 		t.Fatal(err)
 	}
-	j, err = s.ClaimEgress(ctx)
-	if err != nil || j == nil {
-		t.Fatal(err)
+	if retry, err := s.ClaimEgressLane(ctx, "followup"); err != nil || retry != nil {
+		t.Fatal("the same rejected input got a second receipt", err)
 	}
-	src, err := s.Get(ctx, one)
-	if err != nil {
-		t.Fatal(err)
-	}
-	src.URL += "/replaced"
-	if _, err = s.Save(ctx, one, src.Revision, src.SourceInput); err != nil {
-		t.Fatal(err)
-	}
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_retirement_sources WHERE hash=?", j.Hash)
-	if err = s.RenewEgress(ctx, *j); err != nil {
-		t.Fatal("remaining owner lost lease", err)
-	}
-	for _, enabled := range []bool{false, true} {
-		src, err = s.Get(ctx, two)
-		if err != nil {
-			t.Fatal(err)
-		}
-		src.Enabled = enabled
-		if _, err = s.Save(ctx, two, src.Revision, src.SourceInput); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err = s.RenewEgress(ctx, *j); err != ErrConflict {
-		t.Fatal("old grant revived", err)
-	}
-	if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: syntheticEgress(*j)}); err != ErrConflict {
-		t.Fatal("old success republished", err)
-	}
-	recovery, err := s.ClaimEgressLane(ctx, "followup")
-	if err != nil || recovery == nil || recovery.Hash != j.Hash || recovery.Token == j.Token {
-		t.Fatal("valid assignment after reenable", err)
-	}
-	if err = s.CompleteEgress(ctx, egress.Completion{Job: *recovery, Report: syntheticEgress(*recovery)}); err != nil {
-		t.Fatal(err)
-	}
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_export_eligible WHERE hash=?", j.Hash)
-	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_retirement_sources WHERE hash=?", j.Hash)
+	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_events WHERE hash=? AND first_result_scope!=''", j.Hash)
 }
 
 func TestRetirementMigrationUsesOnlyActiveOrProvenWithdrawnOwners(t *testing.T) {
@@ -219,6 +85,11 @@ func TestRetirementMigrationUsesOnlyActiveOrProvenWithdrawnOwners(t *testing.T) 
 	}
 	// Build the pre-v54 state. A former source sighting alone is not a
 	// committed, authorized withdrawal for this representative.
+	for _, h := range hashes {
+		if _, err := s.db.Exec(`INSERT INTO egress_retirements(hash,reason,hits,at,first_at) VALUES(?,'confirmed_ads_delivery_unhealthy',1,1,1)`, h); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := s.db.Exec("DELETE FROM egress_retirement_limits; DELETE FROM conversion_first_backlog WHERE source_id=?; PRAGMA user_version=53", three); err != nil {
 		t.Fatal(err)
 	}
@@ -242,61 +113,6 @@ func TestRetirementMigrationUsesOnlyActiveOrProvenWithdrawnOwners(t *testing.T) 
 		t.Fatal(err)
 	}
 	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_retirement_work WHERE hash=?", hashes[two])
-}
-
-func TestRetirementNewCommittedOwnerInheritsOnlyUnspentGrants(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	raw := sourceURI(210)
-	oldID, _ := newExportSource(t, s, "previous", raw)
-	j, err := s.ClaimEgress(ctx)
-	if err != nil || j == nil {
-		t.Fatal(err)
-	}
-	hash := j.Hash
-	if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: badDelivery(*j)}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", hash); err != nil {
-		t.Fatal(err)
-	}
-	spent, err := s.ClaimEgress(ctx)
-	if err != nil || spent == nil || spent.Hash != hash {
-		t.Fatal(err)
-	}
-	originalLimit := spent.Attempt + 2
-	oldSource, err := s.Get(ctx, oldID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = s.Delete(ctx, oldID, oldSource.Revision); err != nil {
-		t.Fatal(err)
-	}
-	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work WHERE hash=?", hash)
-	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_retirement_sources WHERE hash=?", hash)
-	pendingCount(t, s.db, originalLimit, "SELECT through_attempt FROM egress_retirement_limits WHERE hash=?", hash)
-	newID, _ := newExportSource(t, s, "successor", raw+"-alias")
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_retirement_sources WHERE hash=? AND source_id=?", hash, newID)
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_work WHERE hash=?", hash)
-	pendingCount(t, s.db, originalLimit, "SELECT through_attempt FROM egress_retirement_limits WHERE hash=?", hash)
-	if err = s.RenewEgress(ctx, *spent); err != ErrConflict {
-		t.Fatal("deleted source token revived", err)
-	}
-	for n := 0; n < 2; n++ {
-		if _, err = s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", hash); err != nil {
-			t.Fatal(err)
-		}
-		claim, err := s.ClaimEgress(ctx)
-		if err != nil || claim == nil || claim.Hash != hash {
-			t.Fatal("remaining grant", n, err)
-		}
-		now := egress.Now()
-		r := egress.Report{Version: egress.Version, Hash: hash, Started: now, Finished: now, Code: "driver_session_failed"}
-		if err = s.CompleteEgress(ctx, egress.Completion{Job: *claim, Report: r}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work WHERE hash=?", hash)
 }
 
 func TestRetirementFinalCountryBlockClearsSimultaneousDeliveryFailure(t *testing.T) {

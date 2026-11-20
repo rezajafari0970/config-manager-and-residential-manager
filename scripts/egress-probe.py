@@ -160,6 +160,14 @@ def diagnostic_delivery(box,variant,targets,timeout):
   if not isinstance(result,dict):raise ValueError('delivery_contract')
   return result
  except Exception:return dict(version='ads-delivery.v1',variant=variant,at=int(time.time()*1000),assets=[])
+def scheduled_health_sample(box,variant):
+ try:
+  q=box.net(['/usr/bin/python3',str(HERE/'egress-health.py')],timeout=11)
+  sample=json.loads(q.stdout)
+  if sample.get('version')!='ads-health.v1' or sample.get('host_control') is not False:raise ValueError('health_contract')
+  return {**sample,'variant':variant}
+ except Exception:
+  return dict(version='ads-health.v1',variant=variant,at=int(time.time()*1000),host_control=False,providers=[])
 def asset_available(a):return a.get('curl_exit')==0 and a.get('http_status')==200 and a.get('tls_verified') and a.get('complete') and a.get('content_match')
 def cached_delivery_control(prefix,targets):
  # Shared outage calibration is reusable for at most 30s, never VPN proof.
@@ -238,6 +246,8 @@ def investigate(req,args,pool=None):
      else:
       rows,assets=overlap_assessment(observe_current,lambda:diagnostic_delivery(box,v['name'],req.get('delivery_targets'),8 if req.get('deep') else 6))
       delivery.append(assets)
+      if req.get('accepted') is True and req.get('health_due') is True:
+       health.append(scheduled_health_sample(box,v['name']))
      samples+=rows
      box.stop();code='measured';mark(v['name']+'_probes')
    completed=True;mark('reset')

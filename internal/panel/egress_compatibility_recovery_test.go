@@ -10,7 +10,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
-func TestV54CompatibleDriverRecoversOnlyBoundUnmeasuredScope(t *testing.T) {
+func TestCompatibilityReceiptsDoNotReopenAfterUpgradeOrRefetch(t *testing.T) {
 	for _, mode := range []string{"current", "returned", "pinned", "still_unsupported", "previous_observation", "disabled", "operator", "interrupted", "disable_during_lease", "missing_driver"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
@@ -76,69 +76,22 @@ func TestV54CompatibleDriverRecoversOnlyBoundUnmeasuredScope(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer s.Close()
-			if mode == "returned" || mode == "disabled" || mode == "still_unsupported" || mode == "previous_observation" || mode == "operator" {
-				j, err := s.ClaimEgress(ctx)
-				if err != nil || j != nil {
-					t.Fatal("unauthorized supplemental work", err)
-				}
-				if mode == "returned" {
-					commitProbeInputs(t, s, id, raw)
-				} else if mode == "disabled" {
-					exec("UPDATE sources SET enabled=1 WHERE id=?", id)
-				} else {
-					return
-				}
-			}
-			next, err := s.ClaimEgress(ctx)
-			if err != nil || next == nil || next.Hash != first.Hash {
-				t.Fatal("missing sourced compatibility grant", err)
-			}
-			pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_network_review")
-			pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_export_eligible")
-			if mode == "disable_during_lease" {
-				exec("UPDATE sources SET enabled=0 WHERE id=?", id)
-				exec("UPDATE sources SET enabled=1 WHERE id=?", id)
-				if err = s.RenewEgress(ctx, *next); err != ErrConflict {
-					t.Fatal("source did not fence lease", err)
-				}
-				next, err = s.ClaimEgress(ctx)
-				if err != nil || next == nil || next.Hash != first.Hash {
-					t.Fatal("missing restored compatibility grant", err)
-				}
-			}
-			if mode == "interrupted" || mode == "missing_driver" {
-				for attempt := 2; attempt <= 3; attempt++ {
-					if mode == "interrupted" {
-						exec("UPDATE egress_jobs SET lease_until=1 WHERE hash=?", next.Hash)
-					} else {
-						start := egress.Now()
-						failure := egress.Report{Version: egress.Version, Hash: next.Hash, Started: start, Finished: start, Code: "driver_session_failed"}
-						if err = s.CompleteEgress(ctx, egress.Completion{Job: *next, Report: failure}); err != nil {
-							t.Fatal(err)
-						}
-						exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", next.Hash)
-					}
-					next, err = s.ClaimEgress(ctx)
-					if err != nil || (next != nil) != (attempt == 2) {
-						t.Fatal("wrong interruption budget", attempt, err)
-					}
-				}
-			} else {
-				if err = s.CompleteEgress(ctx, egress.Completion{Job: *next, Report: syntheticEgress(*next)}); err != nil {
-					t.Fatal(err)
-				}
-				pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_geo_eligible")
-				pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_compatibility_queue")
-				pendingCount(t, s.db, 2, "SELECT completed FROM egress_metrics")
-				pendingCount(t, s.db, 2, "SELECT count(*) FROM egress_events WHERE hash=?", first.Hash)
+			if mode == "returned" {
 				commitProbeInputs(t, s, id, raw)
-				pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_compatibility_queue")
 			}
+			if mode == "disabled" {
+				exec("UPDATE sources SET enabled=1 WHERE id=?", id)
+			}
+			exec("UPDATE egress_jobs SET next_run=0")
+			job, err := s.ClaimEgress(ctx)
+			if err != nil || job != nil {
+				t.Fatal("measured identity received another first grant", err)
+			}
+			pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_compatibility_queue")
 			pendingCount(t, s.db, 1, "SELECT first_assessments FROM egress_metrics")
-			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_events WHERE hash=? AND first_result_scope!=''", first.Hash)
-			var savedReport, savedDecision []byte
-			if err = s.db.QueryRow("SELECT report,decision FROM egress_compatibility_receipts WHERE hash=?", first.Hash).Scan(&savedReport, &savedDecision); err != nil || !bytes.Equal(savedReport, oldReport) || !bytes.Equal(savedDecision, oldDecision) {
-				t.Fatal("lost original evidence", err)
+			var got []byte
+			if err = s.db.QueryRow("SELECT report FROM egress_jobs WHERE hash=?", first.Hash).Scan(&got); err != nil || !bytes.Equal(got, oldReport) {
+				t.Fatal("original receipt changed", err)
 			}
 		})
 	}

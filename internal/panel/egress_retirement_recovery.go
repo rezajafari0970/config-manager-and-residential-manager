@@ -1,8 +1,6 @@
 package panel
 
 import (
-	"context"
-	"database/sql"
 	"errors"
 	"strings"
 )
@@ -62,22 +60,6 @@ func supplementalSourceFences(prefix, sourceTable string) string {
  CREATE TRIGGER IF NOT EXISTS ` + prefix + `_fence_deleted BEFORE DELETE ON sources BEGIN ` + fence + ` END;`
 }
 
-func retainRetirementSources(ctx context.Context, tx *sql.Tx, hash string) error {
-	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO egress_retirement_limits(hash,through_attempt)
- SELECT hash,attempts+3 FROM egress_jobs WHERE hash=? AND ever_accepted=0 AND state!='DELETED'`, hash)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO egress_retirement_sources(hash,source_id)
- SELECT l.hash,own.source_id FROM (
- SELECT m.source_id FROM egress_unique u JOIN memberships m ON m.artifact_id=u.identity WHERE u.hash=?1
- UNION SELECT source_id FROM egress_first_backlog WHERE hash=?1
- UNION SELECT source_id FROM egress_first_history WHERE hash=?1 AND phase='active' AND origin_valid=1
- ) own JOIN sources s ON s.id=own.source_id AND s.enabled=1
- JOIN egress_retirement_limits l ON l.hash=?1`, hash)
-	return err
-}
-
 func (s *Store) migrateV54() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -127,7 +109,7 @@ func (s *Store) migrateV54() error {
 		if err = tx.QueryRow("SELECT sql FROM sqlite_schema WHERE name=?", v.name).Scan(&definition); err != nil {
 			return err
 		}
-		if strings.Contains(definition, "egress_retirement_work") {
+		if strings.Contains(definition, "egress_retirement_work") || strings.Contains(definition, "egress_first_arrivals") || strings.Contains(definition, "j.ever_accepted=1 AND g.identity IS NULL") {
 			continue
 		}
 		if strings.Count(definition, v.old) != 1 {

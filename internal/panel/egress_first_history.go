@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"database/sql"
 	"errors"
 	"io"
 	"strings"
@@ -130,7 +131,7 @@ const firstHistoryWithdrawalTriggers = `CREATE TRIGGER IF NOT EXISTS egress_firs
  CREATE TRIGGER IF NOT EXISTS egress_first_history_pin_removed AFTER DELETE ON egress_first_backlog BEGIN ` +
 	historyAfterModernWithdrawal + `OLD.hash; END;`
 
-func (s *Store) migrateV52() error {
+func (s *Store) migrateV52(recoverColdInputs bool) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -149,7 +150,7 @@ func (s *Store) migrateV52() error {
 	if err = tx.QueryRow("SELECT sql FROM sqlite_schema WHERE name='egress_inventory'").Scan(&inventory); err != nil {
 		return err
 	}
-	if !strings.Contains(inventory, "egress_first_history") {
+	if !strings.Contains(inventory, "egress_first_history") && !strings.Contains(inventory, "egress_first_arrivals") {
 		const pin = "EXISTS(SELECT 1 FROM egress_first_backlog b WHERE b.hash=u.hash)"
 		if strings.Count(inventory, pin) != 1 {
 			return errors.New("unrecognized first-assessment inventory definition")
@@ -159,6 +160,23 @@ func (s *Store) migrateV52() error {
 			return err
 		}
 	}
+	// Upgrades to the fresh-only scheduler still require the archive schema
+	// and ordinary receipts, but no longer need to read cold vault entries.
+	if recoverColdInputs {
+		if err = s.prepareV52ColdInputs(tx); err != nil {
+			return err
+		}
+	}
+	if err = rememberMeasuredOrdinaryReceipts(tx); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("PRAGMA user_version=52"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) prepareV52ColdInputs(tx *sql.Tx) error {
 	type archived struct {
 		hash, source  string
 		created, size int64
@@ -193,13 +211,7 @@ func (s *Store) migrateV52() error {
 			return err
 		}
 	}
-	if err = rememberMeasuredOrdinaryReceipts(tx); err != nil {
-		return err
-	}
-	if _, err = tx.Exec("PRAGMA user_version=52"); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) firstHistoryRawPhase(hash string, size int64, kind string) string {

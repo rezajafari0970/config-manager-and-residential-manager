@@ -89,7 +89,7 @@ func TestDisableHysteriaReconcilesLegacySubscriptionsAndRetainedProfiles(t *test
 	count(0, "SELECT count(*) FROM network_rotation_queue WHERE candidate_hash=?", template)
 	count(1, "SELECT count(*) FROM egress_unique WHERE identity=? AND hash=?", uri, aliasHash)
 	count(1, "SELECT count(*) FROM artifacts WHERE id=? AND hash=?", uri, aliasHash)
-	count(1, "SELECT count(*) FROM egress_work WHERE hash=?", aliasHash)
+	count(0, "SELECT count(*) FROM egress_work WHERE hash=?", aliasHash) // A replacement alone has no new source receipt.
 	count(0, "SELECT count(*) FROM input_exclusions")
 }
 

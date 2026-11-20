@@ -122,7 +122,7 @@ def runtime_config(config,resolved):
 
 # Disjoint /30 blocks for simultaneous worker scopes and trusted test adapters.
 # Keep crw's existing block stable. Resource names/cleanup ownership do not change.
-SANDBOX_ADDRESS_BASES={'crw':8192,'ctw':8288,'ctf':8384,'crr':8448,'crt':8480,'cge':8704,'cgt':8736}
+SANDBOX_ADDRESS_BASES={'crw':8192,'ctw':8288,'ctf':8384,'crr':8448,'crt':8480,'cge':8704,'cgt':8736,'csi':8768}
 
 class Sandbox:
     def __init__(self, core, runid, index, prefix="crp"):
@@ -262,7 +262,7 @@ def application_site_check(box, timeout):
     except (OSError,subprocess.SubprocessError):
         return False
 
-def test_candidate(box,candidate,timeout,validated_sha256=None):
+def test_candidate(box,candidate,timeout,validated_sha256=None,session_check=None):
     b=base64.b64decode(candidate['config'],validate=True)
     if digest(b)!=candidate['sha256']: raise ValueError('candidate_hash_mismatch')
     result={'core':'not_run','connection':'not_run','code':'not_run','runtime_sha256':'','endpoints_passed':0}
@@ -284,6 +284,9 @@ def test_candidate(box,candidate,timeout,validated_sha256=None):
     try:
         config=preflight.parse_runtime_config(b);resolved=box.inspect(config)
     except (ValueError,TypeError,KeyError) as e:
+        if session_check is not None and str(e) in {'nonloopback_listener_not_qualified','listener_port_conflict','probe_socks_contract_missing','direct_route_not_qualified','direct_default_not_qualified','native_path_unsupported','native_route_unqualified'}:
+            result['code']=str(e)
+            return result
         code=str(e);result['code']=code if code in {'protocol_disabled','outbound_driver_pending','wireguard_endpoint_invalid','no_proxy_endpoint','invalid_proxy_endpoint','endpoint_dns_failed','nonpublic_endpoint_blocked','ipv6_only_probe_pending','ipv6_relay_unavailable','ipv6_endpoint_capacity','custom_dns_mapping_requires_review','invalid_download_settings','invalid_download_endpoint','transport_dependency_depth','port_hopping_invalid'} else 'probe_preparation_failed';return result
     box.resolved=resolved
     # Explicit bootstrap DoH may reach its fixed resolver; app DNS stays routed.
@@ -297,9 +300,19 @@ def test_candidate(box,candidate,timeout,validated_sha256=None):
     ready=False
     for _ in range(30):
         if p.poll() is not None:break
-        check=box.net(['/usr/bin/python3','-c','import socket; s=socket.socket();s.settimeout(.1); print(s.connect_ex(("127.0.0.1",10808)))'])
+        port=getattr(box,'side_port',10808) if session_check is not None else 10808
+        check=box.net(['/usr/bin/python3','-c','import socket,sys; s=socket.socket();s.settimeout(.1); print(s.connect_ex(("127.0.0.1",int(sys.argv[1]))))',str(port)])
         if check.stdout.strip()==b'0':ready=True;break
         time.sleep(.1)
+    if session_check is not None:
+        try:
+            if ready:
+                result.update(session_check(box,timeout))
+            else:
+                result.update(connection='failed',code=classify(box.logs(),'runtime_start_failed'))
+        finally:
+            box.stop()
+        return result
     def https_check(test):
         url,expected=test;error=b""
         args=[IP,'netns','exec',box.name,'/usr/bin/curl','--noproxy','','--proxy','socks5h://127.0.0.1:10808','--max-time',str(timeout),'--connect-timeout',str(timeout),'--max-filesize','65536','--retry','1','--retry-all-errors','--retry-delay','0','--retry-max-time',str(timeout),'--silent','--show-error','--output','/dev/null','--write-out','%{http_code}',url]

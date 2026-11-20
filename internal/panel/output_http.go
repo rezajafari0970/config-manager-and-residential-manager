@@ -50,9 +50,17 @@ func (s *Server) rawAll(w http.ResponseWriter, r *http.Request) {
 type rawScope struct {
 	source, id, axis, group string
 	datacenterRejected      bool
+	side                    bool
+	sideTemplates           bool
 }
 
 func (s *Store) verifiedRawEntries(ctx context.Context, q readQuerier, scope rawScope) ([]networkEntry, error) {
+	if scope.sideTemplates {
+		return sideTemplateEntries(ctx, q)
+	}
+	if scope.side {
+		return sideExportEntries(ctx, q, false)
+	}
 	if scope.datacenterRejected {
 		return datacenterRejectedEntries(ctx, q)
 	}
@@ -114,7 +122,7 @@ func (s *Server) tryVerifiedRaw(w http.ResponseWriter, r *http.Request, scope ra
 			return true
 		}
 		body, err := s.store.openExportBlob(n.Hash)
-		if errors.Is(err, ErrNotFound) && !scope.datacenterRejected {
+		if errors.Is(err, ErrNotFound) && !scope.datacenterRejected && !scope.side {
 			continue
 		}
 		if err != nil {
@@ -178,7 +186,9 @@ func (s *Server) tryVerifiedRaw(w http.ResponseWriter, r *http.Request, scope ra
 		framing += "; final-LF"
 	}
 	w.Header().Set("X-Raw-Framing", framing)
-	if scope.datacenterRejected {
+	if scope.side {
+		w.Header().Set("X-Verification-Scope", sideVerificationScope)
+	} else if scope.datacenterRejected {
 		w.Header().Set("X-Verification-Scope", "ads-datacenter-rejection")
 	} else {
 		w.Header().Set("X-Verification-Scope", "verified-current-source-members")

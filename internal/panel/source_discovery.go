@@ -53,6 +53,17 @@ func rememberHeldSource(ctx context.Context, tx *sql.Tx, r collect.Result, job c
 		records = `SELECT ? AS source_id, value->>'$.identity' AS identity,value->>'$.hash' AS hash,value->>'$.kind' AS kind,value->>'$.size' AS size FROM json_each(?)`
 		args = []any{job.ID, string(raw)}
 	}
+	// Refresh receipt times only for members present in this parsed response.
+	// Keeping an older snapshot after a count drop does not reaffirm its missing lines.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO egress_first_arrivals(source_id,identity,queued_at,received_at)
+ SELECT i.source_id,i.identity,`+egressArrivalClock+`,`+egressArrivalClock+` FROM (`+records+`) i
+ JOIN memberships m ON m.source_id=i.source_id AND m.artifact_id=i.identity
+ JOIN egress_unique u ON u.identity=i.identity JOIN egress_jobs j ON j.hash=u.hash
+ WHERE j.first_completed=0 AND j.tested=0 AND j.ever_accepted=0 AND j.state!='DELETED'
+ AND NOT EXISTS(SELECT 1 FROM egress_first_verdicts f WHERE f.identity=u.identity)
+ ON CONFLICT(source_id,identity) DO UPDATE SET queued_at=CASE WHEN received_at<=excluded.received_at-`+egressArrivalWindow+` THEN excluded.queued_at ELSE queued_at END,received_at=excluded.received_at`, args...); err != nil {
+		return err
+	}
 	// Existing current members already use the ordinary registration path.
 	// The same input can still need a pending first test under another source.
 	records = `SELECT i.* FROM (` + records + `) i
@@ -67,6 +78,9 @@ func rememberHeldSource(ctx context.Context, tx *sql.Tx, r collect.Result, job c
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO egress_first_backlog(source_id,hash)
     SELECT i.source_id,u.hash FROM (`+records+`) i JOIN egress_unique u ON u.identity=i.identity
     JOIN egress_jobs j ON j.hash=u.hash WHERE j.tested=0 AND j.first_completed=0 AND j.state!='DELETED'`, args...); err != nil {
+		return err
+	}
+	if err := rememberHeldSide(ctx, tx, records, stamp, args...); err != nil {
 		return err
 	}
 	return rememberOrdinaryFirst(ctx, tx, records, args...)

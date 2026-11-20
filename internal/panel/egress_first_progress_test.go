@@ -31,9 +31,12 @@ func TestFirstQueueSnapshotSeparatesWorkAndReportsObservedWindows(t *testing.T) 
 		}
 	}
 	h := func(i int) string { return egress.Hash([]byte(inputs[i])) }
+	exec("UPDATE egress_first_arrivals SET queued_at=?", now-4000)
 	exec("UPDATE egress_unique SET created=?", now-4000)
 	exec("UPDATE egress_unique SET created=? WHERE hash=?", now-9000, h(2))
+	exec("UPDATE egress_first_arrivals SET queued_at=? WHERE identity=(SELECT identity FROM egress_unique WHERE hash=?)", now-9000, h(2))
 	exec("UPDATE egress_unique SET created=? WHERE hash=?", now-6000, h(1))
+	exec("UPDATE egress_first_arrivals SET queued_at=? WHERE identity=(SELECT identity FROM egress_unique WHERE hash=?)", now-6000, h(1))
 	exec("UPDATE egress_jobs SET token='worker',lease_until=? WHERE hash=?", now+1000, h(0))
 	exec("UPDATE egress_jobs SET next_run=?,retry_streak=1 WHERE hash=?", now+20, h(2))
 	exec("UPDATE egress_jobs SET paused=1 WHERE hash=?", h(3))
@@ -53,7 +56,7 @@ func TestFirstQueueSnapshotSeparatesWorkAndReportsObservedWindows(t *testing.T) 
 		{now - 30000, "current"}, {now, "withdrawn"}, {now, "historical"}, {now, ""},
 		{now - 30001, "current"}, {now + 1, "withdrawn"}, {now - 300000, "current"},
 	} {
-		exec("INSERT INTO egress_events(hash,at,state,reason,first_result_scope) VALUES(?,?,'UNKNOWN','fixture',?)", h(0), row.at, row.scope)
+		exec("INSERT INTO egress_events(hash,at,state,reason,first_result_scope) VALUES(?,?,'UNKNOWN','fixture',?)", egress.Hash([]byte("completed independent receipt")), row.at, row.scope)
 	}
 	get := func() firstAssessmentProgress {
 		t.Helper()
@@ -210,7 +213,7 @@ func TestFirstAssessmentAPISeparatesHistoricalRecoveryPhases(t *testing.T) {
 	}
 }
 
-func TestArchiveFirstResultAttributionFollowsTheLeaseAndCurrentMembership(t *testing.T) {
+func TestFirstResultAttributionExcludesColdArchive(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	historical := historyInput(t, s, "receipt-history", 125)
@@ -221,20 +224,14 @@ func TestArchiveFirstResultAttributionFollowsTheLeaseAndCurrentMembership(t *tes
 	if _, err := s.db.Exec("INSERT INTO egress_first_backlog(source_id,hash) VALUES(?,?)", withdrawn.source, withdrawn.hash); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{historical.hash: "historical", current.hash: "current", withdrawn.hash: "withdrawn"}
-	for range 3 {
+	want := map[string]string{current.hash: "current", withdrawn.hash: "withdrawn"}
+	for range 2 {
 		job, err := s.ClaimEgressLane(ctx, "initial")
 		if err != nil || job == nil {
 			t.Fatal("first claim", job, err)
 		}
 		if job.Hash == historical.hash {
-			now := egress.Now()
-			frozen, err := freezeEgress(context.WithValue(ctx, readTimeKey{}, now), s.db)
-			if err != nil {
-				t.Fatal(err)
-			}
-			pendingCount(t, frozen, 1, "SELECT count(*) FROM egress_inventory WHERE hash=? AND lease_until>?", job.Hash, now)
-			pendingCount(t, frozen, 1, "SELECT count(*) FROM egress_work WHERE hash=? AND lease_until>?", job.Hash, now)
+			t.Fatal("cold archive entered first queue")
 		}
 		if err = s.CompleteEgress(ctx, egress.Completion{Job: *job, Report: syntheticEgress(*job)}); err != nil {
 			t.Fatal(err)
@@ -250,7 +247,7 @@ func TestArchiveFirstResultAttributionFollowsTheLeaseAndCurrentMembership(t *tes
 		t.Fatal(err)
 	}
 	r := p.FirstResults5m
-	if r.Current != 1 || r.Withdrawn != 2 || r.Historical != 1 {
+	if r.Current != 1 || r.Withdrawn != 1 || r.Historical != 0 {
 		t.Fatal("historical subset of withdrawn", r)
 	}
 }

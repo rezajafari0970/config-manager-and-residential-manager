@@ -132,7 +132,7 @@ def relay_endpoints(c):
         for ref in (ob.get('proxySettings',{}).get('tag'),ob.get('streamSettings',{}).get('sockopt',{}).get('dialerProxy')):
             if ref in legs:fail('relay_carrier_shared')
     return relays
-def runtime_config(config,resolved):
+def runtime_config(config,resolved,socks_port=10808):
     relay_endpoints(logical_for_inspection(config))
     listeners=set()
     for x in config.get('inbounds',[]):
@@ -140,7 +140,7 @@ def runtime_config(config,resolved):
         port=x.get('port')
         if not isinstance(port,int) or port in listeners:fail('listener_port_conflict')
         listeners.add(port)
-    socks=[x for x in config.get('inbounds',[]) if x.get('protocol')=='socks' and x.get('port')==10808]
+    socks=[x for x in config.get('inbounds',[]) if x.get('protocol')=='socks' and x.get('port')==socks_port]
     if len(socks)!=1 or socks[0].get('settings',{}).get('auth','noauth')!='noauth':fail('probe_socks_contract_missing')
     return copy.deepcopy(config)
 

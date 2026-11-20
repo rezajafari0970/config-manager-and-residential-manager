@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
 type historyFixture struct {
@@ -40,7 +38,7 @@ func exerciseHistoryUpgrade(t *testing.T, s *Store) {
 	if _, err := s.db.Exec("PRAGMA user_version=51"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.migrateV52(); err != nil {
+	if err := s.migrateV52(true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -124,133 +122,6 @@ func TestV52FirstHistoryRequiresCommittedUnambiguousUnmeasuredInput(t *testing.T
 	}
 	pendingCount(t, s.db, 2, "SELECT count(*) FROM egress_first_history WHERE phase='unavailable' AND raw_available=0")
 	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_export_eligible")
-}
-
-func TestV52FirstHistorySettlesOnceAcrossRestart(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	f := historyInput(t, s, "resume", 203)
-	exerciseHistoryUpgrade(t, s)
-	if _, err := s.db.Exec("UPDATE egress_first_history SET phase='active',ready_at=0 WHERE hash=?", f.hash); err != nil {
-		t.Fatal(err)
-	}
-	j, err := s.ClaimEgressLane(ctx, "initial")
-	if err != nil || j == nil || j.Hash != f.hash || string(j.Raw) != f.raw {
-		t.Fatal("missing original archived bytes", err)
-	}
-	if err = s.RenewEgress(ctx, *j); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(filepath.Dir(s.vault.Directory()), "panel.db")
-	key := s.key
-	if err = s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(path, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	r := syntheticEgress(*j)
-	for i := range r.Samples {
-		x := &r.Samples[i]
-		x.Source = egress.Hash([]byte("1.1.1.1"))
-		if x.Network != nil {
-			x.Network.Source = x.Source
-		}
-	}
-	if err = reopened.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != nil {
-		t.Fatal(err)
-	}
-	if err = reopened.CompleteEgress(ctx, egress.Completion{Job: *j, Report: r}); err != ErrConflict {
-		t.Fatal("duplicate delivery accepted", err)
-	}
-	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM egress_first_history WHERE hash=? AND phase='completed'", f.hash)
-	pendingCount(t, reopened.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND attempts=1 AND first_completed=1", f.hash)
-	pendingCount(t, reopened.db, 0, "SELECT count(*) FROM egress_work WHERE hash=?", f.hash)
-	pendingCount(t, reopened.db, 0, "SELECT count(*) FROM memberships WHERE artifact_id=?", f.identity)
-	if err = reopened.migrateV52(); err != nil {
-		t.Fatal(err)
-	}
-	if job, e := reopened.ClaimEgress(ctx); e != nil || job != nil {
-		t.Fatal("completed receipt rearmed", e)
-	}
-}
-
-func TestV52FirstHistoryHonorsOwnerChanges(t *testing.T) {
-	for _, mode := range []string{"source-url", "source-deletion", "config-deletion", "pause-resume", "source-disable", "new-membership", "modern-withdrawal"} {
-		t.Run(mode, func(t *testing.T) {
-			s := testStore(t)
-			ctx := context.Background()
-			f := historyInput(t, s, "owner-change", 204)
-			exerciseHistoryUpgrade(t, s)
-			if _, err := s.db.Exec("UPDATE egress_first_history SET phase='active',ready_at=0 WHERE hash=?", f.hash); err != nil {
-				t.Fatal(err)
-			}
-			j, err := s.ClaimEgress(ctx)
-			if err != nil || j == nil || j.Hash != f.hash {
-				t.Fatal("missing active history lease", err)
-			}
-			src, err := s.Get(ctx, f.source)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch mode {
-			case "source-url":
-				src.URL += "/replacement"
-				_, err = s.Save(ctx, f.source, src.Revision, src.SourceInput)
-			case "source-disable":
-				src.Enabled = false
-				_, err = s.Save(ctx, f.source, src.Revision, src.SourceInput)
-			case "source-deletion":
-				err = s.Delete(ctx, f.source, src.Revision)
-			case "config-deletion":
-				_, err = s.ManageConfigs(ctx, ConfigBatch{Action: "delete", IDs: []string{f.identity}})
-			case "pause-resume":
-				_, err = s.ManageConfigs(ctx, ConfigBatch{Action: "disable", IDs: []string{f.identity}})
-			case "new-membership":
-				commitProbeInputs(t, s, f.source, f.raw)
-			case "modern-withdrawal":
-				_, err = s.db.Exec("INSERT INTO egress_first_backlog(source_id,hash) VALUES(?,?)", f.source, f.hash)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if mode == "new-membership" || mode == "modern-withdrawal" {
-				pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_first_history WHERE hash=? AND phase='promoted'", f.hash)
-				if err = s.RenewEgress(ctx, *j); err != nil {
-					t.Fatal("promoted owner lost valid lease", err)
-				}
-				return
-			}
-			if err = s.RenewEgress(ctx, *j); err != ErrConflict {
-				t.Fatal("revoked claim renewed", err)
-			}
-			if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: syntheticEgress(*j)}); err != ErrConflict {
-				t.Fatal("revoked claim completed", err)
-			}
-			if mode == "source-disable" {
-				src, err = s.Get(ctx, f.source)
-				if err != nil {
-					t.Fatal(err)
-				}
-				src.Enabled = true
-				if _, err = s.Save(ctx, f.source, src.Revision, src.SourceInput); err != nil {
-					t.Fatal(err)
-				}
-				pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_first_history WHERE hash=? AND phase='waiting'", f.hash)
-			} else if mode == "pause-resume" {
-				if _, err = s.ManageConfigs(ctx, ConfigBatch{Action: "enable", IDs: []string{f.identity}}); err != nil {
-					t.Fatal(err)
-				}
-				pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_first_history WHERE hash=? AND phase IN ('waiting','active')", f.hash)
-			} else {
-				pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_first_history WHERE hash=? AND phase IN ('waiting','active')", f.hash)
-				pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work WHERE hash=?", f.hash)
-			}
-			pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_export_eligible")
-		})
-	}
 }
 
 func TestV52FirstHistoryLosingPromotedOwner(t *testing.T) {

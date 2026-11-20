@@ -8,7 +8,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/egress"
 )
 
-func TestOverdueRetirementGetsBoundedMaintenanceShareAcrossRestart(t *testing.T) {
+func TestOldRejectionDoesNotDisplaceMaintenanceAcrossRestart(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	newExportSource(t, s, "late-confirmation", sourceURI(213), sourceURI(214), sourceURI(215))
@@ -48,15 +48,7 @@ func TestOverdueRetirementGetsBoundedMaintenanceShareAcrossRestart(t *testing.T)
 			t.Fatal("maintenance grant", n, err)
 		}
 		if j.Hash == retired {
-			if n != 8 {
-				t.Fatal("displaced preferred maintenance before reservation", n)
-			}
-			if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: syntheticEgress(*j)}); err != nil {
-				t.Fatal(err)
-			}
-			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_export_eligible WHERE hash=?", retired)
-			pendingCount(t, s.db, 3, "SELECT first_assessments FROM egress_metrics")
-			return
+			t.Fatal("completed negative displaced maintenance", n)
 		}
 		if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: syntheticEgress(*j)}); err != nil {
 			t.Fatal(err)
@@ -73,10 +65,10 @@ func TestOverdueRetirementGetsBoundedMaintenanceShareAcrossRestart(t *testing.T)
 			defer s.Close()
 		}
 	}
-	t.Fatal("all eight grants bypassed the overdue sourced confirmation")
+	pendingCount(t, s.db, 3, "SELECT first_assessments FROM egress_metrics")
 }
 
-func TestOwedConfirmationPreservesBorrowedDeadlineAndFirstAssessment(t *testing.T) {
+func TestOldRejectionPreservesBorrowedDeadlineAndFirstAssessment(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	newExportSource(t, s, "competing-deadline", sourceURI(216), sourceURI(217))
@@ -107,14 +99,16 @@ func TestOwedConfirmationPreservesBorrowedDeadlineAndFirstAssessment(t *testing.
 	if _, err := s.db.Exec("UPDATE egress_jobs SET valid_until=?,next_run=0 WHERE hash=?", egress.Now()+30000, urgentHash); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`INSERT INTO metadata VALUES('egress-dispatch-streak','-2'),('egress-other-maintenance','7') ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO metadata VALUES('egress-dispatch-streak','-2') ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
 		t.Fatal(err)
 	}
-	for n, want := range []string{urgentHash, egress.Hash([]byte(raw)), oldHash} {
+	for n, want := range []string{urgentHash, egress.Hash([]byte(raw))} {
 		got, err := s.ClaimEgressLane(ctx, "initial")
 		if err != nil || got == nil || got.Hash != want {
 			t.Fatal("unexpected protected grant", n, err)
 		}
 	}
-	pendingCount(t, s.db, 0, "SELECT CAST(value AS INTEGER) FROM metadata WHERE key='egress-other-maintenance'")
+	if got, err := s.ClaimEgressLane(ctx, "initial"); err != nil || got != nil {
+		t.Fatal("old rejection was rechecked", err)
+	}
 }

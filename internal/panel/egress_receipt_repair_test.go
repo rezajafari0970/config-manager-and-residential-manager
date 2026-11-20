@@ -135,13 +135,13 @@ func TestV54RechecksOriginalPositiveAndHostingReceipts(t *testing.T) {
 				pendingCount(t, s.db, 0, "SELECT count(*) "+datacenterRejectedFrom)
 				pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_export_eligible")
 				restore, err := s.ClaimEgress(ctx)
-				if err != nil || restore == nil || restore.Hash != job.Hash {
-					t.Fatal("missing bounded review", err)
+				if err != nil || restore != nil {
+					t.Fatal("historical decision for a never-accepted input generated another grant", err)
 				}
 				if err = s.migrateV54(); err != nil {
 					t.Fatal(err)
 				}
-				pendingCount(t, s.db, 1, "SELECT attempts FROM egress_network_review")
+				pendingCount(t, s.db, 0, "SELECT attempts FROM egress_network_review")
 			}
 		})
 	}

@@ -31,6 +31,12 @@ class DiscoveryContracts(unittest.TestCase):
   with patch.object(driver,'runtime',lambda *a:({},{})),patch.object(driver,'resource_failures',lambda *a:((1,2),(0,0))),patch.object(driver,'diagnostic_delivery',lambda *a:dict(assets=[dict(curl_exit=0,http_status=200,tls_verified=True,complete=True,content_match=True)])):
    old=driver.investigate(req,args,pool)
    self.assertEqual(old['code'],'measured');self.assertEqual(len(old['checks']),2);self.assertEqual(len(old['evidence']),1);self.assertTrue(old['evidence'][0]['selected_samples']);self.assertEqual(old['evidence'][0]['samples'],[]);self.assertEqual(old['evidence'][0]['waves'],old['waves'])
+   with patch.object(driver,'scheduled_health_sample',side_effect=lambda box,v:dict(variant=v)) as sample:
+    req['accepted']=True
+    self.assertEqual(driver.investigate(req,args,pool)['health'],[])
+    sample.assert_not_called()
+    req['health_due']=True
+    self.assertEqual(driver.investigate(req,args,pool)['health'],[dict(variant='raw'),dict(variant='template')])
    calls.clear();req['discovery']=True;new=driver.investigate(req,args,pool)
   self.assertEqual(len(new['checks']),2);self.assertEqual(new['code'],'measured')
   self.assertEqual(len(new['samples']),6*len(BASE_TARGETS))

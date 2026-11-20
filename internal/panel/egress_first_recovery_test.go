@@ -103,7 +103,9 @@ func TestV50ReopensOnlyProvenSingleUnmeasuredReceipts(t *testing.T) {
 			}
 		}
 	}
-	if _, err := s.db.Exec("PRAGMA user_version=49"); err != nil {
+	// The original v49 database had no v56 verdict ledger. Let the real
+	// upgrade establish final receipts after correcting legacy infrastructure failures.
+	if _, err := s.db.Exec("DELETE FROM egress_first_verdicts; PRAGMA user_version=49"); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -111,8 +113,19 @@ func TestV50ReopensOnlyProvenSingleUnmeasuredReceipts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	pendingCount(t, s.db, 2, "SELECT count(*) FROM egress_work WHERE first_completed=0 AND tested=0")
-	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_first_backlog")
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = migrateFreshResidential(tx); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_work WHERE first_completed=0 AND tested=0")
+	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_first_backlog")
 	pendingCount(t, s.db, 3, "SELECT count(*) FROM egress_jobs WHERE first_completed=0")
 	pendingCount(t, s.db, 2, "SELECT count(*) FROM egress_jobs WHERE first_completed=1 AND tested>0")
 }

@@ -31,8 +31,9 @@ type egressSourceRow struct {
 
 const currentEgressBucket = `CASE
    WHEN x.identity IS NOT NULL OR g.state='BLOCKED' OR c.action='deleted' OR j.state='DELETED' THEN 'excluded'
+   WHEN j.first_completed!=0 OR j.tested>0 OR EXISTS(SELECT 1 FROM egress_first_verdicts f WHERE f.identity=k.identity) THEN 'tested'
    WHEN j.hash IS NULL THEN 'missing'
-   WHEN j.first_completed!=0 OR j.tested>0 THEN 'tested' ELSE 'awaiting' END`
+   WHEN g.state='QUARANTINED' OR EXISTS(` + egressFreshOwner + `) THEN 'awaiting' ELSE 'excluded' END`
 
 const currentEgressJoins = `LEFT JOIN egress_unique u ON u.identity=k.identity
  LEFT JOIN egress_jobs j ON j.hash=u.hash
@@ -60,6 +61,7 @@ SELECT * FROM (WITH page AS (
  CROSS JOIN sources s ON s.id=b.source_id AND s.enabled=1
  CROSS JOIN egress_unique u ON u.hash=b.hash CROSS JOIN egress_jobs j ON j.hash=b.hash
  WHERE j.tested=0 AND j.first_completed=0 AND j.state!='DELETED'
+ AND EXISTS(SELECT 1 FROM egress_first_arrivals a WHERE a.source_id=b.source_id AND a.identity=u.identity AND a.received_at>?3-` + egressArrivalWindow + `)
  AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.source_id=b.source_id AND m.artifact_id=u.identity)
  AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=u.identity)
  AND NOT EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=u.identity AND g.state='BLOCKED')

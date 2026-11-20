@@ -388,6 +388,7 @@ func (s *Server) writeJSONLines(w http.ResponseWriter, r *http.Request, source s
 func (s *Store) PrivateProbeHandler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerPrivateEgress(mux)
+	s.registerPrivateSide(mux)
 	mux.HandleFunc("POST /claim", func(w http.ResponseWriter, r *http.Request) {
 		j, e := s.ClaimProbe(r.Context())
 		if e != nil {
@@ -438,7 +439,7 @@ func (s *Store) PrivateProbeHandler() http.Handler {
 	other := s.admitWorker(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pattern := mux.Handler(r)
-		if pattern == "POST /claim" || pattern == "POST /egress/claim" {
+		if pattern == "POST /claim" || pattern == "POST /egress/claim" || strings.HasPrefix(pattern, "POST /side/") {
 			mux.ServeHTTP(w, r)
 			return
 		}

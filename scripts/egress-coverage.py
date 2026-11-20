@@ -21,11 +21,13 @@ WITH members AS MATERIALIZED (
   SELECT k.identity,u.hash IN qualified AS residential,u.hash IN exported AS published, CASE
     WHEN x.identity IS NOT NULL OR g.state='BLOCKED' OR c.action='deleted' OR j.state='DELETED'
       THEN 'excluded'
+    {remembered_case}
     WHEN u.hash IS NULL OR j.hash IS NULL THEN 'missing_job'
     WHEN h.held=1 THEN 'network_held'
     {review_cases}
     WHEN j.paused<>0 OR c.action='disabled' THEN 'paused'
     WHEN u.hash IN exported THEN 'published'
+    {fresh_case}
     WHEN j.token<>'' AND j.lease_until>:now THEN 'running'
     WHEN j.tested=0 AND j.first_completed=0 THEN 'awaiting_first'
     WHEN j.tested=0 THEN 'awaiting_recheck'
@@ -109,7 +111,18 @@ def collect(connection, source_id, timeout):
       WHEN v.identity IS NOT NULL THEN 'network_review_inconclusive'
     """ if schema >= 49 else ""
     review_join = "LEFT JOIN egress_network_review v ON v.identity=k.identity" if schema >= 49 else ""
-    current_sql = CURRENT.format(member_filter=member_filter, review_cases=review_cases, review_join=review_join)
+    remembered_case = fresh_case = ""
+    if schema >= 56:
+        remembered_case = """WHEN (j.hash IS NULL OR (j.first_completed=0 AND j.tested=0))
+          AND EXISTS(SELECT 1 FROM egress_first_verdicts f WHERE f.identity=k.identity)
+          THEN 'previously_assessed'"""
+        fresh_case = """WHEN j.first_completed=0 AND j.tested=0 AND NOT EXISTS(
+          SELECT 1 FROM egress_inventory scope WHERE scope.hash=j.hash) THEN 'outside_first_queue'"""
+        review_cases = """WHEN v.identity IS NOT NULL AND EXISTS(
+          SELECT 1 FROM egress_work scope WHERE scope.hash=j.hash) THEN 'network_review_pending'
+          WHEN v.identity IS NOT NULL THEN 'network_review_inconclusive'"""
+    current_sql = CURRENT.format(member_filter=member_filter, review_cases=review_cases, review_join=review_join,
+                                 remembered_case=remembered_case, fresh_case=fresh_case)
     for key, category, count, residential, published in query(current_sql, params):
         target = global_counts if key is None else sources[key]
         target["current"][category] = count
@@ -127,6 +140,10 @@ def collect(connection, source_id, timeout):
       AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.source_id=b.source_id
                        AND m.artifact_id=u.identity)
     """ + (" AND b.source_id=:source" if source_id is not None else "")
+    if schema >= 56:
+        backlog += """ AND EXISTS(SELECT 1 FROM egress_first_arrivals a JOIN sources s ON s.id=a.source_id
+          WHERE s.enabled=1 AND a.source_id=b.source_id AND a.identity=u.identity
+          AND a.received_at>:now-(SELECT min(retention_seconds,86400)*1000 FROM settings WHERE id=1))"""
     datasets = [("staged_unique", stages)]
     if has_first_backlog:
         datasets.append(("withdrawn_awaiting_first", backlog))

@@ -14,6 +14,7 @@ import (
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/probe"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/repair"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/resources"
+	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/side"
 	"github.com/rezajafari0970/config-manager-and-residential-manager/internal/worker"
 	"io"
 	"log"
@@ -98,7 +99,7 @@ func (q *admittedQueue) Claim(ctx context.Context) (*probe.Job, error) {
 	release := func() {}
 	if q.budget != nil {
 		var ok bool
-		if priority, yes := q.budget.(interface{ TryProbe(int64) (func(), bool) }); yes {
+		if priority, yes := q.budget.(interface{ TryProbe(int64) (func(), bool) }); yes && q.prefix != "/side" {
 			release, ok = priority.TryProbe(384 * 1024 * 1024)
 		} else {
 			release, ok = q.budget.Try(384 * 1024 * 1024)
@@ -125,7 +126,7 @@ type helperResult struct {
 func execute(ctx context.Context, c client, helper, core string, slot int, j probe.Job) {
 	p := c.prepare(j.Raw)
 	code := p.Code
-	if c.prefix == "" && repair.Digest(j.Raw) != j.Hash {
+	if repair.Digest(j.Raw) != j.Hash {
 		code = "original_blob_unavailable"
 		p.Candidates = nil
 	}
@@ -137,9 +138,14 @@ func execute(ctx context.Context, c client, helper, core string, slot int, j pro
 		p.Kind = j.Kind
 	}
 	p.Code = code
-	r := probe.Result{Hash: j.Hash, Token: j.Token, Revision: j.Revision, Version: c.version, CoreSHA256: probe.CoreSHA256, Attempt: probe.Attempt{SHA256: j.Hash, Rule: "preparation", Core: "not_run", Connection: "not_run", Code: code}}
+	r := probe.Result{Identity: j.Identity, Hash: j.Hash, Token: j.Token, Revision: j.Revision, Version: c.version, CoreSHA256: probe.CoreSHA256, Attempt: probe.Attempt{SHA256: j.Hash, Rule: "preparation", Core: "not_run", Connection: "not_run", Code: code}}
 	if len(p.Candidates) > 0 {
 		deadline := time.Duration(len(p.Candidates)*(155+3*j.Settings.TimeoutSeconds)) * time.Second
+		if c.prefix == "/side" {
+			// Bound one identity even when the parser produced several alternate
+			// candidates. An interrupted or timed-out run is never a route verdict.
+			deadline = min(deadline, 3*time.Minute)
+		}
 		jobCtx, cancel := context.WithTimeout(ctx, deadline)
 		defer cancel()
 		done := make(chan struct{})
@@ -155,7 +161,7 @@ func execute(ctx context.Context, c client, helper, core string, slot int, j pro
 					return
 				case <-tick.C:
 					leaseCtx, stop := context.WithTimeout(jobCtx, 10*time.Second)
-					err := c.call(leaseCtx, "/renew", probe.Job{Hash: j.Hash, Token: j.Token, Revision: j.Revision}, nil)
+					err := c.call(leaseCtx, "/renew", probe.Job{Identity: j.Identity, Hash: j.Hash, Token: j.Token, Revision: j.Revision}, nil)
 					stop()
 					if err != nil {
 						cancel()
@@ -181,7 +187,7 @@ func execute(ctx context.Context, c client, helper, core string, slot int, j pro
 			}
 			r.Attempts = h.Attempts
 			for _, candidate := range p.Candidates {
-				if candidate.SHA256 == h.SHA256 {
+				if candidate.SHA256 == h.SHA256 && (c.prefix != "/side" || h.Code == "passed") {
 					r.Candidate = candidate.Config
 					break
 				}
@@ -218,12 +224,40 @@ func execute(ctx context.Context, c client, helper, core string, slot int, j pro
 		}
 	}
 }
+
+type laneSettings struct {
+	prefix, helper, lock string
+	slots                int
+}
+
+func settingsForLane(name string) (laneSettings, error) {
+	switch name {
+	case "conversion":
+		return laneSettings{"", "probe-one.py", "/run/config-repair-prober.lock", 8}, nil
+	case "side":
+		return laneSettings{"/side", "side-one.py", "/run/config-repair-side.lock", 4}, nil
+	default:
+		return laneSettings{}, errors.New("unknown probe lane")
+	}
+}
+
 func run() error {
+	lane := flag.String("lane", "conversion", "independent queue: conversion or side")
 	socket := flag.String("socket", "/var/lib/config-repair/probe.sock", "protected Unix queue socket")
-	helper := flag.String("helper", "/opt/config-repair/current/scripts/probe-one.py", "trusted sandbox driver")
+	helper := flag.String("helper", "", "trusted sandbox driver")
 	core := flag.String("core", "/opt/config-repair/core-26.11.9/xray", "pinned core")
-	lockPath := flag.String("lock-file", "/run/config-repair-prober.lock", "supervisor instance lock")
+	lockPath := flag.String("lock-file", "", "supervisor instance lock")
 	flag.Parse()
+	config, e := settingsForLane(*lane)
+	if e != nil {
+		return e
+	}
+	if *helper == "" {
+		*helper = "/opt/config-repair/current/scripts/" + config.helper
+	}
+	if *lockPath == "" {
+		*lockPath = config.lock
+	}
 	if os.Geteuid() != 0 {
 		return errors.New("privileged sandbox supervisor required")
 	}
@@ -237,10 +271,13 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	c := client{http: &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	c := client{prefix: config.prefix, http: &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", *socket)
 	}}, Timeout: 30 * time.Second}, version: convert.Version, prepare: convert.Prepare, poll: &worker.PollGate{}}
-	slots := 8
+	if config.prefix == "/side" {
+		c.prepare = side.Prepare
+	}
+	slots := config.slots
 	interval := time.Second
 
 	status := func(state, code string, active int) {

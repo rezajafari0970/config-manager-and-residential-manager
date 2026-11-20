@@ -47,11 +47,7 @@ func (s *Store) migrateV33() error {
 // Start the finite audit from current inputs and retained work. The cold
 // archive can hold many more rows with tested=0 than the active inventory.
 const egressInventoryCandidates = `SELECT u.hash FROM (SELECT DISTINCT artifact_id FROM memberships) m CROSS JOIN egress_unique u ON u.identity=m.artifact_id
- UNION SELECT u.hash FROM egress_network_review v CROSS JOIN egress_unique u ON u.identity=v.identity
- UNION SELECT hash FROM egress_first_backlog
- UNION SELECT hash FROM egress_compatibility_queue
- UNION SELECT hash FROM egress_retirement_sources
- UNION SELECT hash FROM egress_first_history INDEXED BY egress_first_history_active_due WHERE phase='active'
+ UNION SELECT u.hash FROM egress_first_arrivals a CROSS JOIN egress_unique u ON u.identity=a.identity
  UNION SELECT hash FROM egress_jobs WHERE ever_accepted=1
  UNION SELECT u.hash FROM egress_iran_guard g CROSS JOIN egress_unique u ON u.identity=g.identity WHERE g.state='QUARANTINED'`
 

@@ -41,7 +41,8 @@ func TestEgressSnapshotFreezesQueueAndRejectionControls(t *testing.T) {
 	exec("INSERT INTO config_controls SELECT artifact_id,'deleted',?,? FROM memberships WHERE source_id=?", start-1000, start+60000, backlog)
 	exec("DELETE FROM memberships WHERE source_id=?", backlog)
 	review, _ := newExportSource(t, s, "clock-review", sourceURI(37))
-	exec("UPDATE egress_jobs SET tested=?,first_completed=1 WHERE hash IN(SELECT u.hash FROM memberships m JOIN egress_unique u ON u.identity=m.artifact_id WHERE m.source_id=?)", start-1000, review)
+	exec("UPDATE egress_jobs SET tested=?,first_completed=1,ever_accepted=1 WHERE hash IN(SELECT u.hash FROM memberships m JOIN egress_unique u ON u.identity=m.artifact_id WHERE m.source_id=?)", start-1000, review)
+	exec("INSERT INTO egress_residential_history SELECT u.hash FROM memberships m JOIN egress_unique u ON u.identity=m.artifact_id WHERE m.source_id=?", review)
 	exec("INSERT INTO egress_network_review SELECT artifact_id,0 FROM memberships WHERE source_id=?", review)
 	exec("INSERT INTO config_controls SELECT artifact_id,'disabled',?,? FROM memberships WHERE source_id=?", start-1000, start+60000, review)
 	retirement, _ := newExportSource(t, s, "clock-retirement", sourceURI(38))
@@ -75,8 +76,12 @@ func TestEgressSnapshotFreezesQueueAndRejectionControls(t *testing.T) {
 			if err := frozen.QueryRowContext(ctx, query).Scan(&asOf); err != nil {
 				t.Fatal(err)
 			}
-			if live != 1 || asOf != 0 {
-				t.Fatalf("live=%d as-of=%d, expected 1 and 0", live, asOf)
+			want := 1
+			if name == "retirement confirmation" {
+				want = 0
+			}
+			if live != want || asOf != 0 {
+				t.Fatalf("live=%d as-of=%d, expected %d and 0", live, asOf, want)
 			}
 		})
 	}

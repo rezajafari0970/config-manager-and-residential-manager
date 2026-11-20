@@ -60,12 +60,13 @@ def validate_client(box, data, core):
         box.stop()
         box.core = previous
 
-def run_target(box,candidate,timeout,core):
+def run_target(box,candidate,timeout,core,session_check=None):
     previous=box.core
     try:
         box.core=pathlib.Path(core).resolve()
-        result=lab.test_candidate(box,candidate,timeout,validated_sha256=candidate['sha256'])
-        if result.get('code') in {'peer_closed_connection','peer_reset_connection','proxy_request_failed'} and result.get('core')=='passed':
+        options={'session_check':session_check} if session_check is not None else {}
+        result=lab.test_candidate(box,candidate,timeout,validated_sha256=candidate['sha256'],**options)
+        if session_check is None and result.get('code') in {'peer_closed_connection','peer_reset_connection','proxy_request_failed'} and result.get('core')=='passed':
             # A new exact-config session and fresh endpoint resolution, once.
             # Never invent credentials or relax TLS after an upstream close.
             first=result['code'];box.stop()
@@ -113,9 +114,52 @@ class NativeBox(lab.Sandbox):
     def inspect(self,config):
         return lab.native_endpoints(config)
 
-def main():
+def measure_candidate(box,candidate,timeout,args,native,session_check):
+    client_failure={'code':'not_run'}
+    try:
+        data=base64.b64decode(candidate['config'],validate=True)
+        if len(data)>2*1024*1024 or lab.digest(data)!=candidate['sha256']:raise ValueError('invalid candidate')
+        if native:
+            r=lab.test_candidate(box,candidate,timeout,session_check=session_check)
+        else:
+            client_failure=validate_client(box,data,args.client_core)
+            if client_failure is None:
+                seen_variants={lab.digest(data)}
+                for variant in app.variants(data):
+                    if lab.digest(variant) in seen_variants:continue
+                    seen_variants.add(lab.digest(variant))
+                    client_failure=validate_client(box,variant,args.client_core)
+                    if client_failure is not None:
+                        client_failure["code"]="app_transform_core_rejected"
+                        break
+            if client_failure is not None:
+                r=client_failure
+            else:
+                # Both official cores must build the exact output. Real traffic
+                # runs on the core actually bundled with the target Android app.
+                latest_failure=validate_client(box,data,args.core)
+                if latest_failure is not None:
+                    r=latest_failure
+                else:
+                    r=run_target(box,candidate,timeout,args.client_core,session_check)
+    except Exception as error:
+        code = 'protocol_disabled' if isinstance(error,ValueError) and str(error)=='protocol_disabled' else 'probe_infrastructure_error'
+        r={'core':'blocked','connection':'not_run','code':code,'runtime_sha256':'','endpoints_passed':0}
+    if native:
+        r['engine']='sing-box'
+        r.setdefault('evidence',{})['native_core']=r['core']
+        r['evidence']['runtime_core']='sing_box_1_14_4'
+        r['evidence']['android']='not_run'
+    else:
+        r.setdefault('evidence',{})['bundled_core']='passed' if client_failure is None else 'failed'
+        r['evidence']['target_core']=r['core']
+        r['evidence']['app_import_contract']='passed' if client_failure is None else 'failed'
+        r['evidence']['android']='not_run'
+    return r
+
+def main(session_check=None,verify_raw=None,inspect_session=None):
     global OWN
-    if PREFIX not in ('crw','ctw','crr','crt'):raise SystemExit('invalid resource prefix')
+    if PREFIX not in ('crw','ctw','crr','crt','csi') or (PREFIX=='csi')!=(session_check is not None):raise SystemExit('invalid resource prefix')
     OWN=re.compile(r'^'+PREFIX+r'[0-9a-f]{6}20(?:0[0-8])$')
     a=argparse.ArgumentParser();a.add_argument('--core');a.add_argument('--client-core',default=CLIENT_CORE);a.add_argument('--slot',type=int);a.add_argument('--cleanup',action='store_true');a.add_argument('--cleanup-slot',type=int);a.add_argument('--self-test',action='store_true');a.add_argument('--run-id');a.add_argument('--cleanup-run');args=a.parse_args()
     if os.geteuid()!=0:raise SystemExit('root supervisor required')
@@ -170,51 +214,28 @@ def main():
     box_type=NativeBox if native else lab.Sandbox
     try:
         with box_type(NATIVE_CORE if native else args.core,runid,8192+args.slot,prefix=PREFIX) as box:
+            if inspect_session is not None:
+                box.inspect=lambda cfg: inspect_session(box,cfg,lab)
+            def measure(c):
+                return measure_candidate(box,c,timeout,args,native,session_check)
             for candidate in plan['candidates']:
-                client_failure={'code':'not_run'}
-                try:
-                    data=base64.b64decode(candidate['config'],validate=True)
-                    if len(data)>2*1024*1024 or lab.digest(data)!=candidate['sha256']:raise ValueError('invalid candidate')
-                    if native:
-                        r=lab.test_candidate(box,candidate,timeout)
-                    else:
-                        client_failure=validate_client(box,data,args.client_core)
-                        if client_failure is None:
-                            seen_variants={lab.digest(data)}
-                            for variant in app.variants(data):
-                                if lab.digest(variant) in seen_variants:continue
-                                seen_variants.add(lab.digest(variant))
-                                client_failure=validate_client(box,variant,args.client_core)
-                                if client_failure is not None:
-                                    client_failure["code"]="app_transform_core_rejected"
-                                    break
-                        if client_failure is not None:
-                            r=client_failure
-                        else:
-                            # Both official cores must build the exact output. Real traffic
-                            # runs on the core actually bundled with the target Android app.
-                            latest_failure=validate_client(box,data,args.core)
-                            if latest_failure is not None:
-                                r=latest_failure
-                            else:
-                                r=run_target(box,candidate,timeout,args.client_core)
-                except Exception as error:
-                    code = 'protocol_disabled' if isinstance(error,ValueError) and str(error)=='protocol_disabled' else 'probe_infrastructure_error'
-                    r={'core':'blocked','connection':'not_run','code':code,'runtime_sha256':'','endpoints_passed':0}
-                if native:
-                    r['engine']='sing-box'
-                    r.setdefault('evidence',{})['native_core']=r['core']
-                    r['evidence']['runtime_core']='sing_box_1_14_4'
-                    r['evidence']['android']='not_run'
-                else:
-                    r.setdefault('evidence',{})['bundled_core']='passed' if client_failure is None else 'failed'
-                    r['evidence']['target_core']=r['core']
-                    r['evidence']['app_import_contract']='passed' if client_failure is None else 'failed'
-                    r['evidence']['android']='not_run'
+                r=measure(candidate)
+                if verify_raw is not None and r['code']=='passed':
+                    r=verify_raw(r,candidate,plan,measure)
+                if session_check is not None:
+                    evidence=r.setdefault('evidence',{})
+                    evidence.update(engine='sing-box' if native else 'xray',candidate_sha256=candidate['sha256'])
                 r.update(sha256=candidate['sha256'],rule=candidate['rule']);rows.append(r)
                 score=attempt_score(r,candidate)
+                if session_check is not None:
+                    # A plausible candidate with an unavailable test service
+                    # cannot become a permanent rejection from a different one.
+                    transient=r['core']=='blocked' or r['code'] in ('side_driver_unavailable','side_provider_unavailable','endpoint_dns_failed')
+                    score=(r['code']=='passed',r.get('evidence',{}).get('raw_checks')=='failed',transient,r.get('endpoints_passed',0))
+
                 if best is None or score>best_score:best=r;best_score=score
-                if r['connection']=='passed' and r.get('code')=='https_payload_verified':break
+                if r['connection']=='passed' and r.get('code') in ('https_payload_verified','passed'):break
+                if session_check is not None and r.get('evidence',{}).get('raw_checks')=='failed':break
         print(json.dumps(best|{'attempts':rows}))
     finally:cleanup(args.slot,runid)
 

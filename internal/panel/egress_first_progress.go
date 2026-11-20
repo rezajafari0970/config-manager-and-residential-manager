@@ -73,9 +73,10 @@ const firstAssessmentQueueSQL = `SELECT * FROM (WITH population AS MATERIALIZED 
    CROSS JOIN egress_unique u ON u.hash=b.hash
  ) GROUP BY identity
 ), states AS (
- SELECT k.present,u.created,j.retry_streak,(c.action='deleted' OR j.reason='manual_delete') AS operator_excluded,CASE
+ SELECT k.present,max(u.created,coalesce((SELECT min(a.queued_at) FROM egress_first_arrivals a WHERE a.identity=u.identity AND a.received_at>?1-` + egressArrivalWindow + `),0)) AS created,j.retry_streak,(c.action='deleted' OR j.reason='manual_delete') AS operator_excluded,CASE
    WHEN x.identity IS NOT NULL OR g.state='BLOCKED' OR c.action='deleted' OR j.state='DELETED' THEN 'excluded'
    WHEN j.hash IS NULL THEN 'missing'
+   WHEN j.ever_accepted=0 AND coalesce(g.state,'')!='QUARANTINED' AND NOT EXISTS(` + egressFreshOwner + `) THEN 'excluded'
    WHEN j.paused!=0 THEN 'paused'
    WHEN j.reason='ads_iran_quarantined' THEN 'safety'
    WHEN j.token!='' AND j.lease_until>?1 THEN 'running'
@@ -83,7 +84,8 @@ const firstAssessmentQueueSQL = `SELECT * FROM (WITH population AS MATERIALIZED 
    WHEN j.next_run>?1 THEN 'delayed'
    ELSE 'ready' END AS bucket
  FROM population k ` + currentEgressJoins + ` AND c.expires>?1
- WHERE j.hash IS NULL OR (j.first_completed=0 AND j.tested=0)
+ WHERE (j.hash IS NULL OR (j.first_completed=0 AND j.tested=0))
+ AND NOT EXISTS(SELECT 1 FROM egress_first_verdicts f WHERE f.identity=k.identity)
 )
 SELECT present,
  count(*) FILTER(WHERE bucket='ready'),count(*) FILTER(WHERE bucket='running'),

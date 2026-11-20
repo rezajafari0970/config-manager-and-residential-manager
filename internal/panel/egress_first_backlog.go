@@ -54,6 +54,7 @@ const egressRememberPending = `INSERT OR IGNORE INTO egress_first_backlog(source
  SELECT m.source_id,u.hash FROM memberships m CROSS JOIN egress_unique u ON u.identity=m.artifact_id
  CROSS JOIN egress_jobs j ON j.hash=u.hash
  WHERE j.tested=0 AND j.first_completed=0 AND j.state!='DELETED'
+ AND EXISTS(SELECT 1 FROM egress_first_arrivals a WHERE a.source_id=m.source_id AND a.identity=m.artifact_id AND a.received_at>` + egressArrivalClock + `-` + egressArrivalWindow + `)
  AND NOT EXISTS(SELECT 1 FROM input_exclusions x WHERE x.identity=u.identity)
  AND NOT EXISTS(SELECT 1 FROM egress_iran_guard g WHERE g.identity=u.identity AND g.state='BLOCKED')
  AND NOT EXISTS(SELECT 1 FROM config_controls c WHERE c.id=u.identity AND c.action='deleted' AND c.expires>?) AND `

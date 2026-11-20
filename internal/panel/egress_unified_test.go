@@ -41,14 +41,20 @@ func TestUnifiedDeliveryRevokesAllAliasesAndBlocksReimport(t *testing.T) {
 		t.Fatal(err)
 	}
 	hash := j.Hash
+	if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: syntheticEgress(*j)}); err != nil {
+		t.Fatal(err)
+	}
+	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_export_eligible WHERE hash=?", hash)
 	for step := 0; step < 3; step++ {
-		if step > 0 {
-			s.db.Exec("UPDATE egress_retirements SET at=? WHERE hash=?", egress.Now()-60000, hash)
-			s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", hash)
-			j, err = s.ClaimEgress(ctx)
-			if err != nil || j == nil || j.Hash != hash {
-				t.Fatal("negative confirmation lost", j, err)
-			}
+		if _, err = s.db.Exec("UPDATE egress_retirements SET at=? WHERE hash=?", egress.Now()-60000, hash); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.db.Exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", hash); err != nil {
+			t.Fatal(err)
+		}
+		j, err = s.ClaimEgress(ctx)
+		if err != nil || j == nil || j.Hash != hash || !j.Accepted {
+			t.Fatal("accepted health confirmation lost", err)
 		}
 		if err = s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: badDelivery(*j)}); err != nil {
 			t.Fatal(err)

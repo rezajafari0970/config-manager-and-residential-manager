@@ -147,7 +147,7 @@ func execute(ctx context.Context, c client, driver *driverSession, j egress.Job)
 				}
 			}
 		}()
-		input, _ := json.Marshal(map[string]any{"hash": j.Hash, "started": started, "plan": p, "targets": egress.Targets(), "delivery_targets": egress.DeliveryTargets(), "deep": j.Deep, "attempt": j.Attempt, "accepted": j.Accepted})
+		input, _ := json.Marshal(map[string]any{"hash": j.Hash, "started": started, "plan": p, "targets": egress.Targets(), "delivery_targets": egress.DeliveryTargets(), "deep": j.Deep, "attempt": j.Attempt, "accepted": j.Accepted, "health_due": j.HealthDue})
 		// Repair a broken helper once inside the original lease and deadline.
 		// A valid measurement (including UNKNOWN) is immediately committed.
 		for attempt := 0; attempt < 2; attempt++ {

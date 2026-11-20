@@ -20,6 +20,8 @@ func (s *Store) reconcileDisabledProtocols() error {
 	rows, err := tx.Query(`SELECT hash,max(kind),max(previously_disabled) FROM (
  SELECT refs.*,0 AS previously_disabled FROM (SELECT hash,kind FROM artifacts
  UNION ALL SELECT raw_hash,kind FROM memberships
+ UNION ALL SELECT raw_hash,kind FROM side_jobs WHERE state IN('accepted','pending') AND expires>CAST(unixepoch('subsec')*1000 AS INTEGER)
+ UNION ALL SELECT candidate_hash,'' FROM side_jobs WHERE state='accepted' AND expires>CAST(unixepoch('subsec')*1000 AS INTEGER)
  UNION ALL SELECT hash,kind FROM staged
  UNION ALL SELECT hash,kind FROM egress_inventory
  UNION ALL SELECT candidate_hash,'' FROM egress_inventory WHERE candidate_hash!=''
@@ -123,6 +125,9 @@ func deactivateProtocolHashes(tx *sql.Tx, hashes []string) error {
 	_, err = tx.Exec(`
  CREATE TEMP TABLE protocol_sources AS SELECT DISTINCT source_id FROM memberships WHERE raw_hash IN disabled_protocol_hashes;
  CREATE TEMP TABLE protocol_representatives AS SELECT identity,created FROM egress_unique WHERE hash IN disabled_protocol_hashes;
+ UPDATE side_jobs SET state='rejected',code='protocol_disabled',token='',lease_until=0,finished=CAST(unixepoch('subsec')*1000 AS INTEGER),
+ evidence='{}',candidate_hash='',engine='',last_token=''
+ WHERE state IN('accepted','pending') AND (raw_hash IN disabled_protocol_hashes OR candidate_hash IN disabled_protocol_hashes);
  DELETE FROM memberships WHERE raw_hash IN disabled_protocol_hashes;
  DELETE FROM staged WHERE hash IN disabled_protocol_hashes;
  -- An identity may have a different byte representative in another source.

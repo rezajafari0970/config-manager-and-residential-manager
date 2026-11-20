@@ -32,6 +32,7 @@ type Candidate struct {
 	RequiresConnection bool   `json:"requires_connection"`
 }
 type Plan struct {
+	RawCandidate   *Candidate  `json:"raw_candidate,omitempty"`
 	Target         string      `json:"target"`
 	Version        string      `json:"version"`
 	OriginalSHA256 string      `json:"original_sha256"`

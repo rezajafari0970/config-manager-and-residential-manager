@@ -80,11 +80,9 @@ func TestV55CorrectsOnlyAuthenticatedAmbiguousPreflight(t *testing.T) {
 			}
 			var active *egress.Job
 			if mode == "active" {
-				exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", h)
-				active, err = s.ClaimEgress(ctx)
-				if err != nil || active == nil {
-					t.Fatal("fixture active lease", err)
-				}
+				// Simulate a grant inherited from a v54 scheduler.
+				active = &egress.Job{Hash: h, Revision: 1, Token: "legacy-grant"}
+				exec("UPDATE egress_jobs SET token=?,lease_until=?,attempts=attempts+1 WHERE hash=?", active.Token, egress.Now()+120000, h)
 			}
 			if mode == "dormant" {
 				exec("DELETE FROM memberships")
@@ -111,8 +109,8 @@ func TestV55CorrectsOnlyAuthenticatedAmbiguousPreflight(t *testing.T) {
 				if mode == "canonical" {
 					exec("UPDATE egress_jobs SET next_run=0")
 					n, err := s.ClaimEgress(ctx)
-					if err != nil || n == nil || n.Hash != h {
-						t.Fatal("canonical input lost admission", err)
+					if err != nil || n != nil {
+						t.Fatal("completed canonical input entered the first queue", err)
 					}
 				}
 				return

@@ -23,21 +23,18 @@ for(const width of [390,1440]){
  assert([200,204].includes(raw.status()));
  assert.equal(raw.status()===204,raw.headers()['x-config-count']==='0');
  const a=state.accounting,p=a.publication;assert.equal(a.at,state.now);assert.equal(a.live_versions,state.total);assert.equal(Object.values(a.queue).reduce((x,y)=>x+y,0),a.live_versions);assert.equal(a.awaiting_first+a.assessed_versions,a.live_versions);assert.equal(a.current_live_versions+a.archive_versions,a.live_versions);assert.equal(p.retained,p.route_verified+p.awaiting_proof+Object.values(a.safety_review).reduce((x,y)=>x+y,0));assert.equal(p.route_verified,p.eligible+p.hosting+p.mixed+p.network_unverified);assert(p.network_unverified>=0);assert(p.eligible_network_unattributed>=0&&p.eligible_network_unattributed<=p.eligible);assert.equal(p.eligible,p.country_unknown+p.country_filtered+p.published);assert.equal(p.published,state.country.published);assert.equal(a.coverage_missing,0);assert.equal(a.staged_coverage_missing,0);assert((await page.locator('#egress-inventory').textContent()).includes('یکتا'));assert((await page.locator('#egress-output-counts').textContent()).includes('هویت'));assert(state.throughput.unique_definitive_10m<=state.throughput.unique_10m);
- // Render a nonempty historical cohort even when the fixture has no legacy inputs.
- const archivePanel=await page.evaluate(async accounting=>{
+ // An old receipt can still be in the five-minute throughput window
+ // immediately after upgrade. No historical cohort should appear in the queue.
+ const receiptText=await page.evaluate(async accounting=>{
   const {renderAccounting}=await import('/assets/egress-accounting.js');
-  const archive={total:70,waiting:31,active:2,promoted:3,completed:4,unavailable:19,paused:5,cancelled:6};
   const first={...accounting.first_assessment,first_results_5m:{observed_ms:300000,current:3,withdrawn:2,historical:1,per_minute:1}};
-  renderAccounting({...accounting,archive_recovery:archive,first_assessment:first});
-  const box=document.querySelector('#egress-archive-recovery'),bounds=box.getBoundingClientRect();
-  const result={text:box.innerText,firstResults:document.querySelector('#egress-first-results').textContent,visible:!box.hidden,fits:bounds.left>=0&&bounds.right<=innerWidth&&box.scrollWidth<=box.clientWidth};
-  renderAccounting({...accounting,archive_recovery:{total:0}}); result.hiddenWhenEmpty=box.hidden;
+  renderAccounting({...accounting,archive_recovery:{total:70,waiting:31},first_assessment:first});
+  const text=document.querySelector('#egress-first-results').textContent;
   renderAccounting(accounting);
-  return result;
+  return text;
  },a);
- assert(archivePanel.visible&&archivePanel.fits&&archivePanel.hiddenWhenEmpty);
- assert(archivePanel.firstResults.includes('۲ ورودی بدون عضویت فعلی')&&archivePanel.firstResults.includes('۱ مورد در نوبت بازیابی آرشیو'));
- assert(archivePanel.text.includes('۳۱ در انتظار پذیرش')&&archivePanel.text.includes('۴ مورد نخستین نتیجه')&&archivePanel.text.includes('۱۹ مورد قابل تأیید نبود'));
+ assert.equal(await page.locator('#egress-archive-recovery').count(),0);
+ assert(receiptText.includes('۲ ورودی بدون عضویت فعلی')&&receiptText.includes('۱ مورد در نوبت بازیابی آرشیو'));
  await page.screenshot({path:process.env.PANEL_TEST_DIR+'/egress-'+width+'.png',fullPage:true});
 }
 if(process.env.PANEL_COUNTRY_TEST==='1'){

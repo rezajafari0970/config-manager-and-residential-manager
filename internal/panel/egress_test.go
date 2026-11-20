@@ -13,6 +13,19 @@ import (
 
 func dropEgressForMigration(t *testing.T, s *Store) {
 	t.Helper()
+	// This fixture reconstructs a schema predating the whole investigation
+	// subsystem. Remove v56 dependants before rebuilding their source tables.
+	var drops string
+	if err := s.db.QueryRow(`SELECT coalesce(group_concat(stmt,';'),'') FROM (
+ SELECT 'DROP '||upper(type)||' '||name stmt FROM sqlite_schema
+ WHERE type IN('trigger','view','table') AND (name GLOB 'side_*' OR name GLOB 'egress_arrival_*' OR name GLOB 'egress_remember_*'
+ OR name IN('egress_first_arrivals','egress_first_verdicts','egress_hosting_confirmations','egress_health_clock')) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,
+ CASE name WHEN 'side_sources' THEN 0 ELSE 1 END)`).Scan(&drops); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(drops); err != nil {
+		t.Fatal(err)
+	}
 	var historyTriggers string
 	if err := s.db.QueryRow(`SELECT coalesce(group_concat('DROP TRIGGER ' || name,';'),'')
  FROM sqlite_schema WHERE type='trigger' AND (name GLOB 'egress_first_history_*' OR name GLOB 'egress_compatibility_*')`).Scan(&historyTriggers); err != nil {

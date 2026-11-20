@@ -10,6 +10,7 @@ type Settings struct {
 	HealthTTLSeconds int  `json:"health_ttl_seconds"`
 }
 type Job struct {
+	Identity string   `json:"identity,omitempty"`
 	Hash     string   `json:"hash"`
 	Token    string   `json:"token"`
 	Revision int64    `json:"revision"`
@@ -30,6 +31,7 @@ type Attempt struct {
 	EndpointsPassed int               `json:"endpoints_passed"`
 }
 type Result struct {
+	Identity   string `json:"identity,omitempty"`
 	Hash       string `json:"hash"`
 	Token      string `json:"token"`
 	Revision   int64  `json:"revision"`

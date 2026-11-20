@@ -27,7 +27,7 @@ func TestFirstRawAliasRecoveryAfterArchiveRefetch(t *testing.T) {
 				}
 			}
 			f := historyInput(t, s, "lost", 190)
-			exerciseHistoryUpgrade(t, s)
+			commitProbeInputs(t, s, f.source, f.raw)
 			if err := os.Remove(filepath.Join(s.vault.Directory(), f.hash+".blob")); err != nil {
 				t.Fatal(err)
 			}
@@ -46,7 +46,7 @@ func TestFirstRawAliasRecoveryAfterArchiveRefetch(t *testing.T) {
 			if err := s.CompleteEgress(ctx, missingFirstReport(old)); err != nil {
 				t.Fatal(err)
 			}
-			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_first_history WHERE hash=? AND phase='unavailable'", f.hash)
+			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_jobs WHERE hash=? AND reason='input_unavailable' AND first_completed=0", f.hash)
 			raw := f.raw
 			if mode != "same_bytes" {
 				raw += "-renamed"
@@ -109,7 +109,7 @@ func TestFirstRawAliasRecoveryAfterArchiveRefetch(t *testing.T) {
 			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_unique WHERE identity=? AND hash=? AND created=?", f.identity, alias, created)
 			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_first_backlog WHERE hash=? AND source_id=?", alias, f.source)
 			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_run_members WHERE hash=? AND status='pending'", alias)
-			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_first_history WHERE hash=? AND phase='cancelled'", f.hash)
+			pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work WHERE hash=?", f.hash)
 			pendingCount(t, s.db, 0, "SELECT count(*) FROM pragma_foreign_key_check")
 			key, path := s.key, filepath.Join(filepath.Dir(s.vault.Directory()), "panel.db")
 			if err = s.Close(); err != nil {

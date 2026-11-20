@@ -119,6 +119,28 @@ class Coverage(unittest.TestCase):
             expired = report("--source-id", "srcB")
             self.assertEqual(expired["global"]["current"], dict.fromkeys(
                 ["published", "network_review_inconclusive", "network_review_pending"], 1))
+            with sqlite3.connect(path) as db:
+                db.executescript("""
+                    PRAGMA user_version=56;
+                    ALTER TABLE sources ADD COLUMN enabled INTEGER DEFAULT 1;
+                    CREATE TABLE settings(id PRIMARY KEY,retention_seconds);
+                    INSERT INTO settings VALUES(1,3600);
+                    CREATE TABLE egress_first_arrivals(source_id,identity,received_at);
+                    CREATE TABLE egress_first_verdicts(identity PRIMARY KEY);
+                    CREATE VIEW egress_work AS SELECT * FROM egress_jobs WHERE 0;
+                    DROP VIEW egress_inventory;
+                    CREATE VIEW egress_inventory AS SELECT * FROM egress_jobs WHERE tested>0 OR hash='h7';
+                    DELETE FROM egress_network_review;
+                    INSERT INTO egress_first_backlog VALUES('srcA','h7'),('srcB','h7');
+                    INSERT INTO egress_first_verdicts VALUES('five');
+                """)
+                db.executemany("INSERT INTO egress_first_arrivals VALUES(?,?,?)", [
+                    ("srcA", "gone", now - 7200000), ("srcB", "gone", now)])
+            fresh = report()
+            self.assertEqual(fresh["global"]["current"]["outside_first_queue"], 1)
+            self.assertEqual(fresh["global"]["current"]["previously_assessed"], 1)
+            self.assertEqual(fresh["sources"]["srcA"]["withdrawn_awaiting_first"], 0)
+            self.assertEqual(fresh["sources"]["srcB"]["withdrawn_awaiting_first"], 1)
 
 
 if __name__ == "__main__":

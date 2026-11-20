@@ -39,3 +39,4 @@ body[data-page="egress"] #stat-retention{font-size:17px;white-space:normal;line-
 .egress-coverage-table table { border-collapse: collapse; width: 100%; }
 .egress-coverage-table th, .egress-coverage-table td { padding: .5rem; text-align: start; border-bottom: 1px solid var(--line); }
 .egress-coverage-table tbody tr:first-child { font-weight: 700; }
+#side-review-list details{margin-top:8px;border-top:1px solid var(--line)}#side-review-list summary{cursor:pointer;padding:10px 0}#side-review-list .source-data{margin-bottom:12px}

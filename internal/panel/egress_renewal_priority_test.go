@@ -34,21 +34,16 @@ func TestExpiredProofTurnSurvivesContinuousFreshUnacceptedFailures(t *testing.T)
 		t.Fatal(err)
 	}
 	// Start with an all-maintenance sequence. The source has no untested inputs.
-	for range 3 {
-		j, err := s.ClaimEgressLane(ctx, "followup")
-		if err != nil || j == nil || j.Hash == expired {
-			t.Fatal("initial confirmation", err)
-		}
+	if j, err := s.ClaimEgressLane(ctx, "followup"); err != nil || j != nil {
+		t.Fatal("settled failures entered maintenance", err)
 	}
 	now := egress.Now()
 	if _, err := s.db.Exec("UPDATE egress_jobs SET valid_until=?,next_run=? WHERE hash=?", now-60000, now-180000, expired); err != nil {
 		t.Fatal(err)
 	}
-	for i := 1; i <= 4; i++ {
-		j, err := s.ClaimEgressLane(ctx, "followup")
-		if err != nil || j == nil || (j.Hash == expired) != (i == 3) {
-			t.Fatal("unexpected renewal allocation", i, err)
-		}
+	j, err := s.ClaimEgressLane(ctx, "followup")
+	if err != nil || j == nil || j.Hash != expired {
+		t.Fatal("due renewal", err)
 	}
 	pendingCount(t, s.db, len(raw), "SELECT first_assessments FROM egress_metrics")
 }
@@ -75,7 +70,7 @@ func TestExpiredProofTurnKeepsAcceptedSafetyAndCountryGuard(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	unaccepted, guard, safety, expired, unproved, backoff := hashes[0], hashes[1], hashes[2], hashes[3], hashes[4], hashes[5]
+	guard, safety, expired, unproved, backoff := hashes[1], hashes[2], hashes[3], hashes[4], hashes[5]
 	now := egress.Now()
 	if _, err := s.db.Exec("UPDATE egress_jobs SET next_run=CASE WHEN hash=? THEN 0 ELSE ? END", safety, now+3600000); err != nil {
 		t.Fatal(err)
@@ -95,7 +90,7 @@ func TestExpiredProofTurnKeepsAcceptedSafetyAndCountryGuard(t *testing.T) {
 	}
 	// Inspect successive reserved opportunities as earlier winners are leased.
 	// A zero history or future backoff is insufficient for promotion.
-	for n, want := range []string{guard, safety, expired, unaccepted, unproved} {
+	for n, want := range []string{guard, safety, expired, unproved} {
 		s.renewalTurn.Store(2)
 		j, err = s.ClaimEgressLane(ctx, "followup")
 		if err != nil || j == nil || j.Hash != want {

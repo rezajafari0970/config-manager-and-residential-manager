@@ -46,7 +46,8 @@ func TestEgressHostingWithdrawsResidentialFeedsOnlyAndRequiresFreshRecovery(t *t
 			t.Fatal(err)
 		}
 		if job == nil {
-			// Held DCs no longer receive automatic renewals. Exercise the
+			// This reducer also accepts operator-issued fixture leases after the
+			// finite automatic confirmation allowance is spent. Exercise the
 			// independent proof-recovery reducer with a fixture lease.
 			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_network_results WHERE held=1")
 			job = &last
@@ -99,7 +100,7 @@ func TestEgressHostingWithdrawsResidentialFeedsOnlyAndRequiresFreshRecovery(t *t
 	check(true)
 	complete("hosting")
 	check(false)
-	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_work")
+	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_work")
 	// A v45 hit identified only its first adverse flow. Reopening must retain
 	// the hold even as other fresh routes resume publication immediately.
 	if _, err = s.db.Exec(`UPDATE egress_network_results SET last_adverse=json_remove(last_adverse,'$.hosting_flows','$.hosting_asns');

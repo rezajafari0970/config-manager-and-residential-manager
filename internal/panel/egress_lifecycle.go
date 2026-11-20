@@ -89,9 +89,14 @@ func (m egressModule) lifecycle(w http.ResponseWriter, r *http.Request) {
 		failure(w, ErrConflict)
 		return
 	}
-	// Shortening takes effect immediately; lengthening cannot manufacture a
-	// longer health/route receipt. Existing proof must first be renewed.
-	if _, e = tx.ExecContext(r.Context(), "UPDATE egress_jobs SET next_run=min(next_run,tested+?) WHERE ever_accepted=1 AND state!='DELETED'", p.HealthMinutes*60000); e != nil {
+	// Apply the new setting against the last scheduled health check, even
+	// when a route-only check has finished more recently. An earlier route
+	// deadline and independent safety confirmations remain authoritative.
+	if _, e = tx.ExecContext(r.Context(), `UPDATE egress_jobs SET next_run=(
+ SELECT min(c.checked_at+?,c.route_due,egress_jobs.valid_until-120000) FROM egress_health_clock c WHERE c.hash=egress_jobs.hash)
+ WHERE ever_accepted=1 AND state='RESIDENTIAL' AND paused=0 AND retry_streak=0 AND token=''
+ AND EXISTS(SELECT 1 FROM egress_health_clock c WHERE c.hash=egress_jobs.hash) AND `+egressRenewableNetwork,
+		p.HealthMinutes*60000); e != nil {
 		failure(w, e)
 		return
 	}

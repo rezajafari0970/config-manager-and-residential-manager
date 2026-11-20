@@ -85,8 +85,8 @@ func TestEgressSourceCoverageEnabledMembershipPartition(t *testing.T) {
 		t.Fatal(err)
 	}
 	current := accounting["current_assessment"].(map[string]int)
-	if accounting["current_identities"] != 5 || current["tested"] != 1 || current["awaiting"] != 2 ||
-		current["excluded"] != 1 || current["missing"] != 1 || current["exhausted"] != 1 {
+	if accounting["current_identities"] != 5 || current["tested"] != 1 || current["awaiting"] != 1 ||
+		current["excluded"] != 2 || current["missing"] != 1 || current["exhausted"] != 0 {
 		t.Fatal(current)
 	}
 	rr := exportRequest(t, h, "GET", "http://127.0.0.1:18191/api/egress/source-coverage")

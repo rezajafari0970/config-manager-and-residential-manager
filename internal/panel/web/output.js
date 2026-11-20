@@ -1,3 +1,4 @@
+import {sideOutput} from './side-output.js';
 import {conversionCodes as codes,conversionDetail,evidenceRows} from './diagnostics.js';
 import {$,fa,esc,dateTime,countdown,toast,api,verifiedJSON,empty} from './core.js';
 export default function Output(ctx){
@@ -48,5 +49,5 @@ export default function Output(ctx){
  $('#export-source-search').addEventListener('input',()=>{clearTimeout(sourceTimer);sourceTimer=setTimeout(()=>{sourcePage=0;refreshSources(true)},250)});
  $('#export-source-prev').addEventListener('click',()=>{if(sourcePage>0){sourcePage--;refreshSources(true)}});
  $('#export-source-next').addEventListener('click',()=>{sourcePage++;refreshSources(true)});
- return {tasks:[refresh,refreshSources],render(){},filters(){return {}}};
+ return {tasks:source?[refresh,refreshSources]:[refresh,refreshSources,sideOutput()],render(){},filters(){return {}}};
 }

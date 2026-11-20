@@ -290,6 +290,7 @@ func saveEgressNetwork(ctx context.Context, tx *sql.Tx, r egress.Report, plan eg
 			}
 		}
 	}
+	wasHeld := held
 	until := n.Until
 	clean := held && d.Eligible && !d.CountryConflict && candidate != "" &&
 		n.ClearanceUntil > now && n.ClearsHosting(previous)
@@ -320,5 +321,28 @@ func saveEgressNetwork(ctx context.Context, tx *sql.Tx, r egress.Report, plan eg
  held=excluded.held,clean_rounds=excluded.clean_rounds,last_finished=excluded.last_finished,clean_until=excluded.clean_until,
  last_adverse=excluded.last_adverse,summary=excluded.summary`, identity, r.Hash, candidate, n.Policy, n.State, n.Reason, now, until,
 		held, cleanRounds, max(r.Finished, lastFinished), cleanUntil, lastAdverse, string(b))
-	return held && clean && cleanRounds == 1, err
+	if err != nil {
+		return false, err
+	}
+	if !wasHeld && n.BlocksResidential() {
+		// Only a *new* loss on a previously qualified identity opens work.
+		// Two following grants can supply both clean measurements. An outage
+		// or worker restart consumes the same durable allowance.
+		res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO egress_hosting_confirmations
+ SELECT j.hash,j.attempts+2,? FROM egress_jobs j JOIN egress_residential_history h ON h.hash=j.hash
+ WHERE j.hash=? AND j.ever_accepted=1`, now+egress.IranInterval, r.Hash)
+		if err != nil {
+			return false, err
+		}
+		count, err := res.RowsAffected()
+		return count == 1, err
+	}
+	if wasHeld && (!held || n.BlocksResidential() && r.Started > lastFinished) {
+		// Two independent adverse reports leave the canonical raw rejection
+		// in place. No future first or maintenance test is granted for it.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM egress_hosting_confirmations WHERE hash=?", r.Hash); err != nil {
+			return false, err
+		}
+	}
+	return held && clean && cleanRounds == 1, nil
 }

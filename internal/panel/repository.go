@@ -496,6 +496,10 @@ func (s *Store) Complete(ctx context.Context, job collect.Job, result collect.Re
 			result.ErrorCode = "cache_missing"
 			result.ETag = ""
 			result.Modified = ""
+		} else if e = rememberUnchangedSide(ctx, tx, job.ID); e != nil {
+			return e
+		} else if e = refreshUnchangedEgress(ctx, tx, job.ID, stamp); e != nil {
+			return e
 		}
 	}
 	if result.State == "updated" && result.Staged && stagedCount > 0 {
@@ -615,6 +619,12 @@ func (s *Store) Expire(ctx context.Context, now time.Time) error {
 		return e
 	}
 	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, "UPDATE side_jobs SET state='expired',code='retention_elapsed_before_assessment',token='',lease_until=0 WHERE state='pending' AND expires<=?", now.UnixMilli()); e != nil {
+		return e
+	}
+	if _, e = tx.ExecContext(ctx, "DELETE FROM side_sources WHERE expires<=?", now.UnixMilli()); e != nil {
+		return e
+	}
 	if e = s.expireEgress(ctx, tx, now.UnixMilli()); e != nil {
 		return e
 	}
@@ -644,7 +654,7 @@ func (s *Store) Expire(ctx context.Context, now time.Time) error {
 }
 func (s *Store) Referenced(ctx context.Context, hash string) (bool, error) {
 	var used bool
-	e := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM egress_jobs WHERE hash=? AND state!='DELETED' UNION ALL SELECT 1 FROM egress_jobs WHERE candidate_hash=? AND state!='DELETED' UNION ALL SELECT 1 FROM memberships WHERE raw_hash=? UNION ALL SELECT 1 FROM responses WHERE hash=? UNION ALL SELECT 1 FROM staged WHERE hash=? UNION ALL SELECT 1 FROM repairs WHERE candidate_hash=? AND ("+repairReferences+") UNION ALL SELECT 1 FROM conversion_results WHERE candidate_hash=? UNION ALL SELECT 1 FROM template_preparations WHERE candidate_hash=? UNION ALL SELECT 1 FROM conversion_receipts WHERE candidate_hash=? AND valid_until>CAST(unixepoch('subsec')*1000 AS INTEGER))", hash, hash, hash, hash, hash, hash, hash, hash, hash).Scan(&used)
+	e := s.db.QueryRowContext(ctx, "SELECT EXISTS("+sideReferenced+" UNION ALL SELECT 1 FROM egress_jobs WHERE hash=? AND state!='DELETED' UNION ALL SELECT 1 FROM egress_jobs WHERE candidate_hash=? AND state!='DELETED' UNION ALL SELECT 1 FROM memberships WHERE raw_hash=? UNION ALL SELECT 1 FROM responses WHERE hash=? UNION ALL SELECT 1 FROM staged WHERE hash=? UNION ALL SELECT 1 FROM repairs WHERE candidate_hash=? AND ("+repairReferences+") UNION ALL SELECT 1 FROM conversion_results WHERE candidate_hash=? UNION ALL SELECT 1 FROM template_preparations WHERE candidate_hash=? UNION ALL SELECT 1 FROM conversion_receipts WHERE candidate_hash=? AND valid_until>CAST(unixepoch('subsec')*1000 AS INTEGER))", hash, hash, hash, hash, hash, hash, hash, hash, hash, hash, hash).Scan(&used)
 	return used, e
 }
 

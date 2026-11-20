@@ -159,15 +159,16 @@ func singlePath(raw []byte) bool {
 }
 
 type Job struct {
-	Accepted bool   `json:"accepted"`
-	Hash     string `json:"hash"`
-	Raw      []byte `json:"raw"`
-	Kind     string `json:"kind"`
-	Token    string `json:"token"`
-	Revision int64  `json:"revision"`
-	Issue    string `json:"issue"`
-	Deep     bool   `json:"deep"`
-	Attempt  int    `json:"attempt"`
+	HealthDue bool   `json:"health_due,omitempty"`
+	Accepted  bool   `json:"accepted"`
+	Hash      string `json:"hash"`
+	Raw       []byte `json:"raw"`
+	Kind      string `json:"kind"`
+	Token     string `json:"token"`
+	Revision  int64  `json:"revision"`
+	Issue     string `json:"issue"`
+	Deep      bool   `json:"deep"`
+	Attempt   int    `json:"attempt"`
 }
 type Sample struct {
 	RequestBytes        int64       `json:"request_bytes"`

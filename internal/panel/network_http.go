@@ -158,7 +158,24 @@ func (s *Server) networkRaw(w http.ResponseWriter, r *http.Request, axis, group 
 // Network rotations have their own tables and locks; global and per-source
 // rounds are not touched. Membership is checked again after vault I/O.
 func (s *Store) prepareNetwork(ctx context.Context, axis, group string) (*rotatingConfig, error) {
-	scope := axis + "/" + group
+	return s.prepareExportRound(ctx, axis+"/"+group, s.networkRoundEntries(axis, group))
+}
+
+type exportRound struct {
+	entries func(context.Context, readQuerier) ([]networkEntry, error)
+	key     func(Conversion) string
+}
+
+func (s *Store) networkRoundEntries(axis, group string) exportRound {
+	return exportRound{
+		entries: func(ctx context.Context, q readQuerier) ([]networkEntry, error) {
+			return s.networkEntries(ctx, q, axis, group)
+		},
+		key: func(c Conversion) string { return c.CandidateHash },
+	}
+}
+
+func (s *Store) prepareExportRound(ctx context.Context, scope string, group exportRound) (*rotatingConfig, error) {
 	tx, e := s.outputTransaction(ctx)
 	if e != nil {
 		return nil, e
@@ -167,7 +184,7 @@ func (s *Store) prepareNetwork(ctx context.Context, axis, group string) (*rotati
 	if _, e = tx.ExecContext(ctx, "INSERT INTO network_rotation_state(scope) VALUES(?) ON CONFLICT DO NOTHING", scope); e != nil {
 		return nil, e
 	}
-	entries, e := s.networkEntries(ctx, tx, axis, group)
+	entries, e := group.entries(ctx, tx)
 	if e != nil {
 		return nil, e
 	}
@@ -175,8 +192,8 @@ func (s *Store) prepareNetwork(ctx context.Context, axis, group string) (*rotati
 	ordered := []Conversion{}
 	for _, n := range entries {
 		if n.Available {
-			if _, ok := available[n.CandidateHash]; !ok {
-				available[n.CandidateHash] = n.Conversion
+			if _, ok := available[group.key(n.Conversion)]; !ok {
+				available[group.key(n.Conversion)] = n.Conversion
 				ordered = append(ordered, n.Conversion)
 			}
 		}
@@ -218,13 +235,17 @@ func (s *Store) prepareNetwork(ctx context.Context, axis, group string) (*rotati
 		return nil, e
 	}
 	for i, c := range ordered {
-		if _, e = tx.ExecContext(ctx, "INSERT INTO network_rotation_queue VALUES(?,?,?)", scope, i, c.CandidateHash); e != nil {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO network_rotation_queue VALUES(?,?,?)", scope, i, group.key(c)); e != nil {
 			return nil, e
 		}
 	}
 	return &rotatingConfig{Conversion: ordered[0], Scope: scope, Cycle: cycle + 1}, tx.Commit()
 }
 func (s *Store) claimNetwork(ctx context.Context, axis, group string, item *rotatingConfig) (bool, error) {
+	return s.claimExportRound(ctx, item, s.networkRoundEntries(axis, group))
+}
+
+func (s *Store) claimExportRound(ctx context.Context, item *rotatingConfig, group exportRound) (bool, error) {
 	tx, e := s.outputTransaction(ctx)
 	if e != nil {
 		return false, e
@@ -239,16 +260,16 @@ func (s *Store) claimNetwork(ctx context.Context, axis, group string, item *rota
 	if e != nil {
 		return false, e
 	}
-	if cycle != item.Cycle || next != item.Conversion.CandidateHash {
+	if cycle != item.Cycle || next != group.key(item.Conversion) {
 		return false, nil
 	}
-	entries, e := s.networkEntries(ctx, tx, axis, group)
+	entries, e := group.entries(ctx, tx)
 	if e != nil {
 		return false, e
 	}
 	valid := false
 	for _, n := range entries {
-		if n.ID == item.Conversion.ID && n.Hash == item.Conversion.Hash && n.Available && n.CandidateHash == next {
+		if n.ID == item.Conversion.ID && n.Hash == item.Conversion.Hash && n.Available && n.CandidateHash == item.Conversion.CandidateHash {
 			valid = true
 			break
 		}
@@ -261,25 +282,25 @@ func (s *Store) claimNetwork(ctx context.Context, axis, group string, item *rota
 	}
 	return true, tx.Commit()
 }
-func (s *Store) nextNetwork(ctx context.Context, axis, group string) (*rotatingConfig, error) {
-	unlock, e := s.lockRotation(ctx, "network/"+axis+"/"+group)
+func (s *Store) nextExportRound(ctx context.Context, scope string, group exportRound, readCandidate func(context.Context, Conversion) ([]byte, error)) (*rotatingConfig, error) {
+	unlock, e := s.lockRotation(ctx, scope)
 	if e != nil {
 		return nil, e
 	}
 	defer unlock()
 	for attempts := 0; attempts < 64; attempts++ {
-		item, e := s.prepareNetwork(ctx, axis, group)
+		item, e := s.prepareExportRound(ctx, scope, group)
 		if e != nil || item == nil {
 			return nil, e
 		}
-		item.Bytes, e = s.conversionBytes(item.Conversion)
-		if e != nil {
-			if e = s.retryConversionBlob(ctx, item.Conversion); e != nil {
-				return nil, e
-			}
+		item.Bytes, e = readCandidate(ctx, item.Conversion)
+		if errors.Is(e, ErrConflict) {
 			continue
 		}
-		claimed, e := s.claimNetwork(ctx, axis, group, item)
+		if e != nil {
+			return nil, e
+		}
+		claimed, e := s.claimExportRound(ctx, item, group)
 		if e != nil {
 			return nil, e
 		}

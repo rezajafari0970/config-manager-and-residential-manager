@@ -94,7 +94,7 @@ func TestV49ReplaysOriginalNetworkReceiptsWithNoNewProofLifetime(t *testing.T) {
 	}
 }
 
-func TestV49ArchivedReviewBoundedAcrossExpiredLeasesAndSourceRefresh(t *testing.T) {
+func TestV56RetiresArchivedV49ReviewAcrossSourceRefresh(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	raw := sourceURI(940)
@@ -117,18 +117,19 @@ func TestV49ArchivedReviewBoundedAcrossExpiredLeasesAndSourceRefresh(t *testing.
 	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_work")
 	pendingCount(t, s.db, 0, "SELECT count(*) "+datacenterRejectedFrom)
 	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_export_eligible")
-	for i := 1; i <= 2; i++ {
-		job, e := s.ClaimEgress(ctx)
-		if e != nil || job == nil || job.Hash != j.Hash {
-			t.Fatal("lost archived review", i, e)
-		}
-		pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_network_review WHERE attempts=?", i)
-		if _, e = s.db.Exec("UPDATE egress_jobs SET lease_until=1 WHERE hash=?", job.Hash); e != nil {
-			t.Fatal(e)
-		}
-		if e = s.CompleteEgress(ctx, egress.Completion{Job: *job, Report: syntheticEgress(*job)}); e != ErrConflict {
-			t.Fatal("late review receipt", e)
-		}
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = migrateFreshResidential(tx); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if archived, err := s.ClaimEgress(ctx); err != nil || archived != nil {
+		t.Fatal("replayed archived review", err)
 	}
 	if err = s.Expire(ctx, time.Now()); err != nil {
 		t.Fatal(err)
@@ -186,4 +187,85 @@ func TestVerifiedResidentialMaintenanceResumesAfterExpeditedNetworkReview(t *tes
 	complete("healthy")
 	pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_network_review")
 	pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_export_eligible")
+}
+
+// A new veto for a formerly qualified route may recover with two real clean
+// completions. A second adverse receipt or two spent leases leaves it in DC.
+func TestResidentialHostingConfirmationHasFiniteCustody(t *testing.T) {
+	for _, outcome := range []string{"cleared", "confirmed", "crashed", "expired"} {
+		t.Run(outcome, func(t *testing.T) {
+			ctx := context.Background()
+			s := testStore(t)
+			raw := sourceURI(942)
+			newExportSource(t, s, "hosting-change", raw)
+			hash := egress.Hash([]byte(raw))
+			exec := func(q string, args ...any) {
+				t.Helper()
+				if _, err := s.db.Exec(q, args...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			claim := func() *egress.Job {
+				t.Helper()
+				exec("UPDATE egress_jobs SET next_run=0 WHERE hash=?", hash)
+				j, err := s.ClaimEgressLane(ctx, "followup")
+				if err != nil || j == nil || j.Hash != hash {
+					t.Fatal("missing scheduled grant", err)
+				}
+				return j
+			}
+			measure := func(hosting bool) {
+				t.Helper()
+				j := claim()
+				report := syntheticEgress(*j)
+				if hosting {
+					for i := range report.Samples {
+						sample := &report.Samples[i]
+						if sample.ActualAds {
+							sample.Network.Kind, sample.Network.Provider, sample.Network.ASN = "hosting", "vultr", 20473
+						}
+					}
+				}
+				if err := s.CompleteEgress(ctx, egress.Completion{Job: *j, Report: report}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			measure(false)
+			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_export_eligible")
+			measure(true)
+			pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_export_eligible")
+			pendingCount(t, s.db, 1, "SELECT count(*) "+datacenterRejectedFrom)
+			pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_hosting_confirmations WHERE through_attempt=4")
+			exec("UPDATE egress_jobs SET valid_until=?,next_run=?", egress.Now()+20000, egress.Now()+60000)
+			if j, err := s.ClaimEgressLane(ctx, "initial"); err != nil || j != nil {
+				t.Fatal("unpublished hold borrowed an early grant", err)
+			}
+			switch outcome {
+			case "cleared":
+				measure(false)
+				pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_network_results WHERE held=1 AND clean_rounds=1")
+				pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_export_eligible")
+				measure(false)
+				pendingCount(t, s.db, 1, "SELECT count(*) FROM egress_export_eligible")
+				pendingCount(t, s.db, 0, "SELECT count(*) "+datacenterRejectedFrom)
+				return
+			case "confirmed":
+				measure(true)
+			case "crashed":
+				for range 2 {
+					claim()
+					exec("UPDATE egress_jobs SET lease_until=1 WHERE hash=?", hash)
+				}
+			case "expired":
+				exec("UPDATE egress_hosting_confirmations SET expires=1")
+			}
+			newExportSource(t, s, "another-source", raw+"-cosmetic")
+			exec("UPDATE egress_jobs SET next_run=0")
+			if j, err := s.ClaimEgress(ctx); err != nil || j != nil {
+				t.Fatal("exhausted hold restarted on refetch", err)
+			}
+			pendingCount(t, s.db, 0, "SELECT count(*) FROM egress_export_eligible")
+			pendingCount(t, s.db, 1, "SELECT count(*) "+datacenterRejectedFrom)
+		})
+	}
 }
